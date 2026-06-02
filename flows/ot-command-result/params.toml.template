@@ -1,0 +1,4 @@
+# Prefix for the thin-edge command type that results are mirrored onto:
+# te/device/<device>///cmd/<command_prefix><verb_with_underscores>/<id>.
+# e.g. connector verb `set-config` -> command type `ot_set_config`.
+command_prefix = "ot_"

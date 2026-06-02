@@ -1,0 +1,2 @@
+# thin-edge entity type assigned to registered OT devices.
+device_type = "modbus-device"

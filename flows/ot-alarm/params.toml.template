@@ -1,0 +1,14 @@
+# Measurement series to monitor: payload[group][series].
+# Empty group -> taken from the m/<group> segment of the source topic (any protocol).
+group = ""
+series = "temp_u16"
+
+# Raise the alarm at or above `threshold`; clear only once the value drops below
+# (threshold - hysteresis). Hysteresis prevents rapid toggling near the limit.
+threshold = 70.0
+hysteresis = 5.0
+
+# Alarm metadata. `alarm_type` becomes the topic suffix: te/device/<device>///a/<alarm_type>.
+severity = "major"
+alarm_type = "ot_overrange"
+text = "OT value high"

@@ -1,0 +1,10 @@
+# ot-command-result: connector command result -> thin-edge command (any verb)
+input.mqtt.topics = ["te/+/+/ot/+/cmd/+/+"]
+
+[config]
+# Prefix for the thin-edge command type results are mirrored onto:
+# te/device/<device>///cmd/<command_prefix><verb_with_underscores>/<id>.
+command_prefix = "${params.command_prefix}"
+
+[[steps]]
+script = "main.js"

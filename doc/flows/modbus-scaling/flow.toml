@@ -1,0 +1,17 @@
+input.mqtt.topics = ["te/device/+/ot/+/sample/+"]
+
+[config]
+# Only samples for this point id are scaled by this flow instance.
+point        = "${params.point}"
+# Linear transform applied to the decoded value: (value * multiplier / divisor) + offset
+multiplier   = "${params.multiplier}"
+divisor      = "${params.divisor}"
+offset       = "${params.offset}"
+# Output measurement shaping.
+target_topic = "${params.target_topic}"
+group        = "${params.group}"
+series       = "${params.series}"
+unit         = "${params.unit}"
+
+[[steps]]
+script = "main.js"

@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thin-edge.io/ot-connector/command.schema.json",
+  "title": "OT Connector Command Message",
+  "description": "Request/result messages on te/device/<device>/ot/<protocol>/cmd/<verb>/<id> (retained). The 'init' state is set by the requester; the connector advances the state machine on the same topic.",
+  "type": "object",
+  "required": ["status"],
+  "properties": {
+    "status": { "enum": ["init", "executing", "successful", "failed"] },
+    "point": {
+      "type": "string",
+      "description": "Target point id. Required for the 'write' verb."
+    },
+    "value": {
+      "type": ["number", "boolean", "string"],
+      "description": "Logical value for a typed write."
+    },
+    "value_repr": { "enum": ["number", "boolean", "string"] },
+    "raw": {
+      "type": "string",
+      "description": "Hex bytes for a raw write, written verbatim."
+    },
+    "target": {
+      "type": "string",
+      "description": "Management 'set-config' verb: configuration section to patch ('connector', 'mqtt', 'connection', or 'device:<name>')."
+    },
+    "config": {
+      "type": "object",
+      "description": "Management 'set-config' verb: deep-merged patch applied to the selected target section."
+    },
+    "device": {
+      "description": "Management verbs: a device definition object (for 'define-device') or a device name string (for 'remove-device').",
+      "type": ["object", "string"]
+    },
+    "result": {
+      "description": "Optional verb-specific output on success.",
+      "type": ["object", "number", "boolean", "string", "array", "null"]
+    },
+    "reason": {
+      "type": "string",
+      "description": "Failure reason. Required when status=failed."
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "failed" } }, "required": ["status"] },
+      "then": { "required": ["reason"] }
+    }
+  ],
+  "examples": [
+    {
+      "status": "init",
+      "point": "setpoint",
+      "value": 21.5,
+      "value_repr": "number"
+    },
+    {
+      "status": "init",
+      "point": "run_command",
+      "raw": "0001"
+    },
+    { "status": "executing", "point": "setpoint" },
+    { "status": "successful", "point": "setpoint", "value": 21.5 },
+    {
+      "status": "failed",
+      "point": "setpoint",
+      "reason": "modbus exception: illegal data address"
+    },
+    {
+      "status": "init",
+      "target": "connector",
+      "config": { "poll_interval": "5s" }
+    },
+    {
+      "status": "init",
+      "device": {
+        "name": "plc-9",
+        "protocol_address": { "transport": "tcp", "host": "10.0.0.9", "port": 502, "unit_id": 1 },
+        "default_mode": "typed",
+        "point": [
+          { "id": "temp", "datatype": "float32", "address": { "table": "holding", "address": 7, "count": 2 } }
+        ]
+      }
+    },
+    { "status": "init", "device": "plc-9" }
+  ]
+}

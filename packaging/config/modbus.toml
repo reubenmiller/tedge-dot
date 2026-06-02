@@ -1,0 +1,36 @@
+# Default Modbus connector configuration installed by the package.
+#
+# No devices are configured out of the box, so the service starts and stays
+# active on a fresh install. Add `[[device]]` sections (see the project README
+# or config/modbus.toml in the source tree) and restart the service:
+#
+#   sudo systemctl restart tedge-dot
+
+[connector]
+protocol      = "modbus"
+service_name  = "tedge-modbus-plugin"
+poll_interval = "2s"
+log_level     = "info"
+
+[mqtt]
+host = "127.0.0.1"
+port = 1883
+
+# Shared RTU serial defaults (used when an RTU device omits them).
+[connection.serial]
+baudrate = 9600
+parity   = "N"
+stopbits = 2
+databits = 8
+
+# Add devices below, for example:
+#
+# [[device]]
+# name             = "plc-1"
+# protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id = 1 }
+#
+#   [[device.point]]
+#   id       = "boiler_temp"
+#   mode     = "typed"
+#   datatype = "float32"
+#   address  = { table = "holding", address = 7, count = 2 }

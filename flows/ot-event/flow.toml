@@ -1,0 +1,15 @@
+# ot-event: measurement -> thin-edge event (on value change)
+# Matches any measurement group (m/<group>); the monitored group is taken from the topic unless
+# overridden by params.group.
+input.mqtt.topics = ["te/+/+/+/+/m/+"]
+
+[config]
+# Series within the measurement to monitor: payload[group][series].
+group      = "${params.group}"
+series     = "${params.series}"
+# Event metadata. event_type becomes the topic suffix: te/device/<device>///e/<event_type>.
+event_type = "${params.event_type}"
+text       = "${params.text}"
+
+[[steps]]
+script = "main.js"

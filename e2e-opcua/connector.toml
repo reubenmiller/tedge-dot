@@ -1,0 +1,61 @@
+# OPC-UA connector configuration for the end-to-end test harness.
+#
+# Points map onto the nodes exposed by the asyncua simulator (see simulator/server.py),
+# addressed by stable string NodeIds under namespace index 2:
+#
+#   ns=2;s=Temperature   -> float64 21.5
+#   ns=2;s=Count         -> uint32  617001
+#   ns=2;s=Setpoint      -> int32   0      (read/write round-trip)
+#   ns=2;s=Running       -> bool    false  (read/write round-trip)
+#   ns=2;s=DoesNotExist  -> read returns a Bad status -> quality "bad"
+
+[connector]
+protocol      = "opcua"
+service_name  = "tedge-dot"
+poll_interval = "1s"
+log_level     = "info"
+
+[mqtt]
+host = "broker"
+port = 1883
+
+[connection]
+application_name = "tedge-dot"
+security_policy  = "None"
+security_mode    = "none"
+
+[[device]]
+name             = "opc1"
+protocol_address = { endpoint = "opc.tcp://simulator:4840/", security_policy = "None", security_mode = "none" }
+default_mode     = "typed"
+
+  [[device.point]]
+  id       = "temperature"
+  datatype = "float64"
+  unit     = "°C"
+  address  = { node_id = "ns=2;s=Temperature" }
+
+  [[device.point]]
+  id       = "count_u32"
+  datatype = "uint32"
+  address  = { node_id = "ns=2;s=Count" }
+
+  # Int32 used for the numeric write round-trip.
+  [[device.point]]
+  id       = "setpoint"
+  datatype = "int32"
+  access   = "read_write"
+  address  = { node_id = "ns=2;s=Setpoint" }
+
+  # Boolean used for the boolean write round-trip.
+  [[device.point]]
+  id       = "running"
+  datatype = "bool"
+  access   = "read_write"
+  address  = { node_id = "ns=2;s=Running" }
+
+  # Reading this node returns a Bad status -> quality "bad".
+  [[device.point]]
+  id       = "bad_point"
+  datatype = "uint16"
+  address  = { node_id = "ns=2;s=DoesNotExist" }

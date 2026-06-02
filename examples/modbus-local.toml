@@ -1,0 +1,76 @@
+# Modbus connector config for LOCAL exploration on your machine.
+#
+# Pairs with the pymodbus simulator started by `just sim-modbus`, which maps the
+# container's port 502 to host port 5020 (see e2e-modbus/docker-compose.yaml). Unlike the
+# e2e config this points at 127.0.0.1:5020 so the CLI can reach it directly.
+#
+# The points map onto the values seeded in images/simulator/modbus.json (shared
+# address space):
+#
+#   holding 3      -> uint16  17001
+#   holding 4..5   -> uint32  617001
+#   holding 6..7   -> float32 404.17
+#   coil    48     -> bool    false (initially)
+#   holding 1      -> flagged "invalid" -> read raises a Modbus exception (bad quality)
+#
+# Try it (after `just sim-modbus`):
+#   cargo run -- read  -c examples/modbus-local.toml -d plc1 -p temp_u16 -p level_f32 -p coil_rw
+#   cargo run -- write -c examples/modbus-local.toml -d plc1 -p coil_rw  --value true
+#   cargo run -- write -c examples/modbus-local.toml -d plc1 -p temp_u16 --value 1234
+#   cargo run -- read  -c examples/modbus-local.toml -d plc1 -p bad_point   # exits 1 (bad quality)
+
+[connector]
+protocol      = "modbus"
+service_name  = "tedge-dot"
+poll_interval = "1s"
+log_level     = "info"
+
+[mqtt]
+host = "127.0.0.1"
+# port = 1883
+port = 2883
+
+[[device]]
+name             = "plc1"
+protocol_address = { transport = "tcp", host = "127.0.0.1", port = 5020, unit_id = 1 }
+default_mode     = "typed"
+
+  # uint16 holding register (also used for the register write round-trip).
+  [[device.point]]
+  id       = "temp_u16"
+  datatype = "uint16"
+  access   = "read_write"
+  address  = { table = "holding", address = 3, count = 1 }
+
+  # Same register, but with a per-point linear transform applied by the connector:
+  # (17001 * 1 * 10^-3 / 1) + 0 = 17.001. Scaling is a property of the signal, not the flow.
+  [[device.point]]
+  id        = "temp_scaled"
+  datatype  = "uint16"
+  address   = { table = "holding", address = 3, count = 1 }
+  transform = { decimal_shift = -3 }
+
+  # uint32 across two registers.
+  [[device.point]]
+  id       = "count_u32"
+  datatype = "uint32"
+  address  = { table = "holding", address = 4, count = 2 }
+
+  # float32 across two registers.
+  [[device.point]]
+  id       = "level_f32"
+  datatype = "float32"
+  address  = { table = "holding", address = 6, count = 2 }
+
+  # Reading this address makes the simulator return an exception -> quality "bad".
+  [[device.point]]
+  id       = "bad_point"
+  datatype = "uint16"
+  address  = { table = "holding", address = 1, count = 1 }
+
+  # Coil used for the boolean write round-trip.
+  [[device.point]]
+  id       = "coil_rw"
+  datatype = "bool"
+  access   = "read_write"
+  address  = { table = "coil", address = 48, count = 1 }

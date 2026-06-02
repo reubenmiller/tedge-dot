@@ -1,0 +1,43 @@
+# Full Cumulocity end-to-end image: thin-edge.io demo base + the Rust OT connector,
+# its thin-edge flows, and the Cumulocity operation shims. This REPLACES the legacy Python
+# plugin: no Python Modbus code is installed here.
+#
+# Build context is the repository root. Run `just build` first to populate dist/ with the
+# cross-compiled .deb packages; Docker selects the correct arch via TARGETARCH automatically.
+FROM ghcr.io/thin-edge/tedge-demo-main-systemd:latest
+
+# --- Rust connector package (binary + systemd unit + default config) -----------------------
+# Copy both amd64 and arm64 debs; the shell selects the right one at install time via
+# `dpkg --print-architecture` (Docker COPY does not apply globs after variable substitution).
+RUN mkdir -p /opt/debs/
+COPY dist/*.deb /opt/debs/
+RUN arch=$(dpkg --print-architecture) \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends --allow-downgrades /opt/debs/tedge-dot_*_linux_${arch}.deb \
+    && rm -rf /tmp/debs \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- Connector configuration pointing at the simulator -------------------------------------
+COPY e2e-c8y/modbus.toml /etc/tedge/plugins/modbus/modbus.toml
+
+# --- thin-edge flows that map the generic OT envelopes to the thin-edge data model ----------
+COPY flows/ot-measurement     /etc/tedge/mappers/c8y/flows/ot-measurement
+COPY flows/ot-registration    /etc/tedge/mappers/c8y/flows/ot-registration
+COPY flows/ot-command-forward /etc/tedge/mappers/c8y/flows/ot-command-forward
+COPY flows/ot-command-result  /etc/tedge/mappers/c8y/flows/ot-command-result
+COPY flows/ot-alarm           /etc/tedge/mappers/c8y/flows/ot-alarm
+COPY flows/ot-event           /etc/tedge/mappers/c8y/flows/ot-event
+
+# Enable the c8y_ModbusDevice twin fragment on registration.
+COPY e2e-c8y/params/ot-registration.params.toml /etc/tedge/mappers/c8y/flows/ot-registration/params.toml
+
+# --- Cumulocity operation shims (deployed as tedge operation templates) ---------------------
+COPY operations/c8y_SetRegister          /etc/tedge/operations/c8y/c8y_SetRegister.template
+COPY operations/c8y_SetCoil              /etc/tedge/operations/c8y/c8y_SetCoil.template
+COPY operations/c8y_ModbusConfiguration  /etc/tedge/operations/c8y/c8y_ModbusConfiguration.template
+COPY operations/c8y_SerialConfiguration  /etc/tedge/operations/c8y/c8y_SerialConfiguration.template
+COPY operations/c8y_ModbusDevice         /etc/tedge/operations/c8y/c8y_ModbusDevice.template
+
+RUN chmod 0644 /etc/tedge/operations/c8y/c8y_*.template \
+    && chown -R tedge:tedge /etc/tedge/mappers /etc/tedge/operations/c8y \
+    && systemctl enable tedge-dot.service

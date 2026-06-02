@@ -1,0 +1,15 @@
+input.mqtt.topics = ["te/device/+/+/+/+/m/environment"]
+
+[config]
+# Series within the measurement to monitor (group.series).
+group        = "${params.group}"
+series       = "${params.series}"
+# Alarm threshold and hysteresis band (clears below threshold - hysteresis).
+threshold    = "${params.threshold}"
+hysteresis   = "${params.hysteresis}"
+severity     = "${params.severity}"
+alarm_type   = "${params.alarm_type}"
+text         = "${params.text}"
+
+[[steps]]
+script = "main.js"

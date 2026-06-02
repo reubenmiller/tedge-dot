@@ -1,0 +1,18 @@
+# Build and run the Rust connector for the e2e harness.
+# Build context is the tedge-dot/ project root (see docker-compose.yaml).
+
+FROM rust:1-bookworm AS build
+WORKDIR /src
+COPY . .
+RUN cargo build --release --bin tedge-dot
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends netcat-openbsd ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/target/release/tedge-dot /usr/bin/tedge-dot
+COPY e2e-modbus/connector.toml /etc/connector.toml
+COPY e2e-modbus/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENV RUST_LOG=info
+ENTRYPOINT ["/entrypoint.sh"]

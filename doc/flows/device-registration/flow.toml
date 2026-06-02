@@ -1,0 +1,8 @@
+input.mqtt.topics = ["te/device/+/ot/+/status/link"]
+
+[config]
+# thin-edge entity type assigned to registered OT devices.
+device_type = "${params.device_type}"
+
+[[steps]]
+script = "main.js"

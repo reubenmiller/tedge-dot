@@ -1,0 +1,30 @@
+# End-to-end harness for the Rust Modbus connector.
+#
+#   broker     - lightweight MQTT broker (no cloud)
+#   simulator  - the existing pymodbus simulator (a real Modbus TCP server)
+#   connector  - the Rust tedge-dot reading the simulator and publishing samples
+#
+# The Robot suite runs on the host and connects to the broker on localhost:1883.
+services:
+  broker:
+    image: eclipse-mosquitto:2
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    ports:
+      # Host port 11883 avoids clashing with a local tedge broker on 1883.
+      - "11883:1883"
+
+  simulator:
+    build:
+      context: ..
+      dockerfile: images/simulator/Dockerfile
+    ports:
+      - "5020:502"
+
+  connector:
+    build:
+      context: ..
+      dockerfile: e2e-modbus/Dockerfile.connector
+    depends_on:
+      - broker
+      - simulator

@@ -1,0 +1,29 @@
+[package]
+name = "tedge-dot"
+version = "0.1.0"
+edition = "2021"
+description = "thin-edge.io OT protocol connector binary (Modbus reference module)"
+license = "Apache-2.0"
+
+[workspace]
+members = ["crates/sdk", "crates/connector-modbus", "crates/connector-opcua"]
+
+[features]
+default = ["modbus", "opcua"]
+modbus = ["dep:connector-modbus"]
+opcua = ["dep:connector-opcua"]
+
+[dependencies]
+tedge-dot-sdk = { path = "crates/sdk" }
+connector-modbus = { path = "crates/connector-modbus", optional = true }
+connector-opcua = { path = "crates/connector-opcua", optional = true }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+toml = "0.8"
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"

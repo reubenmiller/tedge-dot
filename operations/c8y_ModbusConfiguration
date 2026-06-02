@@ -1,0 +1,14 @@
+# c8y_ModbusConfiguration -> generic `ot_set_config` command (poll interval).
+#
+# The legacy operation carried `transmitRate`/`pollingRate`. In the generic model the connector
+# only has a poll interval; `pollingRate` maps to `connector.poll_interval` (transmit batching is
+# now a flow concern, not a connector setting). The SDK runtime applies the patch, persists the
+# config, and live-reloads without a restart.
+[exec]
+  topic = "c8y/devicecontrol/notifications"
+  on_fragment = "c8y_ModbusConfiguration"
+
+[exec.workflow]
+operation = "ot_set_config"
+input.target = "connector"
+input.config.poll_interval = "${.payload.c8y_ModbusConfiguration.pollingRate}"

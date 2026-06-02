@@ -1,0 +1,18 @@
+# ot-alarm: measurement -> thin-edge alarm (with hysteresis)
+# Matches any measurement group (m/<group>); the monitored group is taken from the topic unless
+# overridden by params.group.
+input.mqtt.topics = ["te/+/+/+/+/m/+"]
+
+[config]
+# Series within the measurement to monitor: payload[group][series].
+group      = "${params.group}"
+series     = "${params.series}"
+# Raise at/above threshold; clear only below (threshold - hysteresis).
+threshold  = "${params.threshold}"
+hysteresis = "${params.hysteresis}"
+severity   = "${params.severity}"
+alarm_type = "${params.alarm_type}"
+text       = "${params.text}"
+
+[[steps]]
+script = "main.js"

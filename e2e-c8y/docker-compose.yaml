@@ -1,0 +1,25 @@
+# Full Cumulocity end-to-end stack for the Rust OT connector.
+#
+#   tedge      - thin-edge.io demo image + connector + flows + operation shims
+#   simulator  - the pymodbus Modbus TCP server (shared with the MQTT-only e2e)
+#
+# The tedge container registers with Cumulocity using C8Y_* env + DEVICE_ID, then runs the
+# c8y mapper, the connector service, and the deployed flows. The Robot suite drives Cumulocity.
+services:
+  tedge:
+    build:
+      context: ..
+      dockerfile: e2e-c8y/Dockerfile.tedge
+    privileged: true
+    environment:
+      - C8Y_BASEURL=${C8Y_BASEURL:-}
+      - C8Y_USER=${C8Y_USER:-}
+      - C8Y_PASSWORD=${C8Y_PASSWORD:-}
+      - DEVICE_ID=${DEVICE_ID:-}
+    depends_on:
+      - simulator
+
+  simulator:
+    build:
+      context: ..
+      dockerfile: images/simulator/Dockerfile

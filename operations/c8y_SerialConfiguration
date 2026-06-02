@@ -1,0 +1,15 @@
+# c8y_SerialConfiguration -> generic `ot_set_config` command (RTU serial defaults).
+#
+# Patches the shared `[connection.serial]` section. The deep-merge keeps any serial keys not named
+# in the operation. The SDK runtime persists and live-reloads the connector.
+[exec]
+  topic = "c8y/devicecontrol/notifications"
+  on_fragment = "c8y_SerialConfiguration"
+
+[exec.workflow]
+operation = "ot_set_config"
+input.target = "connection"
+input.config.serial.baudrate = "${.payload.c8y_SerialConfiguration.baudRate}"
+input.config.serial.stopbits = "${.payload.c8y_SerialConfiguration.stopBits}"
+input.config.serial.parity = "${.payload.c8y_SerialConfiguration.parity}"
+input.config.serial.databits = "${.payload.c8y_SerialConfiguration.dataBits}"

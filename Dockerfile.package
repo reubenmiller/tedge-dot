@@ -1,0 +1,43 @@
+# Pure-Docker package build: uses goreleaser to cross-compile and produce a .deb
+# without needing any host toolchain (no cargo, nfpm or zig on the host).
+#
+# Usage (via justfile):
+#   just test-data-docker amd64
+#
+# Or directly:
+#   docker build -f Dockerfile.package --target export --output ./out .
+#
+# The produced tedge-dot.deb is written to the --output directory.
+
+ARG PKG_ARCH=amd64
+
+# ---- Build and Package: goreleaser cross-compiles and packages ----------------------------
+FROM goreleaser/goreleaser:latest AS packager
+ARG PKG_ARCH
+ARG TARGETOS
+ARG TARGETARCH
+
+# Install Rust toolchain; goreleaser before hooks will install cargo-zigbuild and fetch deps
+RUN apk add --no-cache python3 py3-pip curl gcc musl-dev \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+    && pip3 install ziglang --break-system-packages
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /src
+COPY . .
+RUN wget https://github.com/mikefarah/yq/releases/download/v4.53.2/yq_${TARGETOS}_${TARGETARCH}.tar.gz -O - |\
+  tar xz && mv yq_${TARGETOS}_${TARGETARCH} /usr/local/bin/yq
+# Rewrite .goreleaser.yaml so only the single Linux target for PKG_ARCH is built,
+# avoiding unnecessary cross-compilation of macOS/Windows/other-arch targets.
+RUN case "${PKG_ARCH}" in \
+        amd64) RUST_TARGET="x86_64-unknown-linux-gnu" ;; \
+        arm64) RUST_TARGET="aarch64-unknown-linux-gnu" ;; \
+        *) echo "unsupported PKG_ARCH: ${PKG_ARCH}" >&2; exit 1 ;; \
+    esac \
+    && yq -i "$(printf '.builds[0].targets = ["%s"]' "${RUST_TARGET}")" .goreleaser.yaml \
+    && goreleaser release --snapshot --skip=publish,announce --clean
+
+# ---- Export stage: minimal image carrying just the .deb -----------------------------------
+FROM scratch AS export
+ARG PKG_ARCH
+COPY --from=packager /src/dist/*_linux_${PKG_ARCH}.deb /tedge-dot.deb

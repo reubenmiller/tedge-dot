@@ -1,0 +1,9 @@
+# Measurement series to monitor for changes: payload[group][series].
+# Empty group -> taken from the m/<group> segment of the source topic (any protocol).
+group = ""
+series = "value"
+
+# Event metadata. `event_type` becomes the topic suffix: te/device/<device>///e/<event_type>.
+# An event is raised every time the monitored value changes (mirrors the legacy eventmapping).
+event_type = "ot_event"
+text = "OT value changed"

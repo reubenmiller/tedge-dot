@@ -1,0 +1,32 @@
+# Restrict this flow instance to a single connector point id (matches sample.point).
+# Leave empty to map every point the flow receives into a measurement series.
+point = ""
+
+# Convert boolean (coil) samples into 1/0 measurements.
+include_boolean = "true"
+
+# Only publish when the scaled value differs from the previously emitted one (per point).
+# Reduces cloud traffic for slowly-changing values. "true" or "false".
+on_change = "false"
+
+# Batch every series of a device into a single measurement message, flushed every
+# combine_interval. Reduces the number of measurements created in the cloud. "true" or "false".
+combine = "false"
+combine_interval = "10s"
+
+# Output measurement shaping.
+#   target_topic - where to publish. Empty -> te/device/<device>///m/<group>
+#   group        - measurement group (the outer JSON key). Empty -> the sample's protocol
+#   series       - series name (inner JSON key). Empty -> the sample's point id
+# The engineering unit is a per-signal property declared on the connector point (point.unit) and
+# echoed in the sample, so it is applied automatically (series value becomes { value, unit }).
+target_topic = ""
+group = ""
+series = ""
+
+# Remap signals by point-id naming convention. When set, a point id containing this separator is
+# split once into "<group><sep><series>" (e.g. "." maps "Environment.Temperature" -> group
+# "Environment", series "Temperature"). Explicit group/series above still win. Empty = disabled,
+# so point ids that already contain dots are left untouched.
+point_separator = ""
+

@@ -1,0 +1,3 @@
+# Protocol segment on the connector command topic: te/device/<device>/ot/<protocol>/cmd/write/<id>.
+# Set this to the connector you are routing writes to (modbus, opcua, ...).
+protocol = "modbus"

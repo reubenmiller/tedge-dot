@@ -1,0 +1,61 @@
+# Modbus connector configuration for the end-to-end test harness.
+#
+# Points map onto the values baked into the pymodbus simulator
+# (see images/simulator/modbus.json). With "shared blocks": true the holding,
+# input and coil tables share one address space, so the holding-register
+# addresses below read the simulator's seeded values:
+#
+#   holding 3      -> uint16  17001
+#   holding 4..5   -> uint32  617001
+#   holding 6..7   -> float32 404.17
+#   coil    48     -> bool    false (initially)
+#   holding 1      -> flagged "invalid" -> read raises a Modbus exception
+#
+# Decode defaults are big-endian / big word-order, which matches the simulator.
+
+[connector]
+protocol      = "modbus"
+service_name  = "tedge-dot"
+poll_interval = "1s"
+log_level     = "info"
+
+[mqtt]
+host = "broker"
+port = 1883
+
+[[device]]
+name             = "plc1"
+protocol_address = { transport = "tcp", host = "simulator", port = 502, unit_id = 1 }
+default_mode     = "typed"
+
+  # uint16 holding register (also used for the register write round-trip).
+  [[device.point]]
+  id       = "temp_u16"
+  datatype = "uint16"
+  access   = "read_write"
+  address  = { table = "holding", address = 3, count = 1 }
+
+  # uint32 across two registers.
+  [[device.point]]
+  id       = "count_u32"
+  datatype = "uint32"
+  address  = { table = "holding", address = 4, count = 2 }
+
+  # float32 across two registers.
+  [[device.point]]
+  id       = "level_f32"
+  datatype = "float32"
+  address  = { table = "holding", address = 6, count = 2 }
+
+  # Reading this address makes the simulator return an exception -> quality "bad".
+  [[device.point]]
+  id       = "bad_point"
+  datatype = "uint16"
+  address  = { table = "holding", address = 1, count = 1 }
+
+  # Coil used for the boolean write round-trip.
+  [[device.point]]
+  id       = "coil_rw"
+  datatype = "bool"
+  access   = "read_write"
+  address  = { table = "coil", address = 48, count = 1 }

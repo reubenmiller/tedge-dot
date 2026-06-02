@@ -1,0 +1,145 @@
+asyncapi: 3.0.0
+info:
+  title: thin-edge.io OT Connector Contract
+  version: 0.1.0
+  description: >
+    MQTT interface exposed by a `tedge-dot` instance. A connector publishes
+    protocol-neutral "sample" envelopes for the points it reads, advertises its
+    capabilities and health, exposes per-device link status, and accepts commands
+    (primarily writes) via a retained request/result state machine. thin-edge.io flows
+    consume samples and transform them into the standard `te/device/<device>///m|e|a/...`
+    data model. See ot-connector-contract.md for the normative description.
+  license:
+    name: Apache-2.0
+
+defaultContentType: application/json
+
+servers:
+  local-broker:
+    host: '127.0.0.1:1883'
+    protocol: mqtt
+    description: The thin-edge.io local MQTT broker (mosquitto).
+
+channels:
+  sample:
+    address: 'te/device/{device}/ot/{protocol}/sample/{point}'
+    description: A single read result for a point. Not retained (time series).
+    parameters:
+      device: { description: thin-edge device entity id segment, e.g. plc-1 }
+      protocol: { description: protocol module id, e.g. modbus }
+      point: { description: point id as declared in configuration }
+    messages:
+      Sample:
+        $ref: '#/components/messages/Sample'
+
+  capabilities:
+    address: 'te/device/main/service/{service}/ot/capabilities'
+    description: Retained capability descriptor published on startup.
+    parameters:
+      service: { description: connector service name, default tedge-dot }
+    messages:
+      Capabilities:
+        $ref: '#/components/messages/Capabilities'
+
+  health:
+    address: 'te/device/main/service/{service}/status/health'
+    description: Retained connector service health, per the thin-edge service convention.
+    parameters:
+      service: { description: connector service name }
+    messages:
+      Health:
+        $ref: '#/components/messages/Health'
+
+  link:
+    address: 'te/device/{device}/ot/{protocol}/status/link'
+    description: Retained per-device link status.
+    parameters:
+      device: { description: thin-edge device entity id segment }
+      protocol: { description: protocol module id }
+    messages:
+      Link:
+        $ref: '#/components/messages/Link'
+
+  command:
+    address: 'te/device/{device}/ot/{protocol}/cmd/{verb}/{id}'
+    description: >
+      Retained command request/result topic. The requester publishes the 'init' message;
+      the connector advances the state machine (executing -> successful|failed) on the
+      same topic.
+    parameters:
+      device: { description: thin-edge device entity id segment }
+      protocol: { description: protocol module id }
+      verb: { description: command verb, e.g. write }
+      id: { description: unique command instance id }
+    messages:
+      Command:
+        $ref: '#/components/messages/Command'
+
+operations:
+  publishSample:
+    action: send
+    channel: { $ref: '#/channels/sample' }
+    summary: Connector publishes a read result.
+
+  receiveSample:
+    action: receive
+    channel: { $ref: '#/channels/sample' }
+    summary: Flows consume read results and transform them.
+
+  publishCapabilities:
+    action: send
+    channel: { $ref: '#/channels/capabilities' }
+    summary: Connector advertises what it supports.
+
+  publishHealth:
+    action: send
+    channel: { $ref: '#/channels/health' }
+    summary: Connector reports service health.
+
+  publishLink:
+    action: send
+    channel: { $ref: '#/channels/link' }
+    summary: Connector reports per-device link status.
+
+  requestCommand:
+    action: receive
+    channel: { $ref: '#/channels/command' }
+    summary: Connector receives a command 'init' request.
+
+  reportCommand:
+    action: send
+    channel: { $ref: '#/channels/command' }
+    summary: Connector reports command progress and result.
+
+components:
+  messages:
+    Sample:
+      name: Sample
+      title: Sample envelope
+      contentType: application/json
+      payload:
+        $ref: './schemas/sample.schema.json'
+    Capabilities:
+      name: Capabilities
+      title: Capability descriptor
+      contentType: application/json
+      payload:
+        $ref: './schemas/status.schema.json#/$defs/capabilities'
+    Health:
+      name: Health
+      title: Service health
+      contentType: application/json
+      payload:
+        $ref: './schemas/status.schema.json#/$defs/health'
+    Link:
+      name: Link
+      title: Device link status
+      contentType: application/json
+      payload:
+        $ref: './schemas/status.schema.json#/$defs/link'
+    Command:
+      name: Command
+      title: Command request/result
+      contentType: application/json
+      payload:
+        $ref: './schemas/command.schema.json'

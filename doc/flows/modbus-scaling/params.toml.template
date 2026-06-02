@@ -1,0 +1,16 @@
+# The connector point id this flow scales (matches sample.point).
+point = "boiler_temp_raw"
+
+# Linear transform applied to the decoded value: (value * multiplier / divisor) + offset.
+# Example: a raw value already in °C with no scaling needed.
+multiplier = 1
+divisor = 1
+offset = 0
+
+# Where to publish, and how to name the measurement: { <group>: { <series>: value } }.
+target_topic = "te/device/plc-1///m/environment"
+group = "environment"
+series = "temperature"
+
+# Optional engineering unit. When set, the series becomes { value, unit }.
+unit = "°C"

@@ -1,0 +1,19 @@
+# ot-command-forward: thin-edge command -> connector command (any generic `ot_<verb>`)
+#
+# Subscribe to each supported `ot_*` command type explicitly. The connector-side output topics
+# (cmd/write, cmd/set-config, ...) use the bare verb, so they never match these filters — this
+# keeps the forward direction free of the mapper's self-loop protection. Add a line here to
+# support a new verb.
+input.mqtt.topics = [
+  "te/+/+/+/+/cmd/ot_write/+",
+  "te/+/+/+/+/cmd/ot_set_config/+",
+  "te/+/+/+/+/cmd/ot_define_device/+",
+  "te/+/+/+/+/cmd/ot_remove_device/+",
+]
+
+[config]
+# Protocol segment used on the connector command topic (ot/<protocol>/cmd/<verb>).
+protocol = "${params.protocol}"
+
+[[steps]]
+script = "main.js"

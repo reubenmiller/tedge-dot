@@ -1,0 +1,30 @@
+# ot-measurement: connector sample -> thin-edge measurement
+input.mqtt.topics = ["te/+/+/ot/+/sample/+"]
+
+[config]
+# Restrict to a single point id. Empty = map every point this flow sees.
+point        = "${params.point}"
+# Convert boolean (coil) samples to 1/0 measurements. "true" or "false".
+include_boolean = "${params.include_boolean}"
+# Only emit when the scaled value changes since the last emitted reading. "true" or "false".
+on_change    = "${params.on_change}"
+# Batch every series of a device into one measurement, flushed on the step interval below.
+# "true" or "false".
+combine      = "${params.combine}"
+# Output measurement shaping. Empty target_topic/series derive sensible defaults from the
+# source topic and point id; empty group defaults to the sample's protocol (modbus, opcua, ...).
+target_topic = "${params.target_topic}"
+group        = "${params.group}"
+series       = "${params.series}"
+# Split a point id that contains this separator into "<group><sep><series>", e.g. "." maps the
+# point "Environment.Temperature" -> group "Environment", series "Temperature". This lets ONE
+# flow instance remap many signals purely by how their point ids are named. Empty = disabled.
+point_separator = "${params.point_separator}"
+# The engineering unit is a per-signal property declared on the connector point (point.unit) and
+# echoed in the sample, so it is applied automatically (series value becomes { value, unit }).
+
+[[steps]]
+script = "main.js"
+# Flush interval for `combine` batching. Ignored when combine = "false".
+interval = "${params.combine_interval}"
+

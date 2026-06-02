@@ -1,0 +1,15 @@
+# c8y_ModbusDevice -> generic `ot_define_device` command (add/replace a device + points).
+#
+# Combines the legacy `c8y_ModbusDevice` (transport/child device) with the point definitions the
+# legacy `c8y_Coils`/`c8y_Registers` operations used to stage. The operation payload must carry a
+# `device` object shaped like a `[[device]]` config entry (name, protocol_address, default_mode,
+# point[]). The SDK runtime inserts/replaces the device by name, persists, and live-reloads;
+# child-device registration in the cloud then happens via the ot-registration flow when the link
+# comes up.
+[exec]
+  topic = "c8y/devicecontrol/notifications"
+  on_fragment = "c8y_ModbusDevice"
+
+[exec.workflow]
+operation = "ot_define_device"
+input.device = "${.payload.c8y_ModbusDevice.device}"

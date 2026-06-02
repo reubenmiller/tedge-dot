@@ -1,0 +1,12 @@
+.env
+/target
+/results
+wordlist.txt
+/dist
+.venv/
+output/
+# Added by goreleaser init:
+dist/
+.intentionally-empty-file.o
+target/
+.DS_Store

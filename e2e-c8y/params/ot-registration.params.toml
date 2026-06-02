@@ -1,0 +1,7 @@
+# Registration flow params for the c8y e2e harness.
+# Registers OT devices as modbus child devices, advertises the ot_write command capability (so
+# c8y_SetRegister / c8y_SetCoil are routed), and publishes the connector's device descriptor as
+# the c8y_ModbusDevice digital-twin fragment (parity with the legacy plugin).
+device_type = "modbus-device"
+command_capabilities = "ot_write"
+twin_fragment = "c8y_ModbusDevice"

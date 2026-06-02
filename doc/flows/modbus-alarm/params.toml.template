@@ -1,0 +1,13 @@
+# Measurement series to monitor: payload[group][series].
+group = "environment"
+series = "temperature"
+
+# Raise the alarm at or above `threshold`; clear only once the value drops below
+# (threshold - hysteresis). Hysteresis prevents rapid toggling near the limit.
+threshold = 70.0
+hysteresis = 5.0
+
+# Alarm metadata. `alarm_type` becomes the topic suffix: te/device/<d>///a/<alarm_type>.
+severity = "major"
+alarm_type = "boiler_overheat"
+text = "Boiler temperature high"

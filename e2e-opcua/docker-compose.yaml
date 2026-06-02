@@ -1,0 +1,34 @@
+# End-to-end harness for the Rust OPC-UA connector.
+#
+#   broker     - lightweight MQTT broker (no cloud)
+#   simulator  - python-asyncua OPC-UA server (a real OPC-UA TCP server)
+#   connector  - the Rust tedge-dot (opcua module) reading the simulator
+#
+# The Robot suite runs on the host and connects to the broker on localhost:12883.
+services:
+  broker:
+    image: eclipse-mosquitto:2
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    ports:
+      # Host port 12883 avoids clashing with a local tedge broker (1883) and the
+      # modbus e2e harness (11883).
+      - "12883:1883"
+
+  simulator:
+    build:
+      context: ..
+      dockerfile: e2e-opcua/simulator/Dockerfile
+    environment:
+      # Advertise the docker service hostname so the client's endpoint matches.
+      OPCUA_ENDPOINT_HOST: simulator
+    ports:
+      - "4840:4840"
+
+  connector:
+    build:
+      context: ..
+      dockerfile: e2e-opcua/Dockerfile.connector
+    depends_on:
+      - broker
+      - simulator

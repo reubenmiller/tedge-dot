@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thin-edge.io/ot-connector/config.schema.json",
+  "title": "OT Connector Configuration",
+  "description": "TOML configuration for a tedge-dot instance, expressed as JSON Schema. Protocol-specific objects (connection, device.protocol_address, point.address) are validated by each connector's own schema.",
+  "type": "object",
+  "required": ["connector"],
+  "additionalProperties": false,
+  "properties": {
+    "connector": {
+      "type": "object",
+      "required": ["protocol"],
+      "additionalProperties": false,
+      "properties": {
+        "protocol": { "type": "string", "minLength": 1 },
+        "service_name": { "type": "string", "default": "tedge-dot" },
+        "poll_interval": { "$ref": "#/$defs/duration", "default": "2s" },
+        "log_level": { "enum": ["error", "warn", "info", "debug", "trace"], "default": "info" }
+      }
+    },
+    "mqtt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "host": { "type": "string", "default": "127.0.0.1" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 1883 }
+      }
+    },
+    "connection": {
+      "type": "object",
+      "description": "Protocol-specific shared connection defaults. Shape defined by the connector spec."
+    },
+    "device": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/device" }
+    }
+  },
+  "$defs": {
+    "duration": {
+      "type": "string",
+      "pattern": "^[0-9]+(ms|s|m|h)$",
+      "description": "Duration string, e.g. '500ms', '2s', '5m'."
+    },
+    "device": {
+      "type": "object",
+      "required": ["name", "protocol_address"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "protocol_address": {
+          "type": "object",
+          "description": "Protocol-specific device address. Shape defined by the connector spec."
+        },
+        "poll_interval": { "$ref": "#/$defs/duration" },
+        "default_mode": { "enum": ["raw", "typed"] },
+        "point": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/point" }
+        }
+      }
+    },
+    "point": {
+      "type": "object",
+      "required": ["id", "address"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "mode": { "enum": ["raw", "typed"] },
+        "datatype": {
+          "enum": [
+            "bool",
+            "int8", "uint8",
+            "int16", "uint16",
+            "int32", "uint32",
+            "int64", "uint64",
+            "float32", "float64",
+            "string", "bytes"
+          ]
+        },
+        "endianness": { "enum": ["big", "little"], "default": "big" },
+        "word_order": { "enum": ["big", "little"], "default": "big" },
+        "poll_interval": { "$ref": "#/$defs/duration" },
+        "access": { "enum": ["read", "write", "read_write"], "default": "read" },
+        "unit": { "type": "string" },
+        "address": {
+          "type": "object",
+          "description": "Protocol-specific point address. Shape defined by the connector spec."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "typed" } }, "required": ["mode"] },
+          "then": { "required": ["datatype"] }
+        }
+      ]
+    }
+  },
+  "examples": [
+    {
+      "connector": { "protocol": "modbus", "poll_interval": "2s", "log_level": "info" },
+      "mqtt": { "host": "127.0.0.1", "port": 1883 },
+      "connection": { "serial": { "baudrate": 9600, "parity": "N", "stopbits": 2, "databits": 8 } },
+      "device": [
+        {
+          "name": "plc-1",
+          "protocol_address": { "transport": "tcp", "host": "192.168.0.10", "port": 502, "unit_id": 1 },
+          "default_mode": "typed",
+          "point": [
+            {
+              "id": "boiler_temp_raw",
+              "mode": "typed",
+              "datatype": "float32",
+              "endianness": "big",
+              "word_order": "big",
+              "access": "read",
+              "address": { "table": "holding", "address": 7, "count": 2 }
+            },
+            {
+              "id": "run_command",
+              "mode": "raw",
+              "access": "read_write",
+              "address": { "table": "coil", "address": 0, "count": 1 }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

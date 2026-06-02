@@ -1,0 +1,12 @@
+# thin-edge.io entity type assigned to OT devices registered by this flow.
+# Empty -> derived from the connector protocol as "<protocol>-device" (e.g. modbus-device).
+device_type = ""
+
+# Comma-separated generic OT command capabilities advertised on each registered device, so the
+# cloud mapper routes the matching operations. `ot_write` backs c8y_SetRegister / c8y_SetCoil.
+command_capabilities = "ot_write"
+
+# Optional digital-twin fragment name. When set, the connector's device descriptor (transport and
+# address details from the link status `info`) is published as a retained twin fragment, e.g.
+# "c8y_ModbusDevice" makes it appear on the Cumulocity child device. Empty -> no twin published.
+twin_fragment = ""

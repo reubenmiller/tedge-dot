@@ -1,0 +1,90 @@
+# This is an example .goreleaser.yml file with some sensible defaults.
+# Make sure to check the documentation at https://goreleaser.com
+
+# The lines below are called `modelines`. See `:help modeline`
+# Feel free to remove those if you don't want/need to use them.
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+# vim: set ts=2 sw=2 tw=0 fo=cnqoj
+
+version: 2
+
+before:
+  hooks:
+    # if you don't do these things before calling goreleaser, it might be a
+    # good idea to do them here:
+    - rustup default stable
+    - cargo install --locked cargo-zigbuild
+    - cargo fetch --locked
+
+builds:
+  - builder: rust
+    flags:
+      - --release
+      - --package=tedge-dot
+    targets:
+      - x86_64-unknown-linux-gnu
+      - x86_64-apple-darwin
+      - x86_64-pc-windows-gnu
+      - aarch64-unknown-linux-gnu
+      - aarch64-apple-darwin
+
+archives:
+  - formats: [tar.gz]
+    # this name template makes the OS and Arch compatible with the results of `uname`.
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+    # use zip for windows archives
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+nfpms:
+  - id: linux
+    maintainer: thin-edge.io <info@thin-edge.io>
+    description: "thin-edge.io Driver for OT connectors"
+    homepage: "https://github.com/thin-edge/tedge-dot"
+    section: "default"
+    priority: "extra"
+    license: "Apache-2.0"
+    formats:
+      - deb
+      - rpm
+      - apk
+    scripts:
+      postinstall: packaging/scripts/postinstall.sh
+      preremove: packaging/scripts/preremove.sh
+      postremove: packaging/scripts/postremove.sh
+    contents:
+      # Example Modbus connector config
+      - src: packaging/config/modbus.toml
+        dst: /etc/tedge/plugins/modbus/modbus.toml
+        type: config|noreplace
+        file_info:
+          owner: tedge
+          group: tedge
+          mode: 0644
+
+      # SystemD Unit File
+      - src: packaging/tedge-dot.service
+        dst: /lib/systemd/system/tedge-dot.service
+        file_info:
+          mode: 0644
+          owner: root
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+release:
+  footer: >-
+
+    ---
+
+    Released by [GoReleaser](https://github.com/goreleaser/goreleaser).

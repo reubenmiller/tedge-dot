@@ -1,0 +1,15 @@
+# ot-registration: connector link status -> thin-edge child-device registration
+input.mqtt.topics = ["te/+/+/ot/+/status/link"]
+
+[config]
+# thin-edge entity type assigned to registered OT devices.
+device_type = "${params.device_type}"
+# Comma-separated generic OT command capabilities to advertise on each device (so the cloud mapper
+# routes the matching operations). Default ot_write backs c8y_SetRegister / c8y_SetCoil.
+command_capabilities = "${params.command_capabilities}"
+# Optional digital-twin fragment name. When set, the connector's device descriptor (from the link
+# status `info`) is published to te/device/<device>///twin/<twin_fragment>. Empty = no twin.
+twin_fragment = "${params.twin_fragment}"
+
+[[steps]]
+script = "main.js"

@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thin-edge.io/ot-connector/sample.schema.json",
+  "title": "OT Connector Sample Envelope",
+  "description": "A single read result published to te/device/<device>/ot/<protocol>/sample/<point>.",
+  "type": "object",
+  "required": ["ts", "device", "protocol", "point", "mode", "raw", "quality", "addr"],
+  "additionalProperties": false,
+  "properties": {
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Read completion time, RFC 3339, millisecond precision, UTC (Z)."
+    },
+    "device": { "type": "string", "minLength": 1 },
+    "protocol": { "type": "string", "minLength": 1 },
+    "point": { "type": "string", "minLength": 1 },
+    "mode": { "enum": ["raw", "typed"] },
+    "datatype": {
+      "enum": [
+        "bool",
+        "int8", "uint8",
+        "int16", "uint16",
+        "int32", "uint32",
+        "int64", "uint64",
+        "float32", "float64",
+        "string", "bytes"
+      ]
+    },
+    "value": {
+      "type": ["number", "boolean", "string"],
+      "description": "Decoded value in typed mode. Absent in raw mode and when quality=bad."
+    },
+    "value_repr": {
+      "enum": ["number", "boolean", "string"],
+      "description": "How a consumer should interpret 'value'. Required when 'value' is present."
+    },
+    "raw": {
+      "type": "string",
+      "description": "Hex of the bytes read, words space-separated in protocol-natural width."
+    },
+    "quality": { "enum": ["good", "bad", "stale"] },
+    "unit": { "type": "string" },
+    "addr": {
+      "type": "object",
+      "description": "Protocol-specific address echo. Shape defined by each connector spec."
+    },
+    "seq": { "type": "integer", "minimum": 0 },
+    "error": {
+      "type": "string",
+      "description": "Human-readable failure reason. Required when quality=bad."
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "mode": { "const": "typed" } } },
+      "then": { "required": ["datatype"] }
+    },
+    {
+      "if": { "properties": { "quality": { "const": "good" }, "mode": { "const": "typed" } } },
+      "then": { "required": ["value", "value_repr"] }
+    },
+    {
+      "if": { "properties": { "quality": { "const": "bad" } } },
+      "then": { "required": ["error"] }
+    },
+    {
+      "if": { "required": ["value"] },
+      "then": { "required": ["value_repr"] }
+    }
+  ],
+  "examples": [
+    {
+      "ts": "2026-05-30T10:00:00.000Z",
+      "device": "plc-1",
+      "protocol": "modbus",
+      "point": "boiler_temp_raw",
+      "mode": "typed",
+      "datatype": "float32",
+      "value": 42.5,
+      "value_repr": "number",
+      "raw": "422a 0000",
+      "quality": "good",
+      "unit": "raw",
+      "addr": { "table": "holding", "address": 7, "unit_id": 1 },
+      "seq": 12407
+    },
+    {
+      "ts": "2026-05-30T10:00:01.000Z",
+      "device": "plc-1",
+      "protocol": "modbus",
+      "point": "run_command",
+      "mode": "raw",
+      "raw": "0001",
+      "quality": "good",
+      "addr": { "table": "coil", "address": 0, "unit_id": 1 }
+    },
+    {
+      "ts": "2026-05-30T10:00:02.000Z",
+      "device": "plc-1",
+      "protocol": "modbus",
+      "point": "boiler_temp_raw",
+      "mode": "typed",
+      "datatype": "float32",
+      "raw": "",
+      "quality": "bad",
+      "error": "modbus exception: gateway target device failed to respond",
+      "addr": { "table": "holding", "address": 7, "unit_id": 1 }
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+[Unit]
+Description=thin-edge.io Driver for OT connectors
+After=network-online.target
+
+[Service]
+User=tedge
+Restart=always
+RestartSec=5
+ExecStart=/usr/bin/tedge-dot /etc/tedge/plugins/modbus/modbus.toml
+
+[Install]
+WantedBy=multi-user.target
