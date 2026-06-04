@@ -20,11 +20,20 @@ services:
       dockerfile: connectors/modbus/sim/Dockerfile
     ports:
       - "5020:502"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
   connector:
     build:
       context: ../..
       dockerfile: connectors/modbus/Dockerfile.connector
     depends_on:
-      - broker
-      - simulator
+      broker:
+        condition: service_started
+      simulator:
+        condition: service_healthy

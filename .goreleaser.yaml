@@ -60,7 +60,7 @@ nfpms:
       postremove: packaging/scripts/postremove.sh
     contents:
       # Example Modbus connector config
-      - src: packaging/config/modbus.toml
+      - src: connectors/modbus/packaging/modbus.toml
         dst: /etc/tedge/plugins/modbus/modbus.toml
         type: config|noreplace
         file_info:

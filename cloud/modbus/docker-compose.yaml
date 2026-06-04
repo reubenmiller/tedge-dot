@@ -17,9 +17,17 @@ services:
       - C8Y_PASSWORD=${C8Y_PASSWORD:-}
       - DEVICE_ID=${DEVICE_ID:-}
     depends_on:
-      - simulator
+      simulator:
+        condition: service_healthy
 
   simulator:
     build:
       context: ../..
       dockerfile: connectors/modbus/sim/Dockerfile
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
