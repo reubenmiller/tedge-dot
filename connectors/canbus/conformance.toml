@@ -1,0 +1,30 @@
+# Conformance manifest for the CAN bus connector.
+#
+# Declares what the connector claims to support so the conformance harness
+# can select the applicable Layer-2 decode vectors and Layer-3 behavioural
+# checks (B1–B10).
+#
+# See doc/conformance/conformance-suite.md for the full specification.
+
+[connector]
+protocol  = "canbus"
+modes     = ["raw", "typed"]
+datatypes = [
+  "bool",
+  "int8",  "uint8",
+  "int16", "uint16",
+  "int32", "uint32",
+  "int64", "uint64",
+  "float32", "float64",
+]
+verbs     = ["write"]
+# CAN is entirely push-based; there is no polling.
+features  = ["subscribe"]
+subscribe = true
+
+[simulator]
+# The e2e simulator uses Linux virtual CAN (vcan0) — no external hardware.
+kind  = "canbus-vcan"
+image = "connectors/canbus/sim"
+# The DBC file is the seed: it defines signal layout & expected decode values.
+seed  = "connectors/canbus/sim/test.dbc"

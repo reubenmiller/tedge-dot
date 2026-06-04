@@ -1,0 +1,45 @@
+# Connector configuration for the CANopen e2e test harness.
+#
+# The connector polls SDO objects on CANopen node 1 on vcan0 (virtual CAN, kernel loopback)
+# and publishes samples to the local broker at localhost:13883.
+#
+# Objects served by the simulator (simulator.py, node ID 1):
+#   0x2000:0x00  UNSIGNED16  analog_in    = 1234
+#   0x2001:0x00  INTEGER16   temperature  = -100
+#   0x2002:0x00  UNSIGNED8   digital_out  = 1  (writable)
+
+[connector]
+protocol     = "canopen"
+service_name = "tedge-dot"
+poll_interval = "1s"
+log_level    = "info"
+
+[mqtt]
+host = "localhost"
+port = 13883
+
+[connection]
+interface = "vcan0"
+
+[[device]]
+name             = "plc1"
+protocol_address = { node_id = 1 }
+default_mode     = "typed"
+
+  [[device.point]]
+  id       = "analog_in"
+  datatype = "uint16"
+  access   = "read"
+  address  = { index = 0x2000, subindex = 0 }
+
+  [[device.point]]
+  id       = "temperature"
+  datatype = "int16"
+  access   = "read"
+  address  = { index = 0x2001, subindex = 0 }
+
+  [[device.point]]
+  id       = "digital_out"
+  datatype = "uint8"
+  access   = "read_write"
+  address  = { index = 0x2002, subindex = 0 }

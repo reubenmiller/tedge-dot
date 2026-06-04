@@ -1,0 +1,34 @@
+# Default CAN bus connector configuration installed by the package.
+#
+# No devices are configured out of the box, so the service starts and stays
+# active on a fresh install.  Add [[device]] sections and restart the service:
+#
+#   sudo systemctl restart tedge-canbus-plugin
+#
+# Requirements:
+#   - Linux with SocketCAN support (kernel module: can, can_raw)
+#   - At least one CAN interface (e.g. can0, vcan0) configured and up
+#   - A DBC file describing the messages/signals on the bus
+
+[connector]
+protocol     = "canbus"
+service_name = "tedge-canbus-plugin"
+log_level    = "info"
+
+[mqtt]
+host = "127.0.0.1"
+port = 1883
+
+# Add devices below, for example:
+#
+# [[device]]
+# name             = "engine-ecu"
+# protocol_address = { interface = "can0", dbc_file = "/etc/tedge/can/vehicle.dbc" }
+# default_mode     = "typed"
+#
+#   [[device.point]]
+#   id       = "rpm"
+#   mode     = "typed"
+#   datatype = "uint16"
+#   access   = "read"
+#   address  = { message_name = "ENGINE_STATUS", signal_name = "RPM" }

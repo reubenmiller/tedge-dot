@@ -1,0 +1,30 @@
+[package]
+name = "connector-canbus"
+version = "0.1.0"
+edition = "2021"
+description = "CAN bus connector module for thin-edge.io OT connectors (Linux SocketCAN + DBC)"
+license = "Apache-2.0"
+
+[features]
+# Enable CAN FD support (frames up to 64 bytes).  Requires a kernel with CAN FD support.
+canbus-fd = []
+
+[dependencies]
+tedge-dot-sdk = { path = "../sdk" }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tracing = "0.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+can-dbc = "4"
+time = { version = "0.3", features = ["std"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+socketcan = { version = "3", features = ["tokio"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tedge-dot-sdk = { path = "../sdk" }
+toml = "0.8"
+tempfile = "3"

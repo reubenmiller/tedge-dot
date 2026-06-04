@@ -1,0 +1,24 @@
+# Conformance descriptor for the CANopen connector.
+# Used by the conformance test harness to validate connector capabilities.
+
+[connector]
+protocol  = "canopen"
+transport = "socketcan"
+
+[capabilities]
+modes     = ["raw", "typed"]
+datatypes = ["bool", "int8", "uint8", "int16", "uint16", "int32", "uint32",
+             "int64", "uint64", "float32", "float64", "string"]
+verbs     = ["write"]
+subscribe = false
+features  = ["management"]
+
+[simulator]
+name        = "canopen-vcan"
+description = "python-canopen SDO server on vcan0, node ID 1"
+node_id     = 1
+points = [
+  { id = "analog_in",   index = "0x2000", subindex = 0, datatype = "uint16", value = 1234 },
+  { id = "temperature", index = "0x2001", subindex = 0, datatype = "int16",  value = -100 },
+  { id = "digital_out", index = "0x2002", subindex = 0, datatype = "uint8",  value = 1, writable = true },
+]

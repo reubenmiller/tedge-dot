@@ -1,0 +1,39 @@
+# Default packaging configuration for the CANopen connector.
+# Install this file as /etc/tedge/plugins/ot/canopen.toml and customise for your device.
+
+[connector]
+protocol     = "canopen"
+service_name = "tedge-canopen-plugin"
+poll_interval = "2s"
+log_level    = "info"
+
+[mqtt]
+host = "127.0.0.1"
+port = 1883
+
+# Specify the SocketCAN interface that connects to your CANopen bus.
+[connection]
+interface = "can0"
+
+# Add one [[device]] block per CANopen node (device) on the bus.
+# protocol_address.node_id must be in the range 1–127.
+#
+# Example:
+#
+# [[device]]
+# name             = "drive1"
+# protocol_address = { node_id = 5 }
+# default_mode     = "typed"
+# poll_interval    = "1s"
+#
+#   [[device.point]]
+#   id       = "actual_velocity"
+#   datatype = "int32"
+#   access   = "read"
+#   address  = { index = 0x606C, subindex = 0 }   # CiA 402 velocity actual value
+#
+#   [[device.point]]
+#   id       = "control_word"
+#   datatype = "uint16"
+#   access   = "read_write"
+#   address  = { index = 0x6040, subindex = 0 }   # CiA 402 controlword

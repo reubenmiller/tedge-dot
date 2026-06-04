@@ -1,0 +1,13 @@
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_:
+
+BO_ 416 ENGINE_STATUS: 8 Vector__XXX
+ SG_ RPM : 0|16@1+ (1,0) [0|65535] "rpm" Vector__XXX
+ SG_ COOLANT_TEMP : 16|8@1- (1,0) [-128|127] "degC" Vector__XXX
+ SG_ BRAKE_ACTIVE : 24|1@1+ (1,0) [0|1] "" Vector__XXX
+

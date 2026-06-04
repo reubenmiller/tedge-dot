@@ -35,11 +35,12 @@ connectors/
 Each protocol's e2e stack exposes the broker on a unique host port to avoid
 clashing when multiple stacks run simultaneously:
 
-| Protocol | Host broker port | Simulator port |
-|----------|-----------------|---------------|
-| modbus   | 11883           | 5020 (TCP)    |
-| opcua    | 12883           | 4840 (TCP)    |
-| *(next)* | 13883           | *(protocol)*  |
+| Protocol | Host broker port | Simulator port         |
+|----------|-----------------|------------------------|
+| modbus   | 11883           | 5020 (TCP)             |
+| opcua    | 12883           | 4840 (TCP)             |
+| canbus   | 13883           | vcan0 (kernel virtual) |
+| *(next)* | 14883           | *(protocol)*           |
 
 Pick the next unused port in `docker-compose.yaml` when adding a new connector.
 

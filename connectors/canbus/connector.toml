@@ -1,0 +1,42 @@
+# Connector configuration for the CAN bus e2e test harness.
+#
+# The connector subscribes to CAN frames on vcan0 (virtual CAN, kernel loopback)
+# and publishes samples to the local broker at localhost:13883.
+#
+# Signals are seeded by the simulator (connectors/canbus/sim/simulator.py):
+#   ENGINE_STATUS (ID 416 / 0x1A0):
+#     RPM          u16 Intel bits  0-15   → 2500
+#     COOLANT_TEMP i8  Intel bits 16-23   → 85
+#     BRAKE_ACTIVE u1  Intel bit  24      → 1
+
+[connector]
+protocol     = "canbus"
+service_name = "tedge-dot"
+log_level    = "info"
+
+[mqtt]
+host = "localhost"
+port = 13883
+
+[[device]]
+name             = "engine"
+protocol_address = { interface = "vcan0", dbc_file = "/test.dbc" }
+default_mode     = "typed"
+
+  [[device.point]]
+  id       = "rpm"
+  datatype = "uint16"
+  access   = "read"
+  address  = { message_name = "ENGINE_STATUS", signal_name = "RPM" }
+
+  [[device.point]]
+  id       = "coolant_temp"
+  datatype = "int8"
+  access   = "read"
+  address  = { message_name = "ENGINE_STATUS", signal_name = "COOLANT_TEMP" }
+
+  [[device.point]]
+  id       = "brake_active"
+  datatype = "bool"
+  access   = "read_write"
+  address  = { message_name = "ENGINE_STATUS", signal_name = "BRAKE_ACTIVE" }

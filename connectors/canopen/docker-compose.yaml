@@ -1,0 +1,54 @@
+# End-to-end harness for the Rust CANopen connector.
+#
+#   broker     - lightweight MQTT broker (no cloud)
+#   simulator  - python-canopen SDO server node on vcan0 (node ID 1)
+#   connector  - Rust tedge-dot polling SDO objects and publishing samples
+#
+# Both simulator and connector use network_mode: host to share vcan0 with the host kernel.
+# The broker exposes port 13883 on the host.
+#
+# !! REQUIREMENTS !!
+#   - Linux host (or Linux VM) with CAN support:
+#       CONFIG_CAN=y or CONFIG_CAN=m
+#       CONFIG_CAN_VCAN=y or CONFIG_CAN_VCAN=m
+#   - Docker Engine with --privileged support
+#
+# On macOS Docker Desktop the LinuxKit VM kernel does NOT include CAN/vcan.
+# Run unit + integration tests instead:
+#   cargo test -p connector-canopen
+
+services:
+  broker:
+    image: eclipse-mosquitto:2
+    volumes:
+      - ../_shared/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    ports:
+      - "13883:1883"
+
+  simulator:
+    build:
+      context: ../..
+      dockerfile: connectors/canopen/sim/Dockerfile
+    network_mode: host
+    privileged: true
+    depends_on:
+      broker:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "ip", "link", "show", "vcan0"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
+
+  connector:
+    build:
+      context: ../..
+      dockerfile: connectors/canopen/Dockerfile.connector
+    network_mode: host
+    privileged: true
+    depends_on:
+      broker:
+        condition: service_started
+      simulator:
+        condition: service_healthy
