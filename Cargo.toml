@@ -6,7 +6,7 @@ description = "thin-edge.io OT protocol connector binary (Modbus reference modul
 license = "Apache-2.0"
 
 [workspace]
-members = ["crates/sdk", "crates/connector-modbus", "crates/connector-opcua", "crates/connector-canbus", "crates/connector-canopen"]
+members = ["crates/sdk", "crates/connector-modbus", "crates/connector-opcua", "crates/connector-canbus", "crates/connector-canopen", "crates/connector-profibus"]
 
 [features]
 default = ["modbus", "opcua", "canbus-fd"]
@@ -15,6 +15,7 @@ opcua = ["dep:connector-opcua"]
 canbus = ["dep:connector-canbus"]
 canbus-fd = ["canbus", "dep:connector-canbus", "connector-canbus/canbus-fd"]
 canopen = ["dep:connector-canopen"]
+profibus = ["dep:connector-profibus"]
 
 [dependencies]
 tedge-dot-sdk = { path = "crates/sdk" }
@@ -22,6 +23,7 @@ connector-modbus = { path = "crates/connector-modbus", optional = true }
 connector-opcua = { path = "crates/connector-opcua", optional = true }
 connector-canbus = { path = "crates/connector-canbus", optional = true }
 connector-canopen = { path = "crates/connector-canopen", optional = true }
+connector-profibus = { path = "crates/connector-profibus", optional = true }
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 toml = "0.8"

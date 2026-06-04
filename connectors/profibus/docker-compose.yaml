@@ -1,0 +1,24 @@
+# End-to-end harness for the PROFIBUS-DP connector.
+#
+#   broker     - lightweight MQTT broker (no cloud)
+#   connector  - combined container: Rust connector + Python DP-V0 slave simulator
+#                PTY devices are container-namespaced so both processes must share
+#                a single container (Dockerfile.e2e).
+#
+# The Robot suite runs on the host and connects to the broker on localhost:11884.
+services:
+  broker:
+    image: eclipse-mosquitto:2
+    volumes:
+      - ../_shared/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    ports:
+      # Use 11884 to avoid clashing with the modbus harness (11883).
+      - "11884:1883"
+
+  connector:
+    build:
+      context: ../..
+      dockerfile: connectors/profibus/Dockerfile.e2e
+    depends_on:
+      broker:
+        condition: service_started

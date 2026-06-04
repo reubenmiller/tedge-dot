@@ -1,0 +1,74 @@
+# PROFIBUS-DP connector configuration for the end-to-end test harness.
+#
+# This config targets the software slave simulator (connectors/profibus/sim/).
+# The simulator exposes two virtual serial ports via socat; the connector uses
+# /dev/ttyPROFIBUS0 (inside the container, mapped to the socat master pty).
+#
+# Peripheral layout (matches sim/slave_sim.py defaults):
+#   Inputs  (8 bytes): [DI0 byte, DI1 byte, AI0_hi, AI0_lo, AI1_hi, AI1_lo, rsvd, rsvd]
+#   Outputs (4 bytes): [DO0 byte, DO1 byte, AO0_hi, AO0_lo]
+#
+# The ident_number (0x0000) and empty config_bytes/param_bytes are acceptable
+# for the minimal slave simulator which doesn't enforce them.
+
+[connector]
+protocol      = "profibus"
+service_name  = "tedge-dot"
+poll_interval = "500ms"
+log_level     = "info"
+
+[mqtt]
+host = "broker"
+port = 1883
+
+[connection]
+port           = "/dev/ttyPROFIBUS0"
+baudrate       = 19200
+master_address = 2
+slot_bits      = 300
+
+[[device]]
+name             = "remote_io"
+protocol_address = { station_address = 7, ident_number = 0, input_bytes = 8, output_bytes = 4 }
+
+  # First digital input byte (bits 0–7 as a uint8 for easy range checks).
+  [[device.point]]
+  id       = "di_byte0"
+  datatype = "uint8"
+  access   = "read"
+  address  = { direction = "input", byte_offset = 0 }
+
+  # Individual digital input bit.
+  [[device.point]]
+  id       = "di_bit3"
+  datatype = "bool"
+  access   = "read"
+  address  = { direction = "input", byte_offset = 0, bit_offset = 3, bit_count = 1 }
+
+  # First analogue input as a big-endian uint16.
+  [[device.point]]
+  id       = "ai0_raw"
+  datatype = "uint16"
+  access   = "read"
+  address  = { direction = "input", byte_offset = 2 }
+
+  # Second analogue input.
+  [[device.point]]
+  id       = "ai1_raw"
+  datatype = "uint16"
+  access   = "read"
+  address  = { direction = "input", byte_offset = 4 }
+
+  # Digital output byte — write access, used for the write round-trip test.
+  [[device.point]]
+  id       = "do_byte0"
+  datatype = "uint8"
+  access   = "read_write"
+  address  = { direction = "output", byte_offset = 0 }
+
+  # First analogue output channel (uint16 big-endian).
+  [[device.point]]
+  id       = "ao0_raw"
+  datatype = "uint16"
+  access   = "write"
+  address  = { direction = "output", byte_offset = 2 }

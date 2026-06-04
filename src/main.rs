@@ -386,6 +386,8 @@ fn build_connector(protocol: &str) -> Result<Box<dyn Connector>, String> {
         "canbus" => Ok(connector_canbus::factory()),
         #[cfg(feature = "canopen")]
         "canopen" => Ok(connector_canopen::factory()),
+        #[cfg(feature = "profibus")]
+        "profibus" => Ok(connector_profibus::factory()),
         other => Err(format!(
             "protocol '{other}' is not compiled in (enable its cargo feature)"
         )),
