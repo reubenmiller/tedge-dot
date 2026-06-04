@@ -9,22 +9,22 @@ services:
   broker:
     image: eclipse-mosquitto:2
     volumes:
-      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ../_shared/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
     ports:
       # Host port 11883 avoids clashing with a local tedge broker on 1883.
       - "11883:1883"
 
   simulator:
     build:
-      context: ..
-      dockerfile: images/simulator/Dockerfile
+      context: ../..
+      dockerfile: connectors/modbus/sim/Dockerfile
     ports:
       - "5020:502"
 
   connector:
     build:
-      context: ..
-      dockerfile: e2e-modbus/Dockerfile.connector
+      context: ../..
+      dockerfile: connectors/modbus/Dockerfile.connector
     depends_on:
       - broker
       - simulator

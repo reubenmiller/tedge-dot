@@ -21,60 +21,42 @@ test-flows:
 
 # --- Local exploration -------------------------------------------------------
 # Spin up a single simulator and poke it with the CLI (no MQTT broker / cloud).
-# See examples/README.md for the full quickstart.
+# See examples/README.md and connectors/README.md for the full quickstart.
 
-# Start the Modbus simulator in Docker on host port 5020 (pairs with examples/modbus-local.toml).
-sim-modbus:
-    docker compose -f e2e-modbus/docker-compose.yaml up -d --build simulator
-    @echo "Modbus simulator listening on 127.0.0.1:5020"
-    @echo "Try: cargo run -- read -c examples/modbus-local.toml -d plc1 -p temp_u16 -p level_f32 -p coil_rw"
+# Start the protocol simulator in Docker (pairs with examples/<proto>-local.toml).
+# Usage: just sim modbus   just sim opcua
+sim proto:
+    docker compose -f connectors/{{proto}}/docker-compose.yaml up -d --build simulator
+    @echo "{{proto}} simulator ready — see examples/{{proto}}-local.toml for usage"
 
-# Stop the Modbus simulator container.
-sim-modbus-down:
-    docker compose -f e2e-modbus/docker-compose.yaml rm -sf simulator
+# Stop the protocol simulator container.
+sim-down proto:
+    docker compose -f connectors/{{proto}}/docker-compose.yaml rm -sf simulator
 
-# Start the OPC-UA simulator in Docker on host port 4840 (pairs with examples/opcua-local.toml).
-sim-opcua:
-    docker compose -f e2e-opcua/docker-compose.yaml up -d --build simulator
-    @echo "OPC-UA simulator listening on opc.tcp://127.0.0.1:4840/"
-    @echo "Try: cargo run -- read -c examples/opcua-local.toml -d opc1 -p temperature -p count_u32 --json"
-
-# Stop the OPC-UA simulator container.
-sim-opcua-down:
-    docker compose -f e2e-opcua/docker-compose.yaml rm -sf simulator
-
-# Run the MQTT end-to-end suite against a real Modbus simulator (Docker stack up/down).
-test-e2e-modbus *args="":
+# Run the MQTT end-to-end suite for a protocol (Docker stack up → robot → down).
+# Usage: just test-e2e modbus   just test-e2e opcua
+test-e2e proto *args="":
     #!/usr/bin/env bash
-    set -euxo pipefail
-    docker compose -f e2e-modbus/docker-compose.yaml up -d --build
-    [ -d e2e-modbus/.venv ] || python3 -m venv e2e-modbus/.venv
-    ./e2e-modbus/.venv/bin/pip install -q -r e2e-modbus/requirements.txt
+    set -euo pipefail
+    docker compose -f connectors/{{proto}}/docker-compose.yaml up -d --build
+    [ -d connectors/{{proto}}/.venv ] || python3 -m venv connectors/{{proto}}/.venv
+    connectors/{{proto}}/.venv/bin/pip install -q -r connectors/_shared/requirements.txt
+    [ -f connectors/{{proto}}/requirements.txt ] && \
+        connectors/{{proto}}/.venv/bin/pip install -q -r connectors/{{proto}}/requirements.txt || true
     rc=0
-    ./e2e-modbus/.venv/bin/python -m robot --outputdir e2e-modbus/output {{args}} e2e-modbus/tests/modbus_e2e.robot || rc=$?
-    docker compose -f e2e-modbus/docker-compose.yaml down -v
+    connectors/{{proto}}/.venv/bin/python -m robot \
+        --outputdir connectors/{{proto}}/output {{args}} \
+        connectors/{{proto}}/tests/ || rc=$?
+    docker compose -f connectors/{{proto}}/docker-compose.yaml down -v
     exit $rc
 
 # Bring the e2e stack up without running tests (for manual inspection).
-e2e-modbus-up:
-    docker compose -f e2e-modbus/docker-compose.yaml up -d --build
+e2e-up proto:
+    docker compose -f connectors/{{proto}}/docker-compose.yaml up -d --build
 
 # Tear the e2e stack down.
-e2e-modbus-down:
-    docker compose -f e2e-modbus/docker-compose.yaml down -v
-
-# Run the MQTT end-to-end suite against a real OPC-UA simulator (python-asyncua).
-# Proves the connector contract is protocol-neutral: same envelopes, NodeId addressing.
-test-e2e-opcua *args="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    docker compose -f e2e-opcua/docker-compose.yaml up -d --build
-    [ -d e2e-opcua/.venv ] || python3 -m venv e2e-opcua/.venv
-    ./e2e-opcua/.venv/bin/pip install -q -r e2e-opcua/requirements.txt
-    rc=0
-    ./e2e-opcua/.venv/bin/python -m robot --outputdir e2e-opcua/output {{args}} e2e-opcua/tests/opcua_e2e.robot || rc=$?
-    docker compose -f e2e-opcua/docker-compose.yaml down -v
-    exit $rc
+e2e-down proto:
+    docker compose -f connectors/{{proto}}/docker-compose.yaml down -v
 
 
 # Cross-compile + build all packages
@@ -97,40 +79,42 @@ shell *args='bash':
 # Full Cumulocity end-to-end for the Rust OT connector: build the connector .deb + tedge image,
 # bring up the stack (tedge + simulator), bootstrap to Cumulocity, then run the Robot suite.
 # Requires C8Y_BASEURL / C8Y_USER / C8Y_PASSWORD / DEVICE_ID (and an active C8Y_TENANT) in the env.
-E2E_C8Y_COMPOSE := "e2e-c8y/docker-compose.yaml"
-test-e2e-c8y *args="":
+# Full Cumulocity end-to-end for a protocol: build the connector .deb + tedge image,
+# bring up the stack, bootstrap to Cumulocity, then run the Robot suite.
+# Requires C8Y_BASEURL / C8Y_USER / C8Y_PASSWORD / DEVICE_ID in the env.
+# Usage: just test-cloud modbus
+test-cloud proto *args="":
     #!/usr/bin/env bash
     set -euo pipefail
-    # just build
-    docker compose -f {{E2E_C8Y_COMPOSE}} up -d --build
+    docker compose -f cloud/{{proto}}/docker-compose.yaml up -d --build
     echo "Bootstrapping device ${DEVICE_ID} to Cumulocity"
-    docker compose -f {{E2E_C8Y_COMPOSE}} exec -T \
+    docker compose -f cloud/{{proto}}/docker-compose.yaml exec -T \
         --env "DEVICE_ID=${DEVICE_ID}" --env "C8Y_BASEURL=${C8Y_BASEURL}" \
         --env "C8Y_USER=${C8Y_USER}" --env "C8Y_PASSWORD=${C8Y_PASSWORD}" \
         tedge bootstrap.sh
-    [ -d e2e-c8y/.venv ] || python3 -m venv e2e-c8y/.venv
-    ./e2e-c8y/.venv/bin/pip install -q -r e2e-c8y/requirements.txt
+    [ -d cloud/{{proto}}/.venv ] || python3 -m venv cloud/{{proto}}/.venv
+    ./cloud/{{proto}}/.venv/bin/pip install -q -r cloud/{{proto}}/requirements.txt
     rc=0
-    ./e2e-c8y/.venv/bin/python -m robot \
-        --outputdir e2e-c8y/output {{args}} \
-        e2e-c8y/tests/modbus_c8y.robot || rc=$?
-    docker compose -f {{E2E_C8Y_COMPOSE}} down -v
+    ./cloud/{{proto}}/.venv/bin/python -m robot \
+        --outputdir cloud/{{proto}}/output {{args}} \
+        cloud/{{proto}}/tests/ || rc=$?
+    docker compose -f cloud/{{proto}}/docker-compose.yaml down -v
     exit $rc
 
-# Bring the c8y e2e stack up (build + bootstrap) without running tests, for manual inspection.
-e2e-c8y-up:
+# Bring the cloud e2e stack up (build + bootstrap) without running tests, for manual inspection.
+cloud-up proto:
     #!/usr/bin/env bash
     set -euo pipefail
     just build
-    docker compose -f {{E2E_C8Y_COMPOSE}} up -d --build
-    docker compose -f {{E2E_C8Y_COMPOSE}} exec -T \
+    docker compose -f cloud/{{proto}}/docker-compose.yaml up -d --build
+    docker compose -f cloud/{{proto}}/docker-compose.yaml exec -T \
         --env "DEVICE_ID=${DEVICE_ID}" --env "C8Y_BASEURL=${C8Y_BASEURL}" \
         --env "C8Y_USER=${C8Y_USER}" --env "C8Y_PASSWORD=${C8Y_PASSWORD}" \
         tedge bootstrap.sh
 
-# Tear down the c8y e2e stack.
-e2e-c8y-down:
-    docker compose -f {{E2E_C8Y_COMPOSE}} down -v
+# Tear down the cloud e2e stack.
+cloud-down proto:
+    docker compose -f cloud/{{proto}}/docker-compose.yaml down -v
 
 # Clean up
 cleanup DEVICE_ID $CI="true":

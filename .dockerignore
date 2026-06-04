@@ -1,5 +1,7 @@
 # Build artifacts and local-only files that must not go into the Docker build context.
 target/
 # dist/
-e2e-modbus/.venv/
-e2e-modbus/output/
+connectors/*/.venv/
+connectors/*/output/
+cloud/*/.venv/
+cloud/*/output/

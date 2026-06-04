@@ -1,0 +1,2 @@
+# OPC-UA-specific test dependencies (extends connectors/_shared/requirements.txt).
+asyncua~=1.1

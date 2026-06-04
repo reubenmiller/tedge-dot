@@ -87,6 +87,96 @@ A numbered list an agent can follow end-to-end.
 
 ---
 
+## 10. Testing & simulation directory layout
+
+Every connector ships with a complete, self-contained e2e harness under
+`connectors/<protocol>/`. When you fill in this spec, also create these files:
+
+```
+connectors/<protocol>/
+  sim/                          # simulator image
+    Dockerfile                  # builds the simulator container
+    <server-code>               # e.g. server.py or a pre-built binary
+  tests/
+    <protocol>_e2e.robot        # Robot Framework suite (see §11)
+  packaging/
+    <protocol>.toml             # default installed config (no devices, correct service_name)
+  docker-compose.yaml           # 3 services: broker, simulator, connector
+  Dockerfile.connector          # builds the Rust connector binary from project root
+  connector.toml                # connector config baked into the container
+  entrypoint.sh                 # waits for deps, then execs tedge-dot
+  requirements.txt              # protocol-specific Python deps (omit if none needed)
+```
+
+Shared across all connectors (do **not** duplicate these):
+
+```
+connectors/_shared/
+  MqttClient.py                 # Robot keyword library — import via ../../_shared/MqttClient.py
+  mosquitto.conf                # identical broker config for every stack
+  requirements.txt              # base deps: robotframework, paho-mqtt
+```
+
+### Broker port assignment
+
+Pick the next unused host port from the table in
+[connectors/README.md](../../connectors/README.md) and add a row for your protocol.
+Port clashes make simultaneous multi-protocol runs fail silently.
+
+---
+
+## 11. Justfile integration
+
+The `just` recipes in the project root are **protocol-neutral**. They derive
+the Docker compose file path, venv location, and test directory from the
+protocol name you pass:
+
+```sh
+just sim <protocol>            # start only the simulator
+just sim-down <protocol>       # stop it
+just e2e-up <protocol>         # bring the full stack up
+just e2e-down <protocol>       # tear it down
+just test-e2e <protocol>       # up → robot → down (CI entry-point)
+```
+
+**No justfile changes are required** when adding a new protocol. The only
+preconditions are:
+
+1. `connectors/<protocol>/docker-compose.yaml` exists and defines `broker`,
+   `simulator`, and `connector` services.
+2. `connectors/<protocol>/tests/` contains at least one `.robot` file.
+3. The broker uses a unique host port (see §10).
+
+`test-e2e` installs `connectors/_shared/requirements.txt` first, then
+`connectors/<protocol>/requirements.txt` if present (use this for
+protocol-specific Python deps such as `asyncua`).
+
+---
+
+## 12. New protocol checklist
+
+Use this list to track progress when implementing a new connector. Cross-reference
+each item with the corresponding section of this spec.
+
+- [ ] **Rust crate** — `crates/connector-<protocol>/` created, `Connector`
+  trait implemented (§5, §6, §7), feature flag added in root `Cargo.toml`.
+- [ ] **Spec** — this template filled out and saved as
+  `doc/connectors/<protocol>-connector-spec.md`.
+- [ ] **Simulator** — `connectors/<protocol>/sim/` created with a working
+  `Dockerfile` (§10).
+- [ ] **Docker stack** — `docker-compose.yaml`, `Dockerfile.connector`,
+  `connector.toml`, `entrypoint.sh` created with correct paths and a
+  unique broker port (§10, §11).
+- [ ] **Tests** — `connectors/<protocol>/tests/<protocol>_e2e.robot` covers
+  capabilities descriptor, health, link status, at least one typed read, a bad
+  read, and a write round-trip (§8).
+- [ ] **Packaging config** — `connectors/<protocol>/packaging/<protocol>.toml`
+  created with `protocol`, `service_name`, and sensible defaults (§10).
+- [ ] **`just test-e2e <protocol>`** passes locally.
+- [ ] **Port table** in `connectors/README.md` updated.
+
+---
+
 # Capability sketches for upcoming protocols
 
 These are **not** full specs — they are starting notes to show the contract generalizes and to

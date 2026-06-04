@@ -1,0 +1,28 @@
+# Default OPC-UA connector configuration installed by the package.
+#
+# No devices are configured out of the box, so the service starts and stays
+# active on a fresh install. Add `[[device]]` sections and restart the service:
+#
+#   sudo systemctl restart tedge-dot
+
+[connector]
+protocol      = "opcua"
+service_name  = "tedge-opcua-plugin"
+poll_interval = "2s"
+log_level     = "info"
+
+[mqtt]
+host = "127.0.0.1"
+port = 1883
+
+[connection]
+application_name = "tedge-dot"
+security_policy  = "None"
+security_mode    = "None"
+connect_timeout_s = 10
+
+# Add devices below, for example:
+#
+# [[device]]
+# name             = "opc-server-1"
+# protocol_address = { endpoint = "opc.tcp://127.0.0.1:4840/", security_policy = "None", security_mode = "None" }

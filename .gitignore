@@ -10,3 +10,9 @@ dist/
 .intentionally-empty-file.o
 target/
 .DS_Store
+connectors/*/.venv/
+connectors/*/output/
+cloud/*/.venv/
+cloud/*/output/
+__pycache__/
+*.pyc

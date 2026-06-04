@@ -1,3 +1,0 @@
-robotframework~=7.0.0
-robotframework-c8y @ git+https://github.com/reubenmiller/robotframework-c8y.git@0.42.1
-robotframework-debuglibrary~=2.5.0

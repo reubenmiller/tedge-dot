@@ -9,7 +9,7 @@ services:
   broker:
     image: eclipse-mosquitto:2
     volumes:
-      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ../_shared/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
     ports:
       # Host port 12883 avoids clashing with a local tedge broker (1883) and the
       # modbus e2e harness (11883).
@@ -17,8 +17,8 @@ services:
 
   simulator:
     build:
-      context: ..
-      dockerfile: e2e-opcua/simulator/Dockerfile
+      context: ../..
+      dockerfile: connectors/opcua/sim/Dockerfile
     environment:
       # Advertise the docker service hostname so the client's endpoint matches.
       OPCUA_ENDPOINT_HOST: simulator
@@ -27,8 +27,8 @@ services:
 
   connector:
     build:
-      context: ..
-      dockerfile: e2e-opcua/Dockerfile.connector
+      context: ../..
+      dockerfile: connectors/opcua/Dockerfile.connector
     depends_on:
       - broker
       - simulator

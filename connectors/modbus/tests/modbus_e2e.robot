@@ -6,7 +6,7 @@ Documentation       End-to-end tests for the Rust tedge-dot against a real Modbu
 ...
 ...                 Run via:  just test-e2e   (brings the Docker stack up/down automatically)
 
-Library             MqttClient.py
+Library             ../../_shared/MqttClient.py
 Library             Collections
 
 Suite Setup         Connect And Subscribe
