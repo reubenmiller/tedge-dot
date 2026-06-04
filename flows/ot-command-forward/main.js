@@ -7,7 +7,9 @@
 // Protocol-neutral and verb-neutral: a generic `ot_<verb>` command type drives any connector;
 // the target protocol is selected by params.protocol (modbus, opcua, ...). The thin-edge command
 // type maps to a connector verb by dropping the `ot_` prefix and turning `_` into `-`:
-//   ot_write         -> write          (point write; covers c8y_SetCoil / c8y_SetRegister)
+//   ot_write         -> write          (point write; c8y_SetRegister)
+//   ot_write_coil    -> write-coil     (coil write; c8y_SetCoil — alias for `write` in the connector,
+//                                       kept separate to work around the one-operation-per-command-type limit)
 //   ot_set_config    -> set-config     (covers c8y_ModbusConfiguration / c8y_SerialConfiguration)
 //   ot_define_device -> define-device  (covers c8y_ModbusDevice / c8y_Coils / c8y_Registers)
 //   ot_remove_device -> remove-device

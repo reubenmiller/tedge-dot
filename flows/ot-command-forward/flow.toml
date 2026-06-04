@@ -6,6 +6,7 @@
 # support a new verb.
 input.mqtt.topics = [
   "te/+/+/+/+/cmd/ot_write/+",
+  "te/+/+/+/+/cmd/ot_write_coil/+",
   "te/+/+/+/+/cmd/ot_set_config/+",
   "te/+/+/+/+/cmd/ot_define_device/+",
   "te/+/+/+/+/cmd/ot_remove_device/+",

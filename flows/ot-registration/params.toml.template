@@ -3,8 +3,9 @@
 device_type = ""
 
 # Comma-separated generic OT command capabilities advertised on each registered device, so the
-# cloud mapper routes the matching operations. `ot_write` backs c8y_SetRegister / c8y_SetCoil.
-command_capabilities = "ot_write"
+# cloud mapper routes the matching operations. `ot_write` backs c8y_SetRegister;
+# `ot_write_coil` backs c8y_SetCoil (kept separate due to the one-operation-per-command-type limit).
+command_capabilities = "ot_write,ot_write_coil"
 
 # Optional digital-twin fragment name. When set, the connector's device descriptor (transport and
 # address details from the link status `info`) is published as a retained twin fragment, e.g.

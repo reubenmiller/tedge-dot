@@ -19,7 +19,7 @@ cloud operation completes.
 | Legacy operation | Shim file | Generic command | Verb | Handled by |
 | --- | --- | --- | --- | --- |
 | `c8y_SetRegister` | [`c8y_SetRegister`](c8y_SetRegister) | `ot_write` | `write` | protocol module |
-| `c8y_SetCoil` | [`c8y_SetCoil`](c8y_SetCoil) | `ot_write` | `write` | protocol module |
+| `c8y_SetCoil` | [`c8y_SetCoil`](c8y_SetCoil) | `ot_write_coil` | `write-coil` | protocol module |
 | `c8y_ModbusConfiguration` | [`c8y_ModbusConfiguration`](c8y_ModbusConfiguration) | `ot_set_config` | `set-config` | SDK runtime |
 | `c8y_SerialConfiguration` | [`c8y_SerialConfiguration`](c8y_SerialConfiguration) | `ot_set_config` | `set-config` | SDK runtime |
 | `c8y_ModbusDevice` (+ `c8y_Coils`/`c8y_Registers`) | [`c8y_ModbusDevice`](c8y_ModbusDevice) | `ot_define_device` | `define-device` | SDK runtime |

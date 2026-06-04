@@ -153,7 +153,7 @@ operation completes.
 | Legacy operation (Python) | Generic command (verb) | Implemented by |
 | --- | --- | --- |
 | `c8y_SetRegister` | `ot_write` (`write`) | protocol module — typed/raw point write |
-| `c8y_SetCoil` | `ot_write` (`write`) | protocol module — coil write |
+| `c8y_SetCoil` | `ot_write_coil` (`write-coil`) | protocol module — coil write (alias for `write`; separate command type required by thin-edge.io) |
 | `c8y_ModbusConfiguration` (poll rate) | `ot_set_config` (`set-config`) | SDK runtime — patches `connector.poll_interval` |
 | `c8y_SerialConfiguration` | `ot_set_config` (`set-config`) | SDK runtime — patches `connection.serial.*` |
 | `c8y_ModbusDevice` (+ `c8y_Coils`/`c8y_Registers`) | `ot_define_device` (`define-device`) | SDK runtime — adds device + points; child registration via the [registration flow](../flows/) |

@@ -133,7 +133,7 @@ impl Connector for ModbusConnector {
                 "holding_register".into(),
                 "input_register".into(),
             ],
-            command_verbs: vec!["write".into()],
+            command_verbs: vec!["write".into(), "write-coil".into()],
             features: vec!["polling".into(), "bitfield".into()],
             subscribe: false,
         }
@@ -228,7 +228,9 @@ impl Connector for ModbusConnector {
         verb: &str,
         request: &CommandRequest,
     ) -> Result<CommandResult, ConnectorError> {
-        if verb != "write" {
+        // "write-coil" is an alias for "write" used by c8y_SetCoil to work around the
+        // thin-edge.io limitation that two cloud operations cannot share the same command type.
+        if verb != "write" && verb != "write-coil" {
             return Err(ConnectorError::Unsupported(verb.to_string()));
         }
         let model = self

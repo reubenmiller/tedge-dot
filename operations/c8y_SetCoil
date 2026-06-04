@@ -1,12 +1,15 @@
-# c8y_SetCoil -> generic `ot_write` command (write a coil point).
+# c8y_SetCoil -> generic `ot_write_coil` command (write a coil point).
 #
-# Names the target coil point and the boolean value. `ot-command-forward` bridges the resulting
-# `ot_write` command to the connector's `write` verb; the connector writes the bool to the coil.
+# Uses a distinct command type from c8y_SetRegister's `ot_write` to work around the thin-edge.io
+# limitation that two cloud operations cannot share the same workflow command name. The
+# `ot-command-forward` flow handles both `ot_write` and `ot_write_coil`; the generic stripping
+# logic maps `ot_write_coil` to the connector verb `write-coil`, which the connector accepts as an
+# alias for `write`. Will be mergeable back to `ot_write` once the limitation is lifted.
 [exec]
   topic = "c8y/devicecontrol/notifications"
   on_fragment = "c8y_SetCoil"
 
 [exec.workflow]
-operation = "ot_write"
+operation = "ot_write_coil"
 input.point = "${.payload.c8y_SetCoil.point}"
 input.value = "${.payload.c8y_SetCoil.value}"

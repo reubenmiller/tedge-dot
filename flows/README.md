@@ -39,7 +39,8 @@ into `-`. The verbs cover the legacy Cumulocity operations (see the
 
 | thin-edge command | connector verb | replaces (legacy operation) |
 | --- | --- | --- |
-| `ot_write` | `write` | `c8y_SetCoil`, `c8y_SetRegister` |
+| `ot_write` | `write` | `c8y_SetRegister` |
+| `ot_write_coil` | `write-coil` | `c8y_SetCoil` |
 | `ot_set_config` | `set-config` | `c8y_ModbusConfiguration`, `c8y_SerialConfiguration` |
 | `ot_define_device` | `define-device` | `c8y_ModbusDevice`, `c8y_Coils`, `c8y_Registers` |
 | `ot_remove_device` | `remove-device` | — |
