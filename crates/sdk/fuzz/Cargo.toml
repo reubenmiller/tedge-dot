@@ -1,0 +1,48 @@
+[package]
+name = "tedge-dot-sdk-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Standalone: fuzzing builds with cargo-fuzz (nightly), outside the main workspace.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+toml = "0.8"
+serde_json = "1"
+time = "0.3"
+tedge-dot-sdk = { path = ".." }
+
+[[bin]]
+name = "decode_primitive"
+path = "fuzz_targets/decode_primitive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_toml"
+path = "fuzz_targets/config_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sample_envelope"
+path = "fuzz_targets/sample_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transform"
+path = "fuzz_targets/transform.rs"
+test = false
+doc = false
+bench = false

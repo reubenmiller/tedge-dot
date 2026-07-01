@@ -28,7 +28,173 @@ use tedge_dot_sdk::{
 };
 use time::OffsetDateTime;
 
+#[cfg(target_os = "linux")]
+use tedge_dot_sdk::{decode_primitive, encode_primitive, Endianness, WordOrder};
+#[cfg(target_os = "linux")]
+use tracing::{info, warn};
+
 const PROTOCOL: &str = "canopen";
+
+// ─── Bus actor (Linux) ───────────────────────────────────────────────────────
+//
+// Two constraints force zencan usage behind an actor thread:
+//  - `open_socketcan` returns sender/receiver types living in a private zencan module, so
+//    `BusManager<SocketCanSender>` cannot be named as a struct field;
+//  - zencan's SDO futures hold a `std::sync::MutexGuard` across awaits, so they are not
+//    `Send` and cannot live inside the connector's (`Send`) async methods.
+// A dedicated thread with a current-thread runtime owns the `BusManager`; the connector
+// talks to it through channels, and `BusHandle` is plain `Send + Sync` state.
+#[cfg(target_os = "linux")]
+mod linux_bus {
+    use tokio::sync::{mpsc, oneshot};
+
+    enum BusRequest {
+        NmtStartAll {
+            done: oneshot::Sender<()>,
+        },
+        /// Probe a node by reading the identity object (0x1018:0).
+        Probe {
+            node: u8,
+            resp: oneshot::Sender<Result<(), String>>,
+        },
+        Upload {
+            node: u8,
+            index: u16,
+            sub: u8,
+            resp: oneshot::Sender<Result<Vec<u8>, String>>,
+        },
+        Download {
+            node: u8,
+            index: u16,
+            sub: u8,
+            data: Vec<u8>,
+            resp: oneshot::Sender<Result<(), String>>,
+        },
+    }
+
+    pub(crate) struct BusHandle {
+        tx: mpsc::UnboundedSender<BusRequest>,
+    }
+
+    const BUS_GONE: &str = "CAN bus task stopped";
+
+    impl BusHandle {
+        /// Open the SocketCAN interface on a dedicated bus thread. The socket must be created
+        /// inside that thread's runtime (it registers with the local reactor).
+        pub fn open(iface: &str) -> Result<Self, String> {
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+            let (tx, mut rx) = mpsc::unbounded_channel::<BusRequest>();
+            let iface = iface.to_string();
+            std::thread::Builder::new()
+                .name("canopen-bus".into())
+                .spawn(move || {
+                    let rt = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(rt) => rt,
+                        Err(e) => {
+                            let _ = ready_tx.send(Err(format!("bus runtime: {e}")));
+                            return;
+                        }
+                    };
+                    rt.block_on(async move {
+                        let mut bus = match zencan_client::open_socketcan(&iface) {
+                            Ok((tx_s, rx_s)) => {
+                                let _ = ready_tx.send(Ok(()));
+                                zencan_client::BusManager::new(tx_s, rx_s)
+                            }
+                            Err(e) => {
+                                let _ = ready_tx.send(Err(format!("open SocketCAN {iface}: {e}")));
+                                return;
+                            }
+                        };
+                        // Exits when every BusHandle clone is dropped (disconnect/shutdown).
+                        while let Some(req) = rx.recv().await {
+                            match req {
+                                BusRequest::NmtStartAll { done } => {
+                                    bus.nmt_start(0).await;
+                                    let _ = done.send(());
+                                }
+                                BusRequest::Probe { node, resp } => {
+                                    let mut sdo = bus.sdo_client(node);
+                                    let result = sdo
+                                        .read_u8(0x1018, 0)
+                                        .await
+                                        .map(|_| ())
+                                        .map_err(|e| e.to_string());
+                                    let _ = resp.send(result);
+                                }
+                                BusRequest::Upload { node, index, sub, resp } => {
+                                    let mut sdo = bus.sdo_client(node);
+                                    let result =
+                                        sdo.upload(index, sub).await.map_err(|e| e.to_string());
+                                    let _ = resp.send(result);
+                                }
+                                BusRequest::Download { node, index, sub, data, resp } => {
+                                    let mut sdo = bus.sdo_client(node);
+                                    let result = sdo
+                                        .download(index, sub, &data)
+                                        .await
+                                        .map_err(|e| e.to_string());
+                                    let _ = resp.send(result);
+                                }
+                            }
+                        }
+                    });
+                })
+                .map_err(|e| format!("spawn bus thread: {e}"))?;
+            match ready_rx.recv() {
+                Ok(Ok(())) => Ok(BusHandle { tx }),
+                Ok(Err(e)) => Err(e),
+                Err(_) => Err(BUS_GONE.into()),
+            }
+        }
+
+        pub async fn nmt_start_all(&self) {
+            let (done, wait) = oneshot::channel();
+            if self.tx.send(BusRequest::NmtStartAll { done }).is_ok() {
+                let _ = wait.await;
+            }
+        }
+
+        pub async fn probe(&self, node: u8) -> Result<(), String> {
+            let (resp, wait) = oneshot::channel();
+            self.tx
+                .send(BusRequest::Probe { node, resp })
+                .map_err(|_| BUS_GONE.to_string())?;
+            wait.await.map_err(|_| BUS_GONE.to_string())?
+        }
+
+        pub async fn sdo_upload(&self, node: u8, index: u16, sub: u8) -> Result<Vec<u8>, String> {
+            let (resp, wait) = oneshot::channel();
+            self.tx
+                .send(BusRequest::Upload { node, index, sub, resp })
+                .map_err(|_| BUS_GONE.to_string())?;
+            wait.await.map_err(|_| BUS_GONE.to_string())?
+        }
+
+        pub async fn sdo_download(
+            &self,
+            node: u8,
+            index: u16,
+            sub: u8,
+            data: &[u8],
+        ) -> Result<(), String> {
+            let (resp, wait) = oneshot::channel();
+            self.tx
+                .send(BusRequest::Download {
+                    node,
+                    index,
+                    sub,
+                    data: data.to_vec(),
+                    resp,
+                })
+                .map_err(|_| BUS_GONE.to_string())?;
+            wait.await.map_err(|_| BUS_GONE.to_string())?
+        }
+    }
+}
 
 // ─── Internal model ──────────────────────────────────────────────────────────
 
@@ -54,7 +220,7 @@ pub struct CanopenConnector {
     interface: Option<String>,
     devices: HashMap<DeviceId, DeviceModel>,
     #[cfg(target_os = "linux")]
-    bus: Option<zencan_client::BusManager<zencan_client::common::SocketCanSender>>,
+    bus: Option<linux_bus::BusHandle>,
 }
 
 pub fn factory() -> Box<dyn Connector> {
@@ -196,14 +362,10 @@ impl CanopenConnector {
             .as_deref()
             .ok_or_else(|| ConnectorError::Transport("not configured".into()))?;
 
-        let (tx, rx) = zencan_client::common::open_socketcan(iface).map_err(|e| {
-            ConnectorError::Transport(format!("open SocketCAN {iface}: {e}"))
-        })?;
-
-        let mut bus = zencan_client::BusManager::new(tx, rx);
+        let bus = linux_bus::BusHandle::open(iface).map_err(ConnectorError::Transport)?;
 
         // Broadcast NMT Start (node 0 = all nodes) to bring nodes into Operational state.
-        bus.nmt_start(0).await;
+        bus.nmt_start_all().await;
 
         // Give nodes a moment to start up before probing.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -217,8 +379,7 @@ impl CanopenConnector {
         let mut reports = Vec::new();
         for (name, node_id) in device_names {
             // Probe: try to read the identity object (0x1018:0 = number of sub-entries).
-            let mut sdo = bus.sdo_client(node_id);
-            match sdo.read_u8(0x1018, 0).await {
+            match bus.probe(node_id).await {
                 Ok(_) => {
                     info!("CANopen node {node_id} on {iface} responded (device {name})");
                     reports.push(LinkReport {
@@ -285,13 +446,12 @@ impl CanopenConnector {
                 "subindex": pt.od.subindex,
             });
 
-            let mut sdo = bus.sdo_client(node_id);
-            let raw_bytes = match sdo.upload(pt.od.index, pt.od.subindex).await {
+            let raw_bytes = match bus.sdo_upload(node_id, pt.od.index, pt.od.subindex).await {
                 Ok(b) => b,
                 Err(e) => {
                     warn!("SDO upload {device}/{} 0x{:04X}:{:02X} failed: {e}",
                         pr.id, pt.od.index, pt.od.subindex);
-                    samples.push(make_bad_sample(device, &pr.id, &e.to_string(), ts, addr));
+                    samples.push(make_bad_sample(device, &pr.id, &e, ts, addr));
                     continue;
                 }
             };
@@ -402,8 +562,7 @@ impl CanopenConnector {
             ));
         };
 
-        let mut sdo = bus.sdo_client(node_id);
-        sdo.download(pt.od.index, pt.od.subindex, &bytes)
+        bus.sdo_download(node_id, pt.od.index, pt.od.subindex, &bytes)
             .await
             .map_err(|e| ConnectorError::Transport(format!("SDO download failed: {e}")))?;
 

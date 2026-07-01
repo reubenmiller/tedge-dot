@@ -15,9 +15,51 @@ test *args="":
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
 
+# Run the SDK property-based tests only (proptest; part of `just test` too).
+test-properties:
+    cargo test -p tedge-dot-sdk --test properties
+
+# Compile-check the Linux-only code paths (SocketCAN connectors are cfg-gated and silently
+# skipped by a macOS `cargo build`). profibus is excluded: its serial dependency has a native
+# build script that needs Linux headers — it is covered by the Docker e2e build instead.
+check-linux target=TARGET:
+    cargo check -p connector-canbus -p connector-canopen --target {{target}}
+
+# Fuzz one SDK target (decode_primitive, config_toml, transform, sample_envelope).
+# Requires: rustup nightly + `cargo install cargo-fuzz`.
+# Usage: just fuzz decode_primitive 60
+fuzz target="decode_primitive" seconds="60":
+    cd crates/sdk && cargo +nightly fuzz run {{target}} -- -max_total_time={{seconds}}
+
+# Fuzz every SDK target briefly (CI smoke; ~2 min total).
+fuzz-all seconds="30":
+    cd crates/sdk && for t in decode_primitive config_toml transform sample_envelope; do \
+        cargo +nightly fuzz run $t -- -max_total_time={{seconds}} || exit 1; done
+
 # Validate the thin-edge flows offline with `tedge flows test` (no broker/device/cloud).
 test-flows:
     ./flows/test-flows.sh
+
+# --- All-in-one demo ---------------------------------------------------------
+# Start every OT simulator (modbus, opcua, canbus, canopen, profibus) from one
+# compose file. Pairs with the connectors installed from the tedge-dot package
+# and run by the single tedge-dot.service. See demo/README.md.
+
+# Bring up all simulators (build + start).
+demo-sims-up:
+    docker compose -f docker-compose.simulators.yaml up -d --build
+    @echo "All OT simulators are up. Install the tedge-dot package and start tedge-dot.service to run the connectors."
+
+# Tear down all simulators.
+demo-sims-down:
+    docker compose -f docker-compose.simulators.yaml down -v
+
+# Show simulator status / logs.
+demo-sims-status:
+    docker compose -f docker-compose.simulators.yaml ps
+
+demo-sims-logs *args="":
+    docker compose -f docker-compose.simulators.yaml logs -f {{args}}
 
 # --- Local exploration -------------------------------------------------------
 # Spin up a single simulator and poke it with the CLI (no MQTT broker / cloud).
@@ -38,7 +80,10 @@ sim-down proto:
 test-e2e proto *args="":
     #!/usr/bin/env bash
     set -euo pipefail
-    docker compose -f connectors/{{proto}}/docker-compose.yaml up -d --build
+    # build and up are split: `up -d --build` can hang after "resolving provenance"
+    # with a docker-container buildx builder (observed with compose 2.x + colima).
+    docker compose -f connectors/{{proto}}/docker-compose.yaml build
+    docker compose -f connectors/{{proto}}/docker-compose.yaml up -d
     [ -d connectors/{{proto}}/.venv ] || python3 -m venv connectors/{{proto}}/.venv
     connectors/{{proto}}/.venv/bin/pip install -q -r connectors/_shared/requirements.txt
     [ -f connectors/{{proto}}/requirements.txt ] && \
@@ -52,7 +97,8 @@ test-e2e proto *args="":
 
 # Bring the e2e stack up without running tests (for manual inspection).
 e2e-up proto:
-    docker compose -f connectors/{{proto}}/docker-compose.yaml up -d --build
+    docker compose -f connectors/{{proto}}/docker-compose.yaml build
+    docker compose -f connectors/{{proto}}/docker-compose.yaml up -d
 
 # Tear the e2e stack down.
 e2e-down proto:

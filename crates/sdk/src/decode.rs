@@ -168,7 +168,7 @@ pub fn encode_primitive(
         DataType::Int32 => (number(value, datatype)? as i64 as i32).to_be_bytes().to_vec(),
         DataType::Uint32 => (number(value, datatype)? as i64 as u32).to_be_bytes().to_vec(),
         DataType::Int64 => int_from_value(value)?.to_be_bytes().to_vec(),
-        DataType::Uint64 => (int_from_value(value)? as u64).to_be_bytes().to_vec(),
+        DataType::Uint64 => uint_from_value(value)?.to_be_bytes().to_vec(),
         DataType::Float32 => (number(value, datatype)? as f32).to_be_bytes().to_vec(),
         DataType::Float64 => number(value, datatype)?.to_be_bytes().to_vec(),
         DataType::String => {
@@ -195,6 +195,16 @@ fn int_from_value(value: &Value) -> Result<i64, DecodeError> {
     match value {
         Value::Number(n) => Ok(*n as i64),
         Value::Text(t) => t.parse::<i64>().map_err(|_| DecodeError::InvalidValue(DataType::Int64)),
+        Value::Bool(b) => Ok(if *b { 1 } else { 0 }),
+    }
+}
+
+/// Like [`int_from_value`] but for `uint64`, whose upper half exceeds `i64` — decoded values
+/// above the JS safe range arrive as text and must round-trip through `u64`.
+fn uint_from_value(value: &Value) -> Result<u64, DecodeError> {
+    match value {
+        Value::Number(n) => Ok(*n as u64),
+        Value::Text(t) => t.parse::<u64>().map_err(|_| DecodeError::InvalidValue(DataType::Uint64)),
         Value::Bool(b) => Ok(if *b { 1 } else { 0 }),
     }
 }
@@ -330,5 +340,13 @@ mod tests {
         let b = (u64::MAX).to_be_bytes().to_vec();
         let v = decode_primitive(&b, DataType::Uint64, Endianness::Big, WordOrder::Big).unwrap();
         assert_eq!(v, Value::Text(u64::MAX.to_string()));
+    }
+
+    #[test]
+    fn uint64_above_i64_max_round_trips() {
+        let b = (u64::MAX).to_be_bytes().to_vec();
+        let v = decode_primitive(&b, DataType::Uint64, Endianness::Big, WordOrder::Big).unwrap();
+        let re = encode_primitive(&v, DataType::Uint64, Endianness::Big, WordOrder::Big).unwrap();
+        assert_eq!(re, b);
     }
 }

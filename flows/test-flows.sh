@@ -24,6 +24,24 @@ check() {
   fi
 }
 
+# check_absent <name> <flows-dir> <stdin> <must-be-present> <must-be-absent>
+# Asserts suppression: the output contains the first substring but NOT the second.
+check_absent() {
+  local name="$1" dir="$2" input="$3" present="$4" absent="$5"
+  local out
+  out="$(printf '%s\n' "$input" | tedge flows test --flows-dir "$dir" 2>/dev/null)"
+  if [[ "$out" == *"$present"* && "$out" != *"$absent"* ]]; then
+    echo "ok   - $name"
+    pass=$((pass + 1))
+  else
+    echo "FAIL - $name"
+    echo "       expected to contain: $present"
+    echo "       and NOT contain:     $absent"
+    echo "       got:                 $out"
+    fail=$((fail + 1))
+  fi
+}
+
 # check_empty <name> <flows-dir> <stdin>
 check_empty() {
   local name="$1" dir="$2" input="$3"
@@ -117,6 +135,42 @@ check_params "measurement: on_change suppresses unchanged" ot-measurement \
   'on_change = "true"' \
   "$(printf '[te/device/plc1/ot/modbus/sample/temp_u16] %s\n[te/device/plc1/ot/modbus/sample/temp_u16] %s' "$SINT" "$SINT")" \
   '"temp_u16":17001'
+
+# --- ot-measurement per-signal meta (sample.meta overrides the flow params per point) ---
+# The connector runtime echoes the point's `meta` table in every sample envelope; the flow
+# applies it without any per-signal flow configuration.
+
+# meta.on_change: identical value twice -> second suppressed (flow-wide on_change stays off).
+MC1='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"m1","mode":"typed","datatype":"uint16","value":42,"value_repr":"number","raw":"002a","quality":"good","addr":{},"meta":{"on_change":true}}'
+MC2='{"ts":"2026-05-30T10:00:07.000Z","device":"plc1","protocol":"modbus","point":"m1","mode":"typed","datatype":"uint16","value":42,"value_repr":"number","raw":"002a","quality":"good","addr":{},"meta":{"on_change":true}}'
+check_absent "measurement: meta.on_change suppresses repeat" ot-measurement \
+  "$(printf '[te/device/plc1/ot/modbus/sample/m1] %s\n[te/device/plc1/ot/modbus/sample/m1] %s' "$MC1" "$MC2")" \
+  '"time":"2026-05-30T10:00:00.000Z"' '"time":"2026-05-30T10:00:07.000Z"'
+
+# meta.deadband: change below the deadband suppressed, change above it emitted.
+DB1='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"d1","mode":"typed","datatype":"float32","value":100.0,"value_repr":"number","raw":"42c80000","quality":"good","addr":{},"meta":{"deadband":0.5}}'
+DB2='{"ts":"2026-05-30T10:00:01.000Z","device":"plc1","protocol":"modbus","point":"d1","mode":"typed","datatype":"float32","value":100.4,"value_repr":"number","raw":"42c8cccd","quality":"good","addr":{},"meta":{"deadband":0.5}}'
+DB3='{"ts":"2026-05-30T10:00:02.000Z","device":"plc1","protocol":"modbus","point":"d1","mode":"typed","datatype":"float32","value":100.6,"value_repr":"number","raw":"42c93333","quality":"good","addr":{},"meta":{"deadband":0.5}}'
+check_absent "measurement: meta.deadband suppresses sub-threshold change" ot-measurement \
+  "$(printf '[te/device/plc1/ot/modbus/sample/d1] %s\n[te/device/plc1/ot/modbus/sample/d1] %s\n[te/device/plc1/ot/modbus/sample/d1] %s' "$DB1" "$DB2" "$DB3")" \
+  '"time":"2026-05-30T10:00:02.000Z"' '"time":"2026-05-30T10:00:01.000Z"'
+
+# meta.min_interval: reading 5s after the last emit dropped, reading 15s after emitted.
+RL1='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"r1","mode":"typed","datatype":"uint16","value":1,"value_repr":"number","raw":"0001","quality":"good","addr":{},"meta":{"min_interval":"10s"}}'
+RL2='{"ts":"2026-05-30T10:00:05.000Z","device":"plc1","protocol":"modbus","point":"r1","mode":"typed","datatype":"uint16","value":2,"value_repr":"number","raw":"0002","quality":"good","addr":{},"meta":{"min_interval":"10s"}}'
+RL3='{"ts":"2026-05-30T10:00:15.000Z","device":"plc1","protocol":"modbus","point":"r1","mode":"typed","datatype":"uint16","value":3,"value_repr":"number","raw":"0003","quality":"good","addr":{},"meta":{"min_interval":"10s"}}'
+check_absent "measurement: meta.min_interval rate-limits" ot-measurement \
+  "$(printf '[te/device/plc1/ot/modbus/sample/r1] %s\n[te/device/plc1/ot/modbus/sample/r1] %s\n[te/device/plc1/ot/modbus/sample/r1] %s' "$RL1" "$RL2" "$RL3")" \
+  '"time":"2026-05-30T10:00:15.000Z"' '"time":"2026-05-30T10:00:05.000Z"'
+
+# meta.debounce: a new value only passes once it has stayed stable for the period; the first
+# observation is the candidate (no emit), the confirmation 3s later is emitted.
+DE1='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"b1","mode":"typed","datatype":"uint16","value":7,"value_repr":"number","raw":"0007","quality":"good","addr":{},"meta":{"debounce":"2s"}}'
+DE2='{"ts":"2026-05-30T10:00:03.000Z","device":"plc1","protocol":"modbus","point":"b1","mode":"typed","datatype":"uint16","value":7,"value_repr":"number","raw":"0007","quality":"good","addr":{},"meta":{"debounce":"2s"}}'
+DE3='{"ts":"2026-05-30T10:00:04.000Z","device":"plc1","protocol":"modbus","point":"b1","mode":"typed","datatype":"uint16","value":9,"value_repr":"number","raw":"0009","quality":"good","addr":{},"meta":{"debounce":"2s"}}'
+check_absent "measurement: meta.debounce waits for stability" ot-measurement \
+  "$(printf '[te/device/plc1/ot/modbus/sample/b1] %s\n[te/device/plc1/ot/modbus/sample/b1] %s\n[te/device/plc1/ot/modbus/sample/b1] %s' "$DE1" "$DE2" "$DE3")" \
+  '"time":"2026-05-30T10:00:03.000Z"' '"time":"2026-05-30T10:00:04.000Z"'
 
 # combine: two series of one device merged into a single measurement, flushed on interval.
 SLVL='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"level_f32","mode":"typed","datatype":"float32","value":404.17,"value_repr":"number","raw":"43ca15c3","quality":"good","addr":{}}'

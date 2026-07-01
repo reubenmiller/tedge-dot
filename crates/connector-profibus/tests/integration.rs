@@ -94,6 +94,7 @@ fn point_ref(id: &str, dt: DataType) -> PointRef {
         access: Access::Read,
         unit: None,
         transform: Transform::default(),
+        interval: None,
     }
 }
 
@@ -217,6 +218,7 @@ async fn read_returns_bad_for_output_point() {
         access: Access::Write,
         unit: None,
         transform: Transform::default(),
+        interval: None,
     }];
     let samples = c.read_points(&"remote_io".to_string(), &refs).await.unwrap();
     assert_eq!(samples[0].quality, Quality::Bad);

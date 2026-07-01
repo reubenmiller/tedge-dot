@@ -1,12 +1,22 @@
 [Unit]
-Description=thin-edge.io Driver for OT connectors
-After=network-online.target
+Description=thin-edge.io OT connectors (all protocols, supervised)
+Documentation=https://github.com/thin-edge/tedge-dot
+After=network-online.target mosquitto.service
+Wants=network-online.target
 
 [Service]
-User=tedge
+Type=simple
+# Runs as root so the supervisor can create the vcan0 interface and the
+# /dev/ttyPROFIBUS0 serial bridge. The individual connectors themselves need no
+# special privileges; for a hardened deployment, drop privileges per connector
+# or grant only CAP_NET_ADMIN + device access instead.
+User=root
+ExecStart=/usr/bin/tedge-dot-supervisor
 Restart=always
 RestartSec=5
-ExecStart=/usr/bin/tedge-dot /etc/tedge/plugins/modbus/modbus.toml
+# Clean up every supervised connector and bridge process on stop/restart.
+KillMode=control-group
+TimeoutStopSec=15
 
 [Install]
 WantedBy=multi-user.target

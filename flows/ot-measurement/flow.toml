@@ -8,6 +8,14 @@ point        = "${params.point}"
 include_boolean = "${params.include_boolean}"
 # Only emit when the scaled value changes since the last emitted reading. "true" or "false".
 on_change    = "${params.on_change}"
+# Minimum absolute change (vs the last emitted value) required to emit. 0 = disabled.
+deadband     = "${params.deadband}"
+# Per-signal rate limit: drop readings arriving within this interval of the last emitted one.
+min_interval = "${params.min_interval}"
+# A changed value must stay stable this long (by sample timestamps) before it is emitted.
+debounce     = "${params.debounce}"
+# Every setting above can also be overridden per signal via the point's `meta` table in the
+# connector config (echoed as sample.meta): meta.on_change / deadband / min_interval / debounce.
 # Batch every series of a device into one measurement, flushed on the step interval below.
 # "true" or "false".
 combine      = "${params.combine}"

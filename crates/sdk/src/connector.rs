@@ -42,6 +42,9 @@ pub struct PointRef {
     pub unit: Option<String>,
     /// Per-point linear transform applied to the decoded numeric value.
     pub transform: Transform,
+    /// Effective poll interval resolved by the runtime. Subscribe-capable connectors should
+    /// use it as the per-point sampling-interval hint (e.g. OPC-UA monitored item sampling).
+    pub interval: Option<std::time::Duration>,
 }
 
 /// The connector's declared capabilities; drives the capability descriptor and conformance.

@@ -4,12 +4,13 @@
 
 use crate::config::{parse_duration, ConnectorConfig};
 use crate::connector::{
-    Access, Capabilities, CommandRequest, Connector, LinkReport, LinkStatus, PointRef,
+    Access, Capabilities, CommandRequest, Connector, ConnectorError, LinkReport, LinkStatus,
+    PointRef, SampleSink,
 };
 use crate::decode::{Endianness, WordOrder};
-use crate::model::{format_rfc3339_ms, Mode};
+use crate::model::{format_rfc3339_ms, Mode, Sample};
 use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, Packet, QoS};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use time::OffsetDateTime;
@@ -89,9 +90,15 @@ pub async fn run(
         Err(e) => warn!("initial connect failed: {e}"),
     }
 
-    // 5. Build the read schedule.
-    let mut schedule = build_schedule(&config);
-    let mut seq_counters: HashMap<(usize, String), u64> = HashMap::new();
+    // 5. Set up push delivery for subscribe-capable connectors, then build the polling
+    // schedule for everything that is not pushed. The runtime keeps `sample_tx` alive for
+    // the whole run so re-subscribing after a config reload reuses the same channel.
+    let (sample_tx, mut sample_rx) = tokio::sync::mpsc::channel::<Sample>(256);
+    let mut subscribed =
+        setup_subscriptions(&mut connector, &config, caps.subscribe, &sample_tx).await;
+    let mut schedule = build_schedule(&config, &subscribed);
+    let mut meta_index = build_meta_index(&config);
+    let mut seq_counters: HashMap<(String, String), u64> = HashMap::new();
 
     // 6. Main loop: poll due points on a tick, route commands from the MQTT event loop.
     let mut tick = tokio::time::interval(Duration::from_millis(200));
@@ -125,25 +132,21 @@ pub async fn run(
                     match connector.read_points(&device, &points).await {
                         Ok(mut samples) => {
                             for s in samples.iter_mut() {
-                                let key = (device_index, s.point.clone());
-                                let c = seq_counters.entry(key).or_insert(0);
-                                *c += 1;
-                                s.seq = Some(*c);
-                                let topic = format!(
-                                    "te/device/{}/ot/{}/sample/{}",
-                                    device, protocol, s.point
-                                );
-                                if let Err(e) = client
-                                    .publish(&topic, QoS::AtMostOnce, false, s.to_envelope().to_string())
-                                    .await
-                                {
-                                    error!("failed to publish sample: {e}");
-                                }
+                                // The runtime owns the device identity for polled reads:
+                                // connectors routinely leave `device` empty, and the sample
+                                // topic + meta lookup are keyed by the configured name.
+                                s.device = device.clone();
+                                publish_sample(&client, &protocol, s, &mut seq_counters, &meta_index)
+                                    .await;
                             }
                         }
                         Err(e) => warn!(%device, "read_points failed: {e}"),
                     }
                 }
+            }
+            Some(mut sample) = sample_rx.recv() => {
+                publish_sample(&client, &protocol, &mut sample, &mut seq_counters, &meta_index)
+                    .await;
             }
             ev = eventloop.poll(), if !mqtt_waiting => {
                 match ev {
@@ -153,9 +156,15 @@ pub async fn run(
                             &mut config, &mut config_doc, &config_path,
                             &p.topic, &p.payload,
                         ).await {
-                            // A management command changed the config: rebuild the schedule.
+                            // A management command changed the config: re-establish push
+                            // delivery (the reload disconnected the old subscriptions) and
+                            // rebuild the polling schedule.
                             Ok(true) => {
-                                schedule = build_schedule(&config);
+                                subscribed = setup_subscriptions(
+                                    &mut connector, &config, caps.subscribe, &sample_tx,
+                                ).await;
+                                schedule = build_schedule(&config, &subscribed);
+                                meta_index = build_meta_index(&config);
                                 seq_counters.clear();
                             }
                             Ok(false) => {}
@@ -184,7 +193,11 @@ pub async fn run(
     Ok(())
 }
 
-fn build_schedule(config: &ConnectorConfig) -> Vec<ScheduleEntry> {
+/// Build the polling schedule, skipping points that are delivered by subscription.
+fn build_schedule(
+    config: &ConnectorConfig,
+    subscribed: &HashSet<(usize, String)>,
+) -> Vec<ScheduleEntry> {
     let connector_default = parse_duration(&config.connector.poll_interval)
         .unwrap_or_else(|| Duration::from_secs(2));
     let now = Instant::now();
@@ -196,20 +209,133 @@ fn build_schedule(config: &ConnectorConfig) -> Vec<ScheduleEntry> {
             .and_then(parse_duration)
             .unwrap_or(connector_default);
         for point in &device.points {
+            if subscribed.contains(&(device_index, point.id.clone())) {
+                continue;
+            }
             let interval = point
                 .poll_interval
                 .as_deref()
                 .and_then(parse_duration)
                 .unwrap_or(device_default);
+            let mut point = point_ref(point, device.default_mode);
+            point.interval = Some(interval);
             schedule.push(ScheduleEntry {
                 device_index,
-                point: point_ref(point, device.default_mode),
+                point,
                 interval,
                 next_due: now,
             });
         }
     }
     schedule
+}
+
+/// Ask a subscribe-capable connector for push delivery, device by device. Points configured
+/// with `subscribe = false` are excluded and stay on the polling schedule, as does every point
+/// of a device whose `subscribe()` call does not succeed. Returns the set of
+/// `(device_index, point_id)` now delivered via push.
+async fn setup_subscriptions(
+    connector: &mut Box<dyn Connector>,
+    config: &ConnectorConfig,
+    subscribe_capable: bool,
+    sink: &SampleSink,
+) -> HashSet<(usize, String)> {
+    let mut subscribed = HashSet::new();
+    if !subscribe_capable {
+        return subscribed;
+    }
+    let connector_default = parse_duration(&config.connector.poll_interval)
+        .unwrap_or_else(|| Duration::from_secs(2));
+    for (device_index, device) in config.devices.iter().enumerate() {
+        let device_default = device
+            .poll_interval
+            .as_deref()
+            .and_then(parse_duration)
+            .unwrap_or(connector_default);
+        let points: Vec<PointRef> = device
+            .points
+            .iter()
+            .filter(|p| p.subscribe.unwrap_or(true))
+            .map(|p| {
+                let mut r = point_ref(p, device.default_mode);
+                r.interval = Some(
+                    p.poll_interval
+                        .as_deref()
+                        .and_then(parse_duration)
+                        .unwrap_or(device_default),
+                );
+                r
+            })
+            .collect();
+        if points.is_empty() {
+            continue;
+        }
+        match connector.subscribe(&device.name, &points, sink.clone()).await {
+            Ok(()) => {
+                info!(device = %device.name, points = points.len(), "subscribed (push delivery)");
+                for p in &points {
+                    subscribed.insert((device_index, p.id.clone()));
+                }
+            }
+            Err(ConnectorError::Unsupported(_)) => {
+                debug!(device = %device.name, "subscribe unsupported; polling");
+            }
+            Err(e) => {
+                warn!(device = %device.name, "subscribe failed: {e}; falling back to polling");
+            }
+        }
+    }
+    subscribed
+}
+
+/// Per-point `meta` lookup, keyed by `(device name, point id)`; injected into every published
+/// sample envelope so flows can apply per-signal behaviour without their own config.
+fn build_meta_index(config: &ConnectorConfig) -> HashMap<(String, String), serde_json::Value> {
+    let mut index = HashMap::new();
+    for device in &config.devices {
+        for point in &device.points {
+            if let Some(meta) = &point.meta {
+                index.insert((device.name.clone(), point.id.clone()), meta.clone());
+            }
+        }
+    }
+    index
+}
+
+/// The sample envelope as published: the contract envelope plus the point's `meta`, if any.
+fn envelope_with_meta(
+    sample: &Sample,
+    meta_index: &HashMap<(String, String), serde_json::Value>,
+) -> serde_json::Value {
+    let mut envelope = sample.to_envelope();
+    if let Some(meta) = meta_index.get(&(sample.device.clone(), sample.point.clone())) {
+        envelope["meta"] = meta.clone();
+    }
+    envelope
+}
+
+/// Stamp the per-point sequence number and publish one sample. Shared by the polling loop and
+/// the subscription channel so both paths get identical seq/meta/topic handling.
+async fn publish_sample(
+    client: &AsyncClient,
+    protocol: &str,
+    sample: &mut Sample,
+    seq_counters: &mut HashMap<(String, String), u64>,
+    meta_index: &HashMap<(String, String), serde_json::Value>,
+) {
+    let counter = seq_counters
+        .entry((sample.device.clone(), sample.point.clone()))
+        .or_insert(0);
+    *counter += 1;
+    sample.seq = Some(*counter);
+    let topic = format!(
+        "te/device/{}/ot/{}/sample/{}",
+        sample.device, protocol, sample.point
+    );
+    let payload = envelope_with_meta(sample, meta_index).to_string();
+    if let Err(e) = client.publish(&topic, QoS::AtMostOnce, false, payload).await {
+        error!("failed to publish sample: {e}");
+    }
 }
 
 /// Build a resolved [`PointRef`] from a configured point. Shared by the scheduler and by callers
@@ -224,6 +350,7 @@ pub fn point_ref(point: &crate::config::PointConfig, device_default: Option<Mode
         access: Access::parse(point.access.as_deref()),
         unit: point.unit.clone(),
         transform: point.transform.unwrap_or_default(),
+        interval: point.poll_interval.as_deref().and_then(parse_duration),
     }
 }
 
@@ -828,6 +955,80 @@ default_mode = "typed"
             apply_management("remove-device", &serde_json::json!({ "device": "nope" }), &mut d)
                 .unwrap_err();
         assert!(err.contains("not found"), "{err}");
+    }
+
+    #[test]
+    fn point_meta_parsed_and_indexed() {
+        let cfg: ConnectorConfig = toml::from_str(
+            r#"
+[connector]
+protocol = "modbus"
+
+[[device]]
+name = "plc-1"
+protocol_address = { host = "127.0.0.1" }
+
+  [[device.point]]
+  id = "temp"
+  datatype = "float32"
+  address = { table = "holding", address = 7, count = 2 }
+  meta = { on_change = true, min_interval = "5s", room = "boiler" }
+"#,
+        )
+        .unwrap();
+        let index = build_meta_index(&cfg);
+        let meta = index.get(&("plc-1".to_string(), "temp".to_string())).unwrap();
+        assert_eq!(meta["on_change"], serde_json::json!(true));
+        assert_eq!(meta["min_interval"], serde_json::json!("5s"));
+        assert_eq!(meta["room"], serde_json::json!("boiler"));
+    }
+
+    #[test]
+    fn envelope_carries_point_meta() {
+        let sample = Sample {
+            ts: OffsetDateTime::UNIX_EPOCH,
+            device: "plc-1".into(),
+            protocol: "modbus",
+            point: "temp".into(),
+            mode: Mode::Typed,
+            datatype: None,
+            value: None,
+            raw: vec![0x12, 0x34],
+            raw_group: 2,
+            quality: crate::model::Quality::Good,
+            unit: None,
+            addr: serde_json::Value::Null,
+            seq: None,
+            error: None,
+        };
+        let mut index = HashMap::new();
+        index.insert(
+            ("plc-1".to_string(), "temp".to_string()),
+            serde_json::json!({ "on_change": true }),
+        );
+        let env = envelope_with_meta(&sample, &index);
+        assert_eq!(env["meta"]["on_change"], serde_json::json!(true));
+        // a sample without indexed meta has no meta key
+        let env2 = envelope_with_meta(&sample, &HashMap::new());
+        assert!(env2.get("meta").is_none());
+    }
+
+    #[test]
+    fn schedule_skips_subscribed_points() {
+        let cfg: ConnectorConfig = toml::from_str(BASE).unwrap();
+        let none = HashSet::new();
+        assert_eq!(build_schedule(&cfg, &none).len(), 1);
+        let mut subscribed = HashSet::new();
+        subscribed.insert((0usize, "temp".to_string()));
+        assert_eq!(build_schedule(&cfg, &subscribed).len(), 0);
+    }
+
+    #[test]
+    fn schedule_resolves_point_interval() {
+        let cfg: ConnectorConfig = toml::from_str(BASE).unwrap();
+        let schedule = build_schedule(&cfg, &HashSet::new());
+        // connector poll_interval = "2s" flows into the resolved PointRef interval
+        assert_eq!(schedule[0].point.interval, Some(Duration::from_secs(2)));
     }
 
     #[test]

@@ -9,6 +9,25 @@ include_boolean = "true"
 # Reduces cloud traffic for slowly-changing values. "true" or "false".
 on_change = "false"
 
+# Minimum absolute change (in engineering units, vs the last emitted value) required to emit.
+# Implies change detection. 0 = disabled.
+deadband = "0"
+
+# Per-signal rate limit: drop readings that arrive within this interval of the last emitted
+# one ("500ms", "10s", "1m"). Empty/0 = disabled.
+min_interval = ""
+
+# Debounce: a changed value must stay stable for this long (by sample timestamps) before it is
+# emitted; implies change detection. Empty/0 = disabled.
+debounce = ""
+
+# Every setting above is a flow-wide default. A signal can override any of them through the
+# point's free-form `meta` table in the connector config, echoed by the runtime in every
+# sample envelope, e.g.:
+#   [[device.point]]
+#   id = "boiler_temp"
+#   meta = { on_change = true, deadband = 0.5, min_interval = "10s" }
+
 # Batch every series of a device into a single measurement message, flushed every
 # combine_interval. Reduces the number of measurements created in the cloud. "true" or "false".
 combine = "false"

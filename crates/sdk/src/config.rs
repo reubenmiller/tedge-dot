@@ -81,6 +81,15 @@ pub struct PointConfig {
     /// Optional per-point linear transform applied by the connector after decode.
     #[serde(default)]
     pub transform: Option<Transform>,
+    /// Free-form signal metadata, echoed verbatim as `meta` in every sample envelope for this
+    /// point. Flows read it for per-signal behaviour (e.g. `on_change`, `min_interval`,
+    /// `deadband`); the connector and runtime never interpret it.
+    #[serde(default)]
+    pub meta: Option<serde_json::Value>,
+    /// Set to `false` to keep this point on the polling schedule even when the connector
+    /// supports push delivery (`subscribe`). Defaults to push when available.
+    #[serde(default)]
+    pub subscribe: Option<bool>,
 }
 
 impl PointConfig {
@@ -107,30 +116,24 @@ fn default_mqtt_port() -> u16 {
 }
 
 /// Parse a thin-edge duration string (`"500ms"`, `"2s"`, `"5m"`). Falls back to seconds for a
-/// bare number.
+/// bare number. Negative, NaN and overflowing values yield `None` — config values arrive from
+/// hand-edited files and remote `set-config` commands, so this must never panic.
 pub fn parse_duration(s: &str) -> Option<Duration> {
     let s = s.trim();
     if let Some(rest) = s.strip_suffix("ms") {
         return rest.trim().parse::<u64>().ok().map(Duration::from_millis);
     }
-    if let Some(rest) = s.strip_suffix('s') {
-        return rest.trim().parse::<f64>().ok().map(Duration::from_secs_f64);
-    }
-    if let Some(rest) = s.strip_suffix('m') {
-        return rest
-            .trim()
-            .parse::<f64>()
-            .ok()
-            .map(|m| Duration::from_secs_f64(m * 60.0));
-    }
-    if let Some(rest) = s.strip_suffix('h') {
-        return rest
-            .trim()
-            .parse::<f64>()
-            .ok()
-            .map(|h| Duration::from_secs_f64(h * 3600.0));
-    }
-    s.parse::<f64>().ok().map(Duration::from_secs_f64)
+    let (rest, scale) = if let Some(rest) = s.strip_suffix('s') {
+        (rest, 1.0)
+    } else if let Some(rest) = s.strip_suffix('m') {
+        (rest, 60.0)
+    } else if let Some(rest) = s.strip_suffix('h') {
+        (rest, 3600.0)
+    } else {
+        (s, 1.0)
+    };
+    let secs = rest.trim().parse::<f64>().ok()? * scale;
+    Duration::try_from_secs_f64(secs).ok()
 }
 
 #[cfg(test)]
@@ -142,5 +145,20 @@ mod tests {
         assert_eq!(parse_duration("500ms"), Some(Duration::from_millis(500)));
         assert_eq!(parse_duration("2s"), Some(Duration::from_secs(2)));
         assert_eq!(parse_duration("5m"), Some(Duration::from_secs(300)));
+        assert_eq!(parse_duration("2h"), Some(Duration::from_secs(7200)));
+        assert_eq!(parse_duration("3"), Some(Duration::from_secs(3)));
+    }
+
+    /// Found by the `config_toml` fuzz target: negative/NaN/overflowing durations used to
+    /// panic in `Duration::from_secs_f64`.
+    #[test]
+    fn invalid_durations_are_none_not_panics() {
+        assert_eq!(parse_duration("-66"), None);
+        assert_eq!(parse_duration("-5s"), None);
+        assert_eq!(parse_duration("NaN"), None);
+        assert_eq!(parse_duration("inf"), None);
+        assert_eq!(parse_duration("1e300h"), None);
+        assert_eq!(parse_duration(""), None);
+        assert_eq!(parse_duration("abc"), None);
     }
 }

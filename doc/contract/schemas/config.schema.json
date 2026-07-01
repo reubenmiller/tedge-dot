@@ -85,6 +85,26 @@
         "address": {
           "type": "object",
           "description": "Protocol-specific point address. Shape defined by the connector spec."
+        },
+        "transform": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Linear engineering transform applied by the connector after decode: (value * multiplier * 10^decimal_shift / divisor) + offset.",
+          "properties": {
+            "multiplier": { "type": "number", "default": 1 },
+            "divisor": { "type": "number", "default": 1 },
+            "decimal_shift": { "type": "integer", "default": 0 },
+            "offset": { "type": "number", "default": 0 }
+          }
+        },
+        "meta": {
+          "type": "object",
+          "description": "Free-form signal metadata, echoed verbatim as 'meta' in every sample envelope for this point. Never interpreted by the connector; flows read it for per-signal behaviour (e.g. on_change, deadband, min_interval, debounce) and consumers may carry arbitrary descriptive fields."
+        },
+        "subscribe": {
+          "type": "boolean",
+          "default": true,
+          "description": "Set false to keep this point on the polling schedule even when the connector supports push delivery (subscriptions)."
         }
       },
       "allOf": [
@@ -113,7 +133,9 @@
               "endianness": "big",
               "word_order": "big",
               "access": "read",
-              "address": { "table": "holding", "address": 7, "count": 2 }
+              "address": { "table": "holding", "address": 7, "count": 2 },
+              "unit": "°C",
+              "meta": { "on_change": true, "deadband": 0.5, "min_interval": "10s" }
             },
             {
               "id": "run_command",

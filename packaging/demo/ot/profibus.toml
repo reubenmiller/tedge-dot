@@ -1,0 +1,67 @@
+# Demo PROFIBUS-DP connector config — pairs with the profibus-sim service in
+# docker-compose.simulators.yaml (Python DP-V0 slave exposed over TCP :9200).
+#
+# Installed to /etc/tedge/plugins/ot/profibus.toml and launched automatically by
+# the tedge-dot supervisor.  Because PTYs cannot cross the container boundary,
+# the supervisor runs a socat serial<->TCP bridge that materialises the slave's
+# serial line as /dev/ttyPROFIBUS0 on the host.  Publishes to 127.0.0.1:1883.
+#
+# Peripheral layout (matches sim/slave_sim.py defaults):
+#   Inputs  (8 bytes): [DI0, DI1, AI0_hi, AI0_lo, AI1_hi, AI1_lo, rsvd, rsvd]
+#   Outputs (4 bytes): [DO0, DO1, AO0_hi, AO0_lo]
+
+[connector]
+protocol      = "profibus"
+service_name  = "tedge-profibus-plugin"
+poll_interval = "500ms"
+log_level     = "info"
+
+[mqtt]
+host = "127.0.0.1"
+port = 1883
+
+[connection]
+port           = "/dev/ttyPROFIBUS0"
+baudrate       = 19200
+master_address = 2
+slot_bits      = 300
+
+[[device]]
+name             = "remote_io"
+protocol_address = { station_address = 7, ident_number = 0, input_bytes = 8, output_bytes = 4 }
+
+  [[device.point]]
+  id       = "di_byte0"
+  datatype = "uint8"
+  access   = "read"
+  address  = { direction = "input", byte_offset = 0 }
+
+  [[device.point]]
+  id       = "di_bit3"
+  datatype = "bool"
+  access   = "read"
+  address  = { direction = "input", byte_offset = 0, bit_offset = 3, bit_count = 1 }
+
+  [[device.point]]
+  id       = "ai0_raw"
+  datatype = "uint16"
+  access   = "read"
+  address  = { direction = "input", byte_offset = 2 }
+
+  [[device.point]]
+  id       = "ai1_raw"
+  datatype = "uint16"
+  access   = "read"
+  address  = { direction = "input", byte_offset = 4 }
+
+  [[device.point]]
+  id       = "do_byte0"
+  datatype = "uint8"
+  access   = "read_write"
+  address  = { direction = "output", byte_offset = 0 }
+
+  [[device.point]]
+  id       = "ao0_raw"
+  datatype = "uint16"
+  access   = "write"
+  address  = { direction = "output", byte_offset = 2 }

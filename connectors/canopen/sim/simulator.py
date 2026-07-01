@@ -90,15 +90,59 @@ Dummy0007=0
 [Comments]
 Lines=0
 
-[ObjectCount]
+[MandatoryObjects]
 SupportedObjects=3
+1=0x1000
+2=0x1001
+3=0x1018
 
-[Objects]
+[1000]
+ParameterName=Device type
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0
+PDOMapping=0
+
+[1001]
+ParameterName=Error register
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=0
+PDOMapping=0
+
+[1018]
+ParameterName=Identity object
+ObjectType=0x9
+SubNumber=2
+
+[1018sub0]
+ParameterName=Number of entries
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=1
+PDOMapping=0
+
+[1018sub1]
+ParameterName=Vendor-ID
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x00000001
+PDOMapping=0
+
+[OptionalObjects]
+SupportedObjects=0
+
+[ManufacturerObjects]
+SupportedObjects=3
 1=0x2000
 2=0x2001
 3=0x2002
 
-[0x2000]
+[2000]
 ParameterName=AnalogIn
 ObjectType=0x7
 DataType=0x0006
@@ -106,15 +150,15 @@ AccessType=ro
 DefaultValue=1234
 PDOMapping=0
 
-[0x2001]
+[2001]
 ParameterName=Temperature
 ObjectType=0x7
-DataType=0x0004
+DataType=0x0003
 AccessType=ro
 DefaultValue=-100
 PDOMapping=0
 
-[0x2002]
+[2002]
 ParameterName=DigitalOut
 ObjectType=0x7
 DataType=0x0005

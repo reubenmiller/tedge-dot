@@ -2,8 +2,10 @@
 //!
 //! Implements the [`Connector`](tedge_dot_sdk::Connector) trait against
 //! [`async-opcua`]. Like the Modbus reference module the driver stays "dumb": it connects, reads
-//! node values (polling), and writes node values. All scaling, renaming, units, alarms and
-//! thin-edge JSON shaping are handled by thin-edge.io flows.
+//! node values (polling), writes node values, and pushes data-change notifications
+//! (`subscribe`, via one OPC-UA subscription per device with one monitored item per point).
+//! All scaling, renaming, units, alarms and thin-edge JSON shaping are handled by
+//! thin-edge.io flows.
 //!
 //! Addressing uses OPC-UA `NodeId`s (textual `ns=2;s=Temperature` or structured
 //! `namespace`+`identifier`) instead of Modbus register tables, exercising the contract's opaque
@@ -21,18 +23,22 @@ use std::time::Duration;
 use tedge_dot_sdk::{
     Access, Capabilities, CommandRequest, CommandResult, ConfigError, Connector, ConnectorConfig,
     ConnectorError, DataType, DeviceId, LinkReport, LinkStatus, Mode, PointRef, Quality, Sample,
-    Transform, Value,
+    SampleSink, Transform, Value,
 };
 use time::OffsetDateTime;
 
-use opcua::client::{ClientBuilder, IdentityToken, Session};
+use opcua::client::{ClientBuilder, DataChangeCallback, IdentityToken, Session};
 use opcua::crypto::SecurityPolicy;
 use opcua::types::{
-    AttributeId, DataValue, MessageSecurityMode, NodeId, ReadValueId, StatusCode,
-    TimestampsToReturn, UAString, UserTokenPolicy, Variant, WriteValue,
+    AttributeId, DataValue, MessageSecurityMode, MonitoredItemCreateRequest, MonitoringMode,
+    MonitoringParameters, NodeId, ReadValueId, StatusCode, TimestampsToReturn, UAString,
+    UserTokenPolicy, Variant, WriteValue,
 };
 
 const PROTOCOL: &str = "opcua";
+
+/// Sampling-interval fallback for monitored items when a point has no resolved poll interval.
+const DEFAULT_SAMPLING_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Largest integer representable exactly as an `f64` (JS `Number.MAX_SAFE_INTEGER`).
 const MAX_SAFE_INT: i64 = 9_007_199_254_740_991;
@@ -59,12 +65,20 @@ struct SessionHandle {
     _event_loop: tokio::task::JoinHandle<StatusCode>,
 }
 
+/// A live push subscription for one device: the server-side subscription id plus the forwarder
+/// task bridging data-change callbacks into the runtime's sample channel.
+struct SubscriptionHandle {
+    subscription_id: u32,
+    forwarder: tokio::task::JoinHandle<()>,
+}
+
 /// The OPC-UA connector. One instance manages all configured OPC-UA servers.
 #[derive(Default)]
 pub struct OpcuaConnector {
     conn: OpcuaConnection,
     devices: HashMap<String, DeviceModel>,
     sessions: HashMap<String, SessionHandle>,
+    subscriptions: HashMap<String, SubscriptionHandle>,
 }
 
 /// Factory used by the binary to instantiate the module behind its feature flag.
@@ -138,8 +152,8 @@ impl Connector for OpcuaConnector {
             ],
             point_kinds: vec!["variable".into()],
             command_verbs: vec!["write".into()],
-            features: vec!["polling".into()],
-            subscribe: false,
+            features: vec!["polling".into(), "subscribe".into()],
+            subscribe: true,
         }
     }
 
@@ -218,7 +232,12 @@ impl Connector for OpcuaConnector {
             match session.read(&reads, TimestampsToReturn::Neither, 0.0).await {
                 Ok(values) => {
                     for ((id, model), dv) in known.iter().zip(values) {
-                        out.push(build_sample(id, model, &dv));
+                        let mut sample = build_sample(id, model, &dv);
+                        // Contract §5: polled samples carry the read-completion time. Servers
+                        // may return a (stale) source timestamp even for TimestampsToReturn::
+                        // Neither; only the push path reports event time.
+                        sample.ts = OffsetDateTime::now_utc();
+                        out.push(sample);
                     }
                 }
                 Err(status) => {
@@ -229,6 +248,141 @@ impl Connector for OpcuaConnector {
             }
         }
         Ok(out)
+    }
+
+    async fn subscribe(
+        &mut self,
+        device: &DeviceId,
+        points: &[PointRef],
+        sink: SampleSink,
+    ) -> Result<(), ConnectorError> {
+        if points.is_empty() {
+            return Ok(());
+        }
+        let dev = self
+            .devices
+            .get(device)
+            .ok_or_else(|| ConnectorError::NotConnected(device.clone()))?;
+
+        // Resolve the requested points and their sampling intervals up front.
+        let mut items: Vec<(String, OpcuaPoint, Duration)> = Vec::with_capacity(points.len());
+        for r in points {
+            let model = dev.points.get(&r.id).cloned().ok_or_else(|| {
+                ConnectorError::UnknownPoint {
+                    device: device.clone(),
+                    point: r.id.clone(),
+                }
+            })?;
+            items.push((
+                r.id.clone(),
+                model,
+                r.interval.unwrap_or(DEFAULT_SAMPLING_INTERVAL),
+            ));
+        }
+
+        let session = self
+            .sessions
+            .get(device)
+            .ok_or_else(|| ConnectorError::NotConnected(device.clone()))?
+            .session
+            .clone();
+
+        // Notifications are matched back to points by node id (several points may share one).
+        let mut by_node: HashMap<NodeId, Vec<(String, OpcuaPoint)>> = HashMap::new();
+        for (id, model, _) in &items {
+            by_node
+                .entry(model.node_id.clone())
+                .or_default()
+                .push((id.clone(), model.clone()));
+        }
+
+        // The data-change callback is synchronous, so it forwards through an unbounded channel
+        // to a spawned task that awaits the runtime's (bounded) sink.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Sample>();
+        let device_name = device.clone();
+        let callback = DataChangeCallback::new(move |dv, item| {
+            let node_id = &item.item_to_monitor().node_id;
+            if let Some(models) = by_node.get(node_id) {
+                for (id, model) in models {
+                    let mut sample = build_sample(id, model, &dv);
+                    sample.device = device_name.clone();
+                    // Ignore send errors: the forwarder has already shut down.
+                    let _ = tx.send(sample);
+                }
+            }
+        });
+
+        // One subscription per device, publishing at the fastest requested point rate.
+        let publishing_interval = items
+            .iter()
+            .map(|(_, _, interval)| *interval)
+            .min()
+            .unwrap_or(DEFAULT_SAMPLING_INTERVAL);
+        let subscription_id = session
+            .create_subscription(publishing_interval, 60, 20, 0, 0, true, callback)
+            .await
+            .map_err(|s| ConnectorError::Transport(format!("create_subscription failed: {s}")))?;
+
+        // One monitored item per point, sampled at the point's resolved poll interval.
+        let requests: Vec<MonitoredItemCreateRequest> = items
+            .iter()
+            .map(|(_, model, interval)| {
+                MonitoredItemCreateRequest::new(
+                    model.node_id.clone().into(),
+                    MonitoringMode::Reporting,
+                    MonitoringParameters {
+                        sampling_interval: interval.as_millis() as f64,
+                        queue_size: 1,
+                        discard_oldest: true,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        let results = match session
+            .create_monitored_items(subscription_id, TimestampsToReturn::Both, requests)
+            .await
+        {
+            Ok(results) => results,
+            Err(status) => {
+                let _ = session.delete_subscription(subscription_id).await;
+                return Err(ConnectorError::Transport(format!(
+                    "create_monitored_items failed: {status}"
+                )));
+            }
+        };
+        // All-or-nothing per device: on any rejected item, drop the subscription so the runtime
+        // keeps every point of this device on the polling schedule.
+        let failed: Vec<String> = items
+            .iter()
+            .zip(&results)
+            .filter(|(_, r)| !r.result.status_code.is_good())
+            .map(|((id, _, _), r)| format!("{id}: {}", r.result.status_code))
+            .collect();
+        if !failed.is_empty() {
+            let _ = session.delete_subscription(subscription_id).await;
+            return Err(ConnectorError::Transport(format!(
+                "monitored items rejected: {}",
+                failed.join(", ")
+            )));
+        }
+
+        // Forward pushed samples into the runtime sink; exit cleanly when either side closes.
+        let forwarder = tokio::spawn(async move {
+            while let Some(sample) = rx.recv().await {
+                if sink.send(sample).await.is_err() {
+                    break; // runtime dropped the sink (shutdown or reload)
+                }
+            }
+        });
+        self.subscriptions.insert(
+            device.clone(),
+            SubscriptionHandle {
+                subscription_id,
+                forwarder,
+            },
+        );
+        Ok(())
     }
 
     async fn execute(
@@ -295,6 +449,15 @@ impl Connector for OpcuaConnector {
     }
 
     async fn disconnect(&mut self) -> Result<(), ConnectorError> {
+        // Tear down push subscriptions first: abort the forwarder explicitly so no stale task
+        // keeps pushing into an old sink after a config reload re-subscribes, and delete the
+        // server-side subscription while the session is still alive.
+        for (device, sub) in self.subscriptions.drain() {
+            sub.forwarder.abort();
+            if let Some(handle) = self.sessions.get(&device) {
+                let _ = handle.session.delete_subscription(sub.subscription_id).await;
+            }
+        }
         for (_, handle) in self.sessions.drain() {
             let _ = handle.session.disconnect().await;
             handle._event_loop.abort();
@@ -475,7 +638,29 @@ fn uint_from_json(value: &serde_json::Value) -> Option<u64> {
         .or_else(|| value.as_str().and_then(|s| s.parse::<u64>().ok()))
 }
 
-/// Build a contract sample from a successful OPC-UA `DataValue`.
+/// Sample timestamp for a `DataValue`: prefer the source timestamp, then the server timestamp,
+/// then "now" (polled reads request no timestamps, so they always fall back to "now").
+fn data_value_ts(dv: &DataValue) -> OffsetDateTime {
+    dv.source_timestamp
+        .as_ref()
+        .or(dv.server_timestamp.as_ref())
+        .and_then(opcua_datetime_to_ts)
+        .unwrap_or_else(OffsetDateTime::now_utc)
+}
+
+/// Convert an OPC-UA `DateTime` (100 ns ticks since 1601-01-01) to an `OffsetDateTime`.
+fn opcua_datetime_to_ts(dt: &opcua::types::DateTime) -> Option<OffsetDateTime> {
+    if dt.is_null() {
+        return None;
+    }
+    // Ticks between the OPC-UA epoch (1601-01-01) and the Unix epoch (1970-01-01).
+    const UNIX_EPOCH_TICKS: i128 = 116_444_736_000_000_000;
+    let nanos = (dt.ticks() as i128 - UNIX_EPOCH_TICKS) * 100;
+    OffsetDateTime::from_unix_timestamp_nanos(nanos).ok()
+}
+
+/// Build a contract sample from an OPC-UA `DataValue`. Shared by the polling path
+/// (`read_points`) and the push path (`subscribe`) so both decode identically.
 fn build_sample(id: &str, model: &OpcuaPoint, dv: &DataValue) -> Sample {
     let status = dv.status.unwrap_or(StatusCode::Good);
     if !status.is_good() {
@@ -497,7 +682,7 @@ fn build_sample(id: &str, model: &OpcuaPoint, dv: &DataValue) -> Sample {
         ),
     };
     Sample {
-        ts: OffsetDateTime::now_utc(),
+        ts: data_value_ts(dv),
         device: String::new(),
         protocol: PROTOCOL,
         point: id.to_string(),
@@ -594,5 +779,40 @@ mod tests {
     #[test]
     fn big_uint64_is_text() {
         assert_eq!(uint64_value(u64::MAX), Value::Text(u64::MAX.to_string()));
+    }
+
+    #[test]
+    fn opcua_datetime_roundtrip() {
+        let dt = opcua::types::DateTime::ymd_hms(2026, 7, 1, 12, 30, 45);
+        let ts = opcua_datetime_to_ts(&dt).unwrap();
+        assert_eq!(ts.year(), 2026);
+        assert_eq!(u8::from(ts.month()), 7);
+        assert_eq!(ts.day(), 1);
+        assert_eq!((ts.hour(), ts.minute(), ts.second()), (12, 30, 45));
+    }
+
+    #[test]
+    fn opcua_datetime_null_is_none() {
+        assert!(opcua_datetime_to_ts(&opcua::types::DateTime::null()).is_none());
+    }
+
+    #[test]
+    fn data_value_ts_prefers_source_timestamp() {
+        let source = opcua::types::DateTime::ymd_hms(2026, 1, 2, 3, 4, 5);
+        let server = opcua::types::DateTime::ymd_hms(2026, 6, 7, 8, 9, 10);
+        let dv = DataValue {
+            source_timestamp: Some(source),
+            server_timestamp: Some(server),
+            ..Default::default()
+        };
+        let ts = data_value_ts(&dv);
+        assert_eq!((ts.year(), u8::from(ts.month()), ts.day()), (2026, 1, 2));
+    }
+
+    #[test]
+    fn data_value_ts_falls_back_to_now() {
+        let before = OffsetDateTime::now_utc();
+        let ts = data_value_ts(&DataValue::default());
+        assert!(ts >= before);
     }
 }

@@ -49,6 +49,10 @@
     "error": {
       "type": "string",
       "description": "Human-readable failure reason. Required when quality=bad."
+    },
+    "meta": {
+      "type": "object",
+      "description": "The point's free-form 'meta' table from the connector configuration, echoed verbatim by the runtime. Flows use it for per-signal behaviour (e.g. on_change, deadband, min_interval, debounce); absent when the point declares no meta."
     }
   },
   "allOf": [
@@ -83,7 +87,8 @@
       "quality": "good",
       "unit": "raw",
       "addr": { "table": "holding", "address": 7, "unit_id": 1 },
-      "seq": 12407
+      "seq": 12407,
+      "meta": { "on_change": true, "deadband": 0.5 }
     },
     {
       "ts": "2026-05-30T10:00:01.000Z",

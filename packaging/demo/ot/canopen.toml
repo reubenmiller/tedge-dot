@@ -1,0 +1,45 @@
+# Demo CANopen connector config — pairs with the canopen-sim service in
+# docker-compose.simulators.yaml (python-canopen SDO server, node ID 1 on vcan0).
+#
+# Installed to /etc/tedge/plugins/ot/canopen.toml and launched automatically by
+# the tedge-dot supervisor, which ensures vcan0 exists on the host.  Publishes
+# to 127.0.0.1:1883.
+#
+# Shares vcan0 with the canbus sim — CANopen SDO COB-IDs do not collide with the
+# canbus ENGINE_STATUS frames (ID 0x1A0).
+
+[connector]
+protocol      = "canopen"
+service_name  = "tedge-canopen-plugin"
+poll_interval = "1s"
+log_level     = "info"
+
+[mqtt]
+host = "127.0.0.1"
+port = 1883
+
+[connection]
+interface = "vcan0"
+
+[[device]]
+name             = "plc1"
+protocol_address = { node_id = 1 }
+default_mode     = "typed"
+
+  [[device.point]]
+  id       = "analog_in"
+  datatype = "uint16"
+  access   = "read"
+  address  = { index = 0x2000, subindex = 0 }
+
+  [[device.point]]
+  id       = "temperature"
+  datatype = "int16"
+  access   = "read"
+  address  = { index = 0x2001, subindex = 0 }
+
+  [[device.point]]
+  id       = "digital_out"
+  datatype = "uint8"
+  access   = "read_write"
+  address  = { index = 0x2002, subindex = 0 }

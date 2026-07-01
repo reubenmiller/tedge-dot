@@ -19,3 +19,7 @@ time = { version = "0.3", features = ["std"] }
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
+# The in-process OPC-UA test server (integration tests only; MPL-2.0, dev-only).
+async-opcua = { version = "0.18", default-features = false, features = ["client", "server"] }
+tedge-dot-sdk = { path = "../sdk" }
+toml = "0.8"

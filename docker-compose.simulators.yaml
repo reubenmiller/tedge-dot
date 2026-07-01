@@ -1,0 +1,139 @@
+# All-in-one OT simulator stack for demoing tedge-dot on a real Linux device.
+#
+# This single compose file starts a simulator for every supported OT protocol.
+# It contains ONLY simulators — no MQTT broker and no connectors.  The connectors
+# run natively on the host (installed from the tedge-dot package) and publish to
+# the thin-edge.io mosquitto broker already running on the device (127.0.0.1:1883).
+#
+#   ┌────────────────────────── Linux device ─────────────────────────────┐
+#   │                                                                     │
+#   │  docker compose (this file)            tedge-dot.service (package)  │
+#   │  ┌───────────────────────┐              ┌──────────────────────────┐│
+#   │  │ modbus-sim   :502      │◄── tcp ─────│ tedge-dot (modbus)       ││
+#   │  │ opcua-sim    :4840     │◄── tcp ─────│ tedge-dot (opcua)        ││
+#   │  │ canbus-sim   vcan0     │◄── socketcan│ tedge-dot (canbus)       ││
+#   │  │ canopen-sim  vcan0     │◄── socketcan│ tedge-dot (canopen)      ││
+#   │  │ profibus-sim :9200     │◄── tcp ─────│ socat ⇄ /dev/ttyPROFI…   ││
+#   │  └───────────────────────┘              │   └─ tedge-dot(profibus) ││
+#   │                                         └─────────┬────────────────┘│
+#   │                          mosquitto :1883 ◄────────┘ (thin-edge)     │
+#   └─────────────────────────────────────────────────────────────────────┘
+#
+# Requirements (real Linux host, not macOS Docker Desktop):
+#   * Docker Engine with privileged containers and host networking.
+#   * Kernel CAN/vcan support for the canbus/canopen sims:
+#       CONFIG_CAN, CONFIG_CAN_RAW, CONFIG_CAN_VCAN  (modprobe vcan)
+#
+# Usage:
+#   docker compose -f docker-compose.simulators.yaml up -d --build
+#   docker compose -f docker-compose.simulators.yaml down -v
+#
+# Or via just:  just demo-sims-up  /  just demo-sims-down
+#
+# Build context for every service is the repository root (.), matching the
+# COPY paths inside each connectors/<proto>/sim/Dockerfile.
+
+name: tedge-dot-simulators
+
+services:
+  # --- Modbus TCP simulator (pymodbus) ---------------------------------------
+  # Exposes a real Modbus TCP server on host port 502.
+  modbus-sim:
+    build:
+      context: .
+      dockerfile: connectors/modbus/sim/Dockerfile
+    ports:
+      - "502:502"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # --- OPC-UA simulator (python-asyncua) -------------------------------------
+  # Uses host networking so the server can both bind and advertise 127.0.0.1:4840
+  # consistently. (asyncua binds the same host it advertises, and a 127.0.0.1
+  # bind is not reachable through a published Docker port, so host networking is
+  # the robust choice here.) The connector dials opc.tcp://127.0.0.1:4840/.
+  opcua-sim:
+    build:
+      context: .
+      dockerfile: connectors/opcua/sim/Dockerfile
+    network_mode: host
+    environment:
+      OPCUA_ENDPOINT_HOST: "127.0.0.1"
+    restart: unless-stopped
+
+  # --- CAN bus simulator (python-can) ----------------------------------------
+  # Shares the host kernel network namespace so vcan0 is visible to the native
+  # connector.  Creates vcan0 if it does not already exist, then broadcasts
+  # ENGINE_STATUS frames at 10 Hz.
+  canbus-sim:
+    build:
+      context: .
+      dockerfile: connectors/canbus/sim/Dockerfile
+    network_mode: host
+    privileged: true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ip", "link", "show", "vcan0"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
+
+  # --- CANopen simulator (python-canopen) ------------------------------------
+  # Also uses vcan0 (multi-drop bus): the canbus sim broadcasts ID 0x1A0 frames
+  # while this node serves CANopen SDO requests for node ID 1.  Different COB-IDs
+  # so the two coexist on the same virtual bus, exactly as on real hardware.
+  canopen-sim:
+    build:
+      context: .
+      dockerfile: connectors/canopen/sim/Dockerfile
+    network_mode: host
+    privileged: true
+    restart: unless-stopped
+    depends_on:
+      canbus-sim:
+        condition: service_healthy
+
+  # --- PROFIBUS-DP slave simulator (Python DP-V0 slave + socat) --------------
+  # PTYs cannot cross the container/host boundary, so instead of sharing a serial
+  # device we expose the simulated slave over TCP on port 9200.  The host-side
+  # connector reaches it through a socat serial<->TCP bridge that the
+  # tedge-dot supervisor sets up automatically (creating /dev/ttyPROFIBUS0).
+  #
+  # Inside the container:
+  #   socat builds a persistent PTY pair  ttySlave <-> ttyBridge
+  #   the slave simulator opens ttySlave
+  #   a second socat bridges ttyBridge <-> TCP-LISTEN:9200 (auto-reconnecting)
+  profibus-sim:
+    build:
+      context: .
+      dockerfile: connectors/profibus/sim/Dockerfile
+    ports:
+      - "9200:9200"
+    restart: unless-stopped
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        mkdir -p /tmp/profibus
+        # Persistent PTY pair: the slave holds one end for its whole lifetime.
+        socat pty,rawer,echo=0,b19200,link=/tmp/profibus/ttySlave \
+              pty,rawer,echo=0,b19200,link=/tmp/profibus/ttyBridge &
+        sleep 1
+        # Bridge the other PTY end to TCP; auto-restart when the host disconnects.
+        ( while true; do
+            socat FILE:/tmp/profibus/ttyBridge,rawer,b19200 \
+                  TCP-LISTEN:9200,reuseaddr,nodelay 2>/dev/null || true
+            sleep 1
+          done ) &
+        echo "profibus-sim: slave on ttySlave, serial-over-tcp bridge on :9200"
+        exec python3 /slave_sim.py \
+            --port /tmp/profibus/ttySlave \
+            --address 7 --baudrate 19200 \
+            --input-bytes 8 --output-bytes 4

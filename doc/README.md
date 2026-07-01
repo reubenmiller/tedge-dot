@@ -111,6 +111,8 @@ Read them roughly in this order:
 | 10 | [community/community-model.md](community/community-model.md) | Connector registry, contribution guide, RFC process, project template, governance. |
 | 11 | [migration/migration-guide.md](migration/migration-guide.md) | How today's `devices.toml` / `modbus.toml` / C8y operations map onto the new world. |
 | 12 | [roadmap.md](roadmap.md) | A phased delivery plan from SDK to a community of connectors. |
+| 13 | [testing.md](testing.md) | The layered testing strategy: unit, property-based (proptest), fuzzing (cargo-fuzz), integration, simulator e2e, flow and cloud tests. |
+| 14 | [rfc/0002-cloud-fieldbus-integration.md](rfc/0002-cloud-fieldbus-integration.md) | Proposal: Cumulocity Cloud Fieldbus device types translated into `define-device` commands; the device stays config-file driven. |
 
 ---
 

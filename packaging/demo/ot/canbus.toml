@@ -1,0 +1,40 @@
+# Demo CAN bus connector config — pairs with the canbus-sim service in
+# docker-compose.simulators.yaml (python-can broadcasting on vcan0).
+#
+# Installed to /etc/tedge/plugins/ot/canbus.toml and launched automatically by
+# the tedge-dot supervisor, which ensures vcan0 exists on the host.  Publishes
+# to 127.0.0.1:1883.
+#
+# Requires kernel CAN/vcan support on the host (modprobe vcan).
+
+[connector]
+protocol     = "canbus"
+service_name = "tedge-canbus-plugin"
+log_level    = "info"
+
+[mqtt]
+host = "127.0.0.1"
+port = 1883
+
+[[device]]
+name             = "engine"
+protocol_address = { interface = "vcan0", dbc_file = "/etc/tedge/plugins/ot/can/test.dbc" }
+default_mode     = "typed"
+
+  [[device.point]]
+  id       = "rpm"
+  datatype = "uint16"
+  access   = "read"
+  address  = { message_name = "ENGINE_STATUS", signal_name = "RPM" }
+
+  [[device.point]]
+  id       = "coolant_temp"
+  datatype = "int8"
+  access   = "read"
+  address  = { message_name = "ENGINE_STATUS", signal_name = "COOLANT_TEMP" }
+
+  [[device.point]]
+  id       = "brake_active"
+  datatype = "bool"
+  access   = "read_write"
+  address  = { message_name = "ENGINE_STATUS", signal_name = "BRAKE_ACTIVE" }

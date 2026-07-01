@@ -44,11 +44,15 @@ default_mode     = "typed"
 
   # Same register, but with a per-point linear transform applied by the connector:
   # (17001 * 1 * 10^-3 / 1) + 0 = 17.001. Scaling is a property of the signal, not the flow.
+  # The free-form `meta` table is echoed verbatim in every sample envelope; flows read it for
+  # per-signal behaviour (ot-measurement honours on_change / deadband / min_interval / debounce).
   [[device.point]]
   id        = "temp_scaled"
   datatype  = "uint16"
   address   = { table = "holding", address = 3, count = 1 }
   transform = { decimal_shift = -3 }
+  unit      = "°C"
+  meta      = { on_change = true, deadband = 0.5, min_interval = "10s" }
 
   # uint32 across two registers.
   [[device.point]]

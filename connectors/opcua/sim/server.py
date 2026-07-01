@@ -7,6 +7,7 @@ Exposes a handful of nodes with stable string NodeIds under namespace index 2
     ns=2;s=Count         UInt32  617001          (read)
     ns=2;s=Setpoint      Int32   0   (writable)  (read/write round-trip)
     ns=2;s=Running       Boolean false (writable)(read/write round-trip)
+    ns=2;s=Ticks         UInt32  incremented every second (subscription/push tests)
 
 Reading ns=2;s=DoesNotExist yields a Bad status, exercising bad-quality handling.
 
@@ -54,13 +55,24 @@ async def main():
     await setpoint.set_writable()
     await running.set_writable()
 
+    # Changes every second so OPC-UA subscriptions (monitored items) have data-change
+    # notifications to deliver; the static nodes above only ever notify once.
+    ticks = await plc.add_variable(
+        ua.NodeId("Ticks", idx),
+        ua.QualifiedName("Ticks", idx),
+        ua.Variant(0, ua.VariantType.UInt32),
+    )
+
     print(
         f"OPC-UA simulator listening on opc.tcp://{ENDPOINT_HOST}:4840/ (namespace idx={idx})",
         flush=True,
     )
     async with server:
+        n = 0
         while True:
             await asyncio.sleep(1)
+            n += 1
+            await ticks.write_value(ua.Variant(n, ua.VariantType.UInt32))
 
 
 if __name__ == "__main__":

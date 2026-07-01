@@ -15,7 +15,13 @@
 #   - Docker Engine with `--privileged` support (granted below)
 #
 # On macOS Docker Desktop the LinuxKit VM kernel does NOT include CAN/vcan
-# support.  Run the unit + integration tests instead:
+# support.  With colima the modules can be added to the Ubuntu VM (one-off):
+#   colima ssh -- sudo apt-get install -y wireless-regdb
+#   colima ssh -- sudo curl -sfLO --output-dir /tmp https://launchpad.net/ubuntu/+archive/primary/+files/linux-modules-extra-$(colima ssh -- uname -r)_<pkg-version>_arm64.deb
+#   colima ssh -- sudo dpkg -i /tmp/linux-modules-extra-*.deb && colima ssh -- sudo modprobe vcan
+# (find <pkg-version> via `colima ssh -- apt-cache policy linux-image-$(uname -r)`; if the
+# exact kernel is still in the archive a plain `apt-get install linux-modules-extra-$(uname -r)`
+# suffices).  Otherwise run the unit + integration tests instead:
 #   cargo test -p connector-canbus
 #
 # The Robot suite runs on the host and connects to localhost:13883.

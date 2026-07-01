@@ -5,6 +5,7 @@ samples, retained status messages, and command results the connector publishes.
 """
 
 import json
+import re
 import threading
 import time
 
@@ -136,6 +137,42 @@ class MqttClient:
         for part in field.split("."):
             data = data[part]
         return data
+
+    @keyword
+    def no_messages_on_topic(self, pattern, timeout=3):
+        """Assert nothing is received on a topic filter (MQTT + / # wildcards).
+
+        Waits the full timeout, then fails if any recorded message — including ones
+        received before the call — matches the filter. Suitable for topic-discipline
+        tests ("the connector must never publish here").
+        """
+        time.sleep(float(timeout))
+        regex = self._filter_to_regex(pattern)
+        with self._lock:
+            offending = sorted(t for t in self._messages if regex.match(t))
+        if offending:
+            raise AssertionError(
+                f"expected no messages matching {pattern}, but saw: {', '.join(offending)}"
+            )
+
+    @staticmethod
+    def _filter_to_regex(pattern):
+        """Convert an MQTT topic filter into an anchored regex.
+
+        Follows MQTT matching rules: `+` is one level, a trailing `#` matches the
+        parent level and everything below it.
+        """
+        parts = []
+        multi = False
+        for level in pattern.split("/"):
+            if level == "#":
+                multi = True
+                break
+            parts.append("[^/]*" if level == "+" else re.escape(level))
+        regex = "/".join(parts)
+        if multi:
+            regex += "(/.*)?" if parts else ".*"
+        return re.compile("^" + regex + "$")
 
     @keyword
     def clear_messages(self):

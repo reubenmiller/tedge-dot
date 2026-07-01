@@ -159,6 +159,8 @@ default_mode  = "typed"         # optional; default output mode for this device'
 | `access` | `"read"` \| `"write"` \| `"read_write"` | no | Default `"read"`. |
 | `unit` | string | no | Opaque hint echoed into the sample for flows. |
 | `transform` | object | no | Per-point linear scale `(value*multiplier*10^decimal_shift/divisor)+offset`; see §4.2. |
+| `meta` | object | no | Free-form signal metadata echoed verbatim as `meta` in every sample envelope. Never interpreted by the connector; flows read it for per-signal behaviour (e.g. `on_change`, `deadband`, `min_interval`, `debounce`). |
+| `subscribe` | boolean | no | Default `true`. `false` keeps the point on the polling schedule even when the connector supports push delivery. |
 | `address` | object | yes | **Protocol-specific**; shape defined by the connector spec. |
 
 ### 3.2 Protocol-specific fields
@@ -286,6 +288,7 @@ native address so flows can route or debug). The example below uses Modbus to ma
 | `addr` | object | yes | Protocol-specific address echo (for flow routing/debug). |
 | `seq` | integer | no | Monotonic per-point counter; helps detect drops. |
 | `error` | string | when `quality = bad` | Human-readable failure reason. |
+| `meta` | object | no | The point's `meta` table echoed verbatim by the runtime (§3.1); carries per-signal hints for flows. |
 
 ### 5.1 Quality semantics
 

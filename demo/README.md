@@ -1,0 +1,142 @@
+# All-in-one OT connector demo
+
+Demo every `tedge-dot` OT connector and protocol on a single real Linux device
+with Docker. One compose file runs all the simulators; the installed package
+runs all the connectors under **one** systemd service.
+
+```
+┌──────────────────────────── Linux device ────────────────────────────┐
+│                                                                       │
+│  docker compose (simulators)              tedge-dot.service           │
+│  ┌─────────────────────────┐              (one systemd unit)          │
+│  │ modbus-sim    tcp :502   │◄──────────── tedge-dot (modbus)         │
+│  │ opcua-sim     tcp :4840  │◄──────────── tedge-dot (opcua)          │
+│  │ canbus-sim    vcan0      │◄── socketcan─ tedge-dot (canbus)        │
+│  │ canopen-sim   vcan0      │◄── socketcan─ tedge-dot (canopen)       │
+│  │ profibus-sim  tcp :9200  │◄── socat ⇄ /dev/ttyPROFIBUS0 ⇄ profibus │
+│  └─────────────────────────┘                     │                    │
+│                                                   ▼                    │
+│                              mosquitto :1883 (thin-edge.io broker)     │
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+The connectors publish samples to the thin-edge.io MQTT broker
+(`127.0.0.1:1883`), so thin-edge.io must already be installed on the device.
+
+## Requirements
+
+- A real Linux host (not macOS Docker Desktop — its LinuxKit kernel has no
+  CAN/vcan support). A Linux VM is fine.
+- Docker Engine with privileged containers and host networking.
+- Kernel CAN support for the canbus/canopen sims:
+  `CONFIG_CAN`, `CONFIG_CAN_RAW`, `CONFIG_CAN_VCAN` (`sudo modprobe vcan`).
+- thin-edge.io installed and running (mosquitto on `127.0.0.1:1883`).
+
+## 1. Build the package
+
+Cross-compiles the single `tedge-dot` binary (with **all** protocol features)
+and produces a `.deb`/`.rpm`/`.apk`, entirely inside Docker:
+
+```sh
+just test-data-docker amd64      # or: arm64
+# output: ../tests/data/*_linux_amd64.deb
+```
+
+Or, with a host Rust + goreleaser toolchain:
+
+```sh
+just build                       # writes packages to dist/
+```
+
+## 2. Install the package on the device
+
+```sh
+sudo apt install ./tedge-dot_*_linux_amd64.deb     # deb
+# sudo dnf install ./tedge-dot_*_linux_amd64.rpm   # rpm
+# sudo apk add --allow-untrusted tedge-dot_*.apk   # apk
+```
+
+Installing the package:
+
+- drops one demo config per protocol into `/etc/tedge/plugins/ot/`
+  (`modbus.toml`, `opcua.toml`, `canbus.toml`, `canopen.toml`, `profibus.toml`)
+  plus the CAN database at `/etc/tedge/plugins/ot/can/test.dbc`;
+- installs the supervisor at `/usr/bin/tedge-dot-supervisor`;
+- installs and starts **one** service: `tedge-dot.service`;
+- pulls in `socat` and `iproute2` (used to bridge PROFIBUS and bring up `vcan0`).
+
+## 3. Start the simulators
+
+From a checkout of this repo on the device:
+
+```sh
+just demo-sims-up
+# equivalently:
+# docker compose -f docker-compose.simulators.yaml up -d --build
+```
+
+Restart the connector service so every connector picks up its simulator:
+
+```sh
+sudo systemctl restart tedge-dot.service
+```
+
+## 4. Watch it work
+
+```sh
+# One service, all connectors:
+systemctl status tedge-dot.service
+journalctl -u tedge-dot.service -f
+
+# Live samples on the thin-edge.io broker:
+tedge mqtt sub 'te/+/+/+/+/m/+'
+```
+
+You should see telemetry from all five protocols flowing in.
+
+## How "one systemd service" runs every protocol
+
+`tedge-dot` runs exactly one protocol per process (selected by
+`connector.protocol` in its config). The package ships a small supervisor,
+`tedge-dot-supervisor`, started by `tedge-dot.service`, which:
+
+1. ensures `vcan0` exists (for canbus/canopen);
+2. starts a `socat` serial↔TCP bridge that turns the containerised PROFIBUS
+   slave (TCP `:9200`) into a local serial device, `/dev/ttyPROFIBUS0`;
+3. launches one `tedge-dot <config>` per `*.toml` in `/etc/tedge/plugins/ot/`,
+   each in a restart loop.
+
+systemd owns the whole process group (`KillMode=control-group`), so
+`systemctl stop tedge-dot` cleanly tears down every connector and bridge.
+
+To run only some protocols, remove the configs you don't want from
+`/etc/tedge/plugins/ot/` and restart the service.
+
+## Why PROFIBUS is bridged over TCP
+
+PTY devices are per-container-namespace and can't be shared with the host, so a
+native host connector cannot open a PTY created inside the simulator container.
+The simulator therefore exposes its slave serial line over TCP (`:9200`), and
+the supervisor's `socat` bridge re-materialises it as `/dev/ttyPROFIBUS0` on the
+host — the device the PROFIBUS connector opens.
+
+## Tunables
+
+The supervisor honours these environment variables (set them via a systemd
+drop-in, e.g. `systemctl edit tedge-dot.service`):
+
+| Variable                  | Default                  | Purpose                              |
+|---------------------------|--------------------------|--------------------------------------|
+| `TEDGE_DOT_CONF_DIR`      | `/etc/tedge/plugins/ot`  | Connector config directory           |
+| `TEDGE_DOT_BIN`           | `/usr/bin/tedge-dot`     | Connector binary                     |
+| `TEDGE_DOT_PROFIBUS_TCP`  | `127.0.0.1:9200`         | PROFIBUS simulator TCP endpoint      |
+| `TEDGE_DOT_PROFIBUS_PTY`  | `/dev/ttyPROFIBUS0`      | Host serial device to create         |
+| `TEDGE_DOT_VCAN_IF`       | `vcan0`                  | Virtual CAN interface                |
+| `TEDGE_DOT_RESTART_DELAY` | `5`                      | Per-connector restart backoff (sec)  |
+
+## Teardown
+
+```sh
+just demo-sims-down
+sudo systemctl stop tedge-dot.service
+```

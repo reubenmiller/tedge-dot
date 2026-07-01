@@ -201,6 +201,13 @@ impl Connector for CanbusConnector {
     }
 
     async fn disconnect(&mut self) -> Result<(), ConnectorError> {
+        // Abort push loops explicitly: dropping a JoinHandle detaches the task, which would
+        // leave the old subscription publishing after a config reload re-subscribes.
+        for state in self.state.values_mut() {
+            if let Some(task) = state._task.take() {
+                task.abort();
+            }
+        }
         self.state.clear();
         Ok(())
     }
@@ -254,7 +261,7 @@ mod linux_impl {
         pub(super) async fn platform_subscribe(
             &mut self,
             device: &DeviceId,
-            _points: &[PointRef],
+            points: &[PointRef],
             sink: SampleSink,
         ) -> Result<(), ConnectorError> {
             let dev_model = self
@@ -262,9 +269,19 @@ mod linux_impl {
                 .get(device)
                 .ok_or_else(|| ConnectorError::NotConnected(device.clone()))?;
 
+            // Only push the requested points; anything else stays on the caller's schedule.
             let mut id_map: HashMap<u32, Vec<(String, CanPoint)>> = HashMap::new();
-            for (pid, pt) in &dev_model.points {
-                id_map.entry(pt.signal.can_id).or_default().push((pid.clone(), pt.clone()));
+            for r in points {
+                let pt = dev_model.points.get(&r.id).ok_or_else(|| {
+                    ConnectorError::UnknownPoint {
+                        device: device.clone(),
+                        point: r.id.clone(),
+                    }
+                })?;
+                id_map
+                    .entry(pt.signal.can_id)
+                    .or_default()
+                    .push((r.id.clone(), pt.clone()));
             }
 
             let state = self

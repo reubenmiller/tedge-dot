@@ -107,6 +107,33 @@ Writes A Boolean Node And Reads It Back
     ${value}=    Get Json Field    ${payload}    value
     Should Be Equal    ${value}    ${True}
 
+Subscribed Node Pushes Value Changes
+    [Documentation]    The ticks point is delivered by an OPC-UA subscription (monitored item),
+    ...                not polling: the simulator increments it every second and each change
+    ...                arrives as a pushed sample with a strictly increasing value.
+    ${first}=    Wait For Sample    ${SAMPLE_PREFIX}/ticks    timeout=${SAMPLE_TIMEOUT}
+    Sample Should Be Good    ${first}
+    ${v1}=    Get Json Field    ${first}    value
+    ${second}=    Wait For Sample    ${SAMPLE_PREFIX}/ticks    timeout=${SAMPLE_TIMEOUT}
+    ${v2}=    Get Json Field    ${second}    value
+    Should Be True    ${v2} > ${v1}
+
+Pushed Sample Echoes Point Meta
+    [Documentation]    The point's free-form meta table (connector config) is echoed verbatim
+    ...                in the sample envelope, so flows can apply per-signal behaviour.
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/ticks    timeout=${SAMPLE_TIMEOUT}
+    ${on_change}=    Get Json Field    ${payload}    meta.on_change
+    Should Be Equal    ${on_change}    ${True}
+    ${source}=    Get Json Field    ${payload}    meta.source
+    Should Be Equal    ${source}    sim
+
+Polled Sample Carries The Device Name
+    [Documentation]    Regression: the runtime stamps the configured device name on polled
+    ...                samples (topic AND envelope), even when the driver leaves it empty.
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/temperature    timeout=${SAMPLE_TIMEOUT}
+    ${device}=    Get Json Field    ${payload}    device
+    Should Be Equal    ${device}    ${DEVICE}
+
 
 *** Keywords ***
 Connect And Subscribe

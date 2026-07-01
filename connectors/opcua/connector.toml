@@ -8,6 +8,7 @@
 #   ns=2;s=Setpoint      -> int32   0      (read/write round-trip)
 #   ns=2;s=Running       -> bool    false  (read/write round-trip)
 #   ns=2;s=DoesNotExist  -> read returns a Bad status -> quality "bad"
+#   ns=2;s=Ticks         -> uint32, +1 every second -> push delivery via subscription
 
 [connector]
 protocol      = "opcua"
@@ -31,18 +32,21 @@ default_mode     = "typed"
 
   [[device.point]]
   id       = "temperature"
+  subscribe = false
   datatype = "float64"
   unit     = "°C"
   address  = { node_id = "ns=2;s=Temperature" }
 
   [[device.point]]
   id       = "count_u32"
+  subscribe = false
   datatype = "uint32"
   address  = { node_id = "ns=2;s=Count" }
 
   # Int32 used for the numeric write round-trip.
   [[device.point]]
   id       = "setpoint"
+  subscribe = false
   datatype = "int32"
   access   = "read_write"
   address  = { node_id = "ns=2;s=Setpoint" }
@@ -50,6 +54,7 @@ default_mode     = "typed"
   # Boolean used for the boolean write round-trip.
   [[device.point]]
   id       = "running"
+  subscribe = false
   datatype = "bool"
   access   = "read_write"
   address  = { node_id = "ns=2;s=Running" }
@@ -57,5 +62,16 @@ default_mode     = "typed"
   # Reading this node returns a Bad status -> quality "bad".
   [[device.point]]
   id       = "bad_point"
+  subscribe = false
   datatype = "uint16"
   address  = { node_id = "ns=2;s=DoesNotExist" }
+
+  # Incremented every second by the simulator; delivered via OPC-UA subscription
+  # (monitored item) rather than polling — the other points opt out with subscribe = false
+  # (static nodes only notify once, and bad_point would reject the device subscription).
+  # The free-form meta table is echoed verbatim in every sample envelope.
+  [[device.point]]
+  id       = "ticks"
+  datatype = "uint32"
+  address  = { node_id = "ns=2;s=Ticks" }
+  meta     = { on_change = true, source = "sim" }

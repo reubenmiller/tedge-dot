@@ -85,6 +85,7 @@ fn pref(id: &str, mode: Mode, datatype: Option<DataType>, access: Access) -> Poi
         access,
         unit: None,
         transform: Default::default(),
+        interval: None,
     }
 }
 
