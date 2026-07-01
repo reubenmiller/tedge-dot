@@ -16,7 +16,9 @@
 // sample (sample.meta). When present, meta.on_change / meta.deadband / meta.min_interval /
 // meta.debounce override the flow-wide params for that signal only — so one flow instance can
 // serve a whole plant while individual signals opt into their own behaviour, declared next to
-// the signal's address in the connector config.
+// the signal's address in the connector config. Naming works the same way:
+// meta.measurement.group / meta.measurement.series name the signal's measurement per point
+// (e.g. written by the Cloud Fieldbus import from a device type's measurementMapping).
 
 const decoder = new TextDecoder();
 
@@ -76,15 +78,25 @@ function shapeBody(cfg, sample, scaled) {
 }
 
 // Resolve the measurement group + series for a sample. Precedence:
-//   1. explicit cfg.group / cfg.series (flow-wide overrides),
-//   2. point-id convention: when point_separator is set and the point id contains it, the id is
+//   1. per-signal sample.meta.measurement.group / .series (echoed from the connector point's
+//      `meta` table, e.g. written by the Cloud Fieldbus import from a device type's
+//      measurementMapping.type/series) — meta wins over the flow params, consistent with the
+//      other per-signal meta overrides,
+//   2. explicit cfg.group / cfg.series (flow-wide overrides),
+//   3. point-id convention: when point_separator is set and the point id contains it, the id is
 //      split once into "<group><sep><series>" (e.g. "." maps "Environment.Temperature" ->
 //      group "Environment", series "Temperature"). This lets ONE flow instance remap many
 //      signals just by how their point ids are named on the connector.
-//   3. defaults: group = sample protocol, series = point id.
+//   4. defaults: group = sample protocol, series = point id.
 function resolveNaming(cfg, sample) {
-  let group = cfg.group || "";
-  let series = cfg.series || "";
+  const mm =
+    (sample.meta &&
+      typeof sample.meta.measurement === "object" &&
+      !Array.isArray(sample.meta.measurement) &&
+      sample.meta.measurement) ||
+    {};
+  let group = mm.group || cfg.group || "";
+  let series = mm.series || cfg.series || "";
   const sep = cfg.point_separator || "";
   if (sep && (!group || !series)) {
     const id = sample.point || "";

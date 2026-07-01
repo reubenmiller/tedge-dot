@@ -16,6 +16,8 @@ min_interval = "${params.min_interval}"
 debounce     = "${params.debounce}"
 # Every setting above can also be overridden per signal via the point's `meta` table in the
 # connector config (echoed as sample.meta): meta.on_change / deadband / min_interval / debounce.
+# Naming too: meta.measurement.group / meta.measurement.series name that signal's measurement
+# (written e.g. by the Cloud Fieldbus import from a device type's measurementMapping).
 # Batch every series of a device into one measurement, flushed on the step interval below.
 # "true" or "false".
 combine      = "${params.combine}"

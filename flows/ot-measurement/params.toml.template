@@ -37,6 +37,9 @@ combine_interval = "10s"
 #   target_topic - where to publish. Empty -> te/device/<device>///m/<group>
 #   group        - measurement group (the outer JSON key). Empty -> the sample's protocol
 #   series       - series name (inner JSON key). Empty -> the sample's point id
+# A signal can also name its own measurement through the point's meta table (wins over the
+# flow-wide group/series, like the other meta overrides):
+#   meta = { measurement = { group = "Environment", series = "Temperature" } }
 # The engineering unit is a per-signal property declared on the connector point (point.unit) and
 # echoed in the sample, so it is applied automatically (series value becomes { value, unit }).
 target_topic = ""

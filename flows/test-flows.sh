@@ -172,6 +172,27 @@ check_absent "measurement: meta.debounce waits for stability" ot-measurement \
   "$(printf '[te/device/plc1/ot/modbus/sample/b1] %s\n[te/device/plc1/ot/modbus/sample/b1] %s\n[te/device/plc1/ot/modbus/sample/b1] %s' "$DE1" "$DE2" "$DE3")" \
   '"time":"2026-05-30T10:00:03.000Z"' '"time":"2026-05-30T10:00:04.000Z"'
 
+# meta.measurement: per-signal group/series naming echoed from the connector point config
+# (e.g. written by the Cloud Fieldbus import shim from a device type's measurementMapping).
+MMEAS='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"temperature","mode":"typed","datatype":"uint16","value":17.001,"value_repr":"number","raw":"4269","quality":"good","addr":{},"meta":{"measurement":{"group":"Environment","series":"Temperature"}}}'
+check "measurement: meta.measurement names group/series" ot-measurement \
+  "[te/device/plc1/ot/modbus/sample/temperature] $MMEAS" \
+  '[te/device/plc1///m/Environment] {"Environment":{"Temperature":17.001},"time":"2026-05-30T10:00:00.000Z"}'
+
+# meta.measurement wins over the point_separator convention (per-signal beats flow-wide).
+MMDOT='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"Foo.Bar","mode":"typed","datatype":"uint16","value":1,"value_repr":"number","raw":"0001","quality":"good","addr":{},"meta":{"measurement":{"group":"Environment","series":"Temperature"}}}'
+mmtmp="$(flow_with_params ot-measurement 'point_separator = "."')"
+mmout="$(printf '%s\n' "[te/device/plc1/ot/modbus/sample/Foo.Bar] $MMDOT" | tedge flows test --flows-dir "$mmtmp" 2>/dev/null)"
+rm -rf "$mmtmp"
+if [[ "$mmout" == *'{"Environment":{"Temperature":1}'* && "$mmout" != *'"Foo"'* ]]; then
+  echo "ok   - measurement: meta.measurement wins over point_separator"
+  pass=$((pass + 1))
+else
+  echo "FAIL - measurement: meta.measurement wins over point_separator"
+  echo "       got: $mmout"
+  fail=$((fail + 1))
+fi
+
 # combine: two series of one device merged into a single measurement, flushed on interval.
 SLVL='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"level_f32","mode":"typed","datatype":"float32","value":404.17,"value_repr":"number","raw":"43ca15c3","quality":"good","addr":{}}'
 check_params "measurement: combine merges series on interval" ot-measurement \
