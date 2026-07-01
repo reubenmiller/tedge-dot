@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build & unit/property tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace
+      - name: Unit + integration + property tests
+        run: cargo test --workspace
+      - name: Clippy
+        # Not -D warnings yet: pre-existing lints in the CAN/profibus crates are tracked
+        # separately; new warnings still surface in the log.
+        run: cargo clippy --workspace --all-targets
+
+  flows:
+    name: Flow tests (tedge flows test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install thin-edge.io
+        run: curl -fsSL https://thin-edge.io/install.sh | sh -s
+      - name: Run flow tests
+        run: ./flows/test-flows.sh
+
+  fuzz-smoke:
+    name: Fuzz smoke (30s per target)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/sdk/fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Fuzz all targets briefly
+        working-directory: crates/sdk
+        run: |
+          for t in decode_primitive config_toml transform sample_envelope; do
+            cargo +nightly fuzz run "$t" -- -max_total_time=30
+          done
+
+  e2e:
+    name: e2e (${{ matrix.protocol }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        protocol: [modbus, opcua, canbus, canopen, profibus]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Load vcan kernel module (SocketCAN suites)
+        if: matrix.protocol == 'canbus' || matrix.protocol == 'canopen'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-modules-extra-$(uname -r)
+          sudo modprobe vcan
+      - uses: extractions/setup-just@v2
+      - name: Run e2e suite
+        run: just test-e2e ${{ matrix.protocol }}
+      - name: Upload robot output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: robot-output-${{ matrix.protocol }}
+          path: connectors/${{ matrix.protocol }}/output/
+          if-no-files-found: ignore
