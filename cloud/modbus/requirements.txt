@@ -1,0 +1,5 @@
+# Cloud (Cumulocity) e2e suite dependencies — used by `just test-cloud modbus`.
+robotframework~=7.0
+robotframework-c8y
+c8y-api
+python-dotenv
