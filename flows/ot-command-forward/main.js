@@ -27,7 +27,10 @@ export function onMessage(message, context) {
   const device = parts[2];
   const commandType = parts[parts.length - 2];
   const id = parts[parts.length - 1];
-  const internalPrefix = "[ot]";
+  // Marks connector-side command ids so mapper-declared operations can't collide with the
+  // generic ot_<verb> commands (one-operation-per-command-type limitation). Bracket-free on
+  // purpose: `[`/`]` in a topic breaks the `[topic] payload` line format of `tedge flows test`.
+  const internalPrefix = "ot--";
 
   // Only forward generic OT commands (cmd type prefixed with `ot_`).
   if (!commandType.startsWith("ot_")) return [];

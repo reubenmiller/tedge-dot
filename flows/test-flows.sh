@@ -219,15 +219,15 @@ check_params "registration: publishes twin fragment from info" ot-registration \
 # --- ot-command-forward (thin-edge cmd -> connector write) ---
 check "command-forward: init forwarded" ot-command-forward \
   '[te/device/plc1///cmd/ot_write/abc] {"status":"init","point":"coil_rw","value":true}' \
-  '[te/device/plc1/ot/modbus/cmd/write/abc] {"status":"init","point":"coil_rw","value":true}'
+  '[te/device/plc1/ot/modbus/cmd/write/ot--abc] {"status":"init","point":"coil_rw","value":true}'
 check_empty "command-forward: non-init ignored" ot-command-forward \
   '[te/device/plc1///cmd/ot_write/abc] {"status":"successful","point":"coil_rw"}'
 check "command-forward: set-config init forwarded" ot-command-forward \
   '[te/device/main///cmd/ot_set_config/cfg1] {"status":"init","target":"connector","config":{"poll_interval":"5s"}}' \
-  '[te/device/main/ot/modbus/cmd/set-config/cfg1] {"status":"init","target":"connector","config":{"poll_interval":"5s"}}'
+  '[te/device/main/ot/modbus/cmd/set-config/ot--cfg1] {"status":"init","target":"connector","config":{"poll_interval":"5s"}}'
 check "command-forward: define-device init forwarded" ot-command-forward \
   '[te/device/main///cmd/ot_define_device/d1] {"status":"init","device":{"name":"plc-9"}}' \
-  '[te/device/main/ot/modbus/cmd/define-device/d1] {"status":"init","device":{"name":"plc-9"}}'
+  '[te/device/main/ot/modbus/cmd/define-device/ot--d1] {"status":"init","device":{"name":"plc-9"}}'
 check_empty "command-forward: non-ot command ignored" ot-command-forward \
   '[te/device/plc1///cmd/restart/abc] {"status":"init"}'
 
@@ -242,9 +242,9 @@ check "command-result: set-config result mirrored" ot-command-result \
   '[te/device/main/ot/modbus/cmd/set-config/cfg1] {"status":"successful"}' \
   '[te/device/main///cmd/ot_set_config/cfg1]'
 check_empty "command-result: init not mirrored (no loop)" ot-command-result \
-  '[te/device/plc1/ot/modbus/cmd/write/abc] {"status":"init","point":"coil_rw","value":true}'
+  '[te/device/plc1/ot/modbus/cmd/write/ot--abc] {"status":"init","point":"coil_rw","value":true}'
 check "command-result: c8y-mapper metadata preserved in result" ot-command-result \
-  $'[te/device/plc1/ot/modbus/cmd/write/[ot]abc] {"status":"init","point":"coil_rw","value":true,"c8y-mapper":{"on_fragment":"c8y_SetCoil","output":null}}\n[te/device/plc1/ot/modbus/cmd/write/[ot]abc] {"status":"successful","point":"coil_rw","value":true}' \
+  $'[te/device/plc1/ot/modbus/cmd/write/ot--abc] {"status":"init","point":"coil_rw","value":true,"c8y-mapper":{"on_fragment":"c8y_SetCoil","output":null}}\n[te/device/plc1/ot/modbus/cmd/write/ot--abc] {"status":"successful","point":"coil_rw","value":true}' \
   '"c8y-mapper":{"on_fragment":"c8y_SetCoil","output":null}'
 
 echo

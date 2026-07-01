@@ -18,7 +18,7 @@ export function onMessage(message, context) {
   const parts = message.topic.split("/");
   const device = parts[2];
   const verb = parts[parts.length - 2];
-  const id = `${parts[parts.length - 1]}`.replace("[ot]", "");
+  const id = `${parts[parts.length - 1]}`.replace(/^ot--/, "");
   const commandType = prefix + verb.split("-").join("_");
 
   let payload;
