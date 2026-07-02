@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+# c8y-fieldbus-import: Cumulocity Cloud Fieldbus -> tedge-dot `define-device` shim.
+#
+# Closes gap G1 of doc/migration/modbus-plugin-gap-analysis.md (RFC 0002 increment 1): when
+# the Cloud Fieldbus UI assigns a c8y_ModbusDeviceType to a child device, this script
+#   1. creates the external identity `<main device id>:device:<name>` (type c8y_Serial) for
+#      the UI-created child managed object via the mapper's local c8y proxy, so the thin-edge
+#      child registration (ot-registration -> c8y mapper) adopts that MO instead of creating a
+#      second one (legacy tedge_modbus.operations.c8y_modbus_device parity);
+#   2. fetches the c8y_ModbusDeviceType managed object referenced by the operation's `type`
+#      inventory path and translates its c8y_Registers / c8y_Coils definitions into OT
+#      Connector Contract points (address/datatype/transform/unit; measurementMapping into
+#      the point's meta.measurement table, honoured by the ot-measurement flow);
+#   3. publishes one generic `ot_define_device` thin-edge command (bridged to the connector's
+#      `define-device` management verb by ot-command-forward) and waits until the connector
+#      reports it applied — i.e. the device/points are persisted into the connector TOML.
+#
+# Why a shim script and not the `ot-fieldbus-import` flow sketched in RFC 0002: the tedge
+# flows JS runtime (tedge 2.x) exposes no HTTP client — no fetch(), no XMLHttpRequest, no
+# module system (verified empirically by dumping globalThis from a probe flow under
+# `tedge flows test`). Steps 1 and 2 need HTTP against the mapper's c8y proxy, so the
+# translation runs from the c8y custom-operation template (operations/c8y_ModbusDevice)
+# instead — the same execution point the legacy Python plugin used. If a future thin-edge
+# release exposes HTTP to flows, the jq translation below can move into a flow unchanged.
+#
+# Usage:
+#   c8y-fieldbus-import '<c8y_ModbusDevice fragment json>'
+#       Full device-side run. Two payload shapes are accepted:
+#         a) Cloud Fieldbus UI shape:
+#            {"protocol":"TCP","address":1,"ipAddress":"simulator","id":"<child MO id>",
+#             "name":"fieldbus1","type":"/inventory/managedObjects/<type MO id>"}
+#         b) Connector shape (fallback, no HTTP needed):
+#            {"device": { ...a [[device]] config entry... }}
+#   c8y-fieldbus-import --translate <name> <protocol> <ip_address> <address> < type-mo.json
+#       Offline: read a c8y_ModbusDeviceType managed object on stdin and print the translated
+#       `device` object (used by cloud/modbus/tests/test_fieldbus_import.sh).
+#
+# Environment:
+#   C8Y_PROXY             mapper's local Cumulocity proxy    (default http://127.0.0.1:8001/c8y)
+#   FIELDBUS_PROTOCOL     connector protocol topic segment   (default modbus)
+#   FIELDBUS_TIMEOUT      seconds to wait for define-device  (default 60)
+#   FIELDBUS_SERIAL_PORT  serial port for RTU devices        (default /dev/ttyUSB0)
+#                         TODO: resolve from [connection.serial] / c8y_SerialConfiguration
+#                         instead of an env default.
+set -u
+
+C8Y_PROXY="${C8Y_PROXY:-http://127.0.0.1:8001/c8y}"
+FIELDBUS_PROTOCOL="${FIELDBUS_PROTOCOL:-modbus}"
+FIELDBUS_TIMEOUT="${FIELDBUS_TIMEOUT:-60}"
+FIELDBUS_SERIAL_PORT="${FIELDBUS_SERIAL_PORT:-/dev/ttyUSB0}"
+
+die() {
+    echo "c8y-fieldbus-import: $*" >&2
+    exit 1
+}
+
+# Translate a c8y_ModbusDeviceType managed object (stdin) into a contract `device` object.
+#
+# Register mapping (Cloud Fieldbus definition -> [[device.point]]):
+#   name                  -> id            (fallback register_<number>)
+#   number                -> address.address, input -> address.table (input|holding)
+#   startBit/noBits/signed-> datatype + address.count:
+#       startBit 0, noBits 16/32/64        -> uint16/int16, uint32/..., count noBits/16
+#       sub-register bit field (fits 16)   -> uint16 + address.start_bit/bit_count
+#         Cloud Fieldbus counts startBit from the register MSB (legacy plugin convention:
+#         buffer >> (16 - startBit - noBits)); the connector counts start_bit from the LSB,
+#         hence start_bit = 16 - startBit - noBits.
+#         TODO: signed sub-register bit fields decode unsigned (SDK extract_bitfield).
+#       anything else                      -> skipped with a warning (never crash the import).
+#         TODO: unaligned multi-register bit fields need SDK support.
+#   multiplier/divisor    -> transform.multiplier / transform.divisor
+#   offset (a.k.a. decimalPlaces in the UI) -> transform.decimal_shift — Cloud Fieldbus
+#       "offset" is a decimal-point shift, applied by the legacy reader as value * 10^offset,
+#       which is exactly the SDK's 10^decimal_shift term (NOT transform.offset).
+#   unit                  -> unit
+#   measurementMapping    -> meta.measurement = { group: .type, series: .series }
+#   holding registers get access read_write (legacy c8y_SetRegister writability parity).
+# Coil mapping (beyond legacy parity — the legacy plugin ignored c8y_Coils):
+#   number -> address.address, input -> table (discrete_input|coil), datatype bool,
+#   writable coils (table coil) get access read_write, measurementMapping as above.
+# shellcheck disable=SC2016 # $name/$ip/... are jq --arg variables, not shell expansions
+JQ_TRANSLATE='
+def meta_of($r):
+  if ($r.measurementMapping.type? // "") != ""
+  then { meta: { measurement: { group: $r.measurementMapping.type,
+                                series: ($r.measurementMapping.series // $r.name) } } }
+  else {} end;
+
+def transform_of($r):
+  (   (if (($r.multiplier // 1) != 1) then { multiplier: $r.multiplier } else {} end)
+    + (if (($r.divisor // 1) != 1) then { divisor: $r.divisor } else {} end)
+    + (if (($r.offset // $r.decimalPlaces // 0) != 0)
+       then { decimal_shift: ($r.offset // $r.decimalPlaces) } else {} end)
+  ) as $t
+  | if $t == {} then {} else { transform: $t } end;
+
+def reg_supported($r):
+  (($r.startBit // 0) == 0 and (($r.noBits // 16) | IN(16, 32, 64)))
+  or (($r.startBit // 0) + ($r.noBits // 16)) <= 16;
+
+def reg_point:
+  . as $r
+  | ($r.startBit // 0) as $sb
+  | ($r.noBits // 16) as $nb
+  | (if ($r.input // false) then "input" else "holding" end) as $table
+  | (if ($r.signed // false) then "int" else "uint" end) as $sign
+  | (if $sb == 0 and ($nb | IN(16, 32, 64)) then
+       { datatype: ($sign + ($nb | tostring)),
+         address: { table: $table, address: $r.number, count: ($nb / 16) } }
+     elif ($sb + $nb) <= 16 then
+       { datatype: "uint16",
+         address: { table: $table, address: $r.number, count: 1,
+                    start_bit: (16 - $sb - $nb), bit_count: $nb } }
+     else null end) as $shape
+  | if $shape == null then empty else
+      { id: ($r.name // ("register_" + ($r.number | tostring))) }
+      + $shape
+      + (if $table == "holding" then { access: "read_write" } else {} end)
+      + (if ($r.unit // "") != "" then { unit: $r.unit } else {} end)
+      + transform_of($r)
+      + meta_of($r)
+    end;
+
+def coil_point:
+  . as $c
+  | (if ($c.input // false) then "discrete_input" else "coil" end) as $table
+  | { id: ($c.name // ("coil_" + ($c.number | tostring))),
+      datatype: "bool",
+      address: { table: $table, address: $c.number, count: 1 } }
+    + (if $table == "coil" then { access: "read_write" } else {} end)
+    + meta_of($c);
+
+{
+  name: $name,
+  protocol_address:
+    (if ($protocol | ascii_upcase) == "TCP"
+     then { transport: "tcp", host: $ip, port: 502, unit_id: ($address | tonumber) }
+     else { transport: "rtu", serial_port: $serial_port, unit_id: ($address | tonumber) }
+     end),
+  default_mode: "typed",
+  point: (((.c8y_Registers // []) | map(reg_point))
+          + ((.c8y_Coils // []) | map(coil_point)))
+}
+'
+
+# List the register names the translation had to skip (unsupported bit layouts).
+# shellcheck disable=SC2016 # $r is a jq function parameter, not a shell expansion
+JQ_SKIPPED='
+def reg_supported($r):
+  (($r.startBit // 0) == 0 and (($r.noBits // 16) | IN(16, 32, 64)))
+  or (($r.startBit // 0) + ($r.noBits // 16)) <= 16;
+[ (.c8y_Registers // [])[] | select(reg_supported(.) | not)
+  | (.name // (.number | tostring)) ] | join(", ")
+'
+
+# translate <name> <protocol> <ip_address> <address>  (type MO on stdin, device json on stdout)
+translate() {
+    local mo skipped device
+    mo="$(cat)" || return 1
+    skipped="$(jq -r "$JQ_SKIPPED" <<<"$mo")" || return 1
+    if [ -n "$skipped" ]; then
+        echo "c8y-fieldbus-import: skipping register(s) with unsupported bit layout: $skipped" >&2
+    fi
+    device="$(jq -c \
+        --arg name "$1" \
+        --arg protocol "$2" \
+        --arg ip "$3" \
+        --arg address "$4" \
+        --arg serial_port "$FIELDBUS_SERIAL_PORT" \
+        "$JQ_TRANSLATE" <<<"$mo")" || return 1
+    printf '%s\n' "$device"
+}
+
+# Publish an `ot_define_device` init command and wait for its terminal status. The mapper only
+# clears retained command messages for ids it created itself, so this cleans up after both the
+# thin-edge command topic and the connector command topic (best effort).
+publish_and_wait() {
+    local device_json="$1"
+    local cmd_id cmd_topic connector_topic status_file sub_pid waited result reason
+    cmd_id="fieldbus-$(date +%s)-$$"
+    cmd_topic="te/device/main///cmd/ot_define_device/${cmd_id}"
+    connector_topic="te/device/main/ot/${FIELDBUS_PROTOCOL}/cmd/define-device/ot--${cmd_id}"
+    status_file="$(mktemp)"
+
+    tedge mqtt sub --no-topic "$cmd_topic" >"$status_file" 2>/dev/null &
+    sub_pid=$!
+    sleep 1 # let the subscription establish before publishing
+
+    tedge mqtt pub -r -q 1 "$cmd_topic" \
+        "$(jq -nc --argjson device "$device_json" '{ status: "init", device: $device }')" ||
+        die "failed to publish $cmd_topic"
+
+    waited=0
+    result="timeout"
+    while [ "$waited" -lt "$FIELDBUS_TIMEOUT" ]; do
+        if grep -q '"status":"successful"' "$status_file" 2>/dev/null; then
+            result="successful"
+            break
+        fi
+        if grep -q '"status":"failed"' "$status_file" 2>/dev/null; then
+            result="failed"
+            break
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    kill "$sub_pid" 2>/dev/null
+
+    # Clear the retained request/result messages on both sides of the bridge.
+    tedge mqtt pub -r -q 1 "$cmd_topic" '' 2>/dev/null
+    tedge mqtt pub -r -q 1 "$connector_topic" '' 2>/dev/null
+
+    case "$result" in
+    successful)
+        echo "define-device applied (command $cmd_id)"
+        rm -f "$status_file"
+        ;;
+    failed)
+        reason="$(grep '"status":"failed"' "$status_file" | tail -n 1 | jq -r '.reason // "unknown"')"
+        rm -f "$status_file"
+        die "define-device failed: $reason"
+        ;;
+    *)
+        rm -f "$status_file"
+        die "timed out after ${FIELDBUS_TIMEOUT}s waiting for define-device (command $cmd_id)"
+        ;;
+    esac
+}
+
+main() {
+    [ $# -eq 1 ] || die "expected 1 argument (the c8y_ModbusDevice fragment), got $#"
+    local fragment="$1"
+    local device_json name child_id type_path protocol address ip main_id body code out reason
+
+    jq -e . >/dev/null 2>&1 <<<"$fragment" || die "argument is not valid JSON: $fragment"
+
+    # Fallback path: the payload already carries a connector-shaped device object.
+    device_json="$(jq -ce '.device // empty' <<<"$fragment")"
+    if [ -n "$device_json" ]; then
+        publish_and_wait "$device_json"
+        return
+    fi
+
+    # Cloud Fieldbus UI shape.
+    name="$(jq -re '.name // empty' <<<"$fragment")" || die "payload requires 'name'"
+    child_id="$(jq -re '.id // empty | tostring' <<<"$fragment")" || die "payload requires 'id'"
+    type_path="$(jq -re '.type // empty' <<<"$fragment")" || die "payload requires 'type'"
+    protocol="$(jq -re '.protocol // "TCP"' <<<"$fragment")"
+    address="$(jq -re '.address // 1 | tostring' <<<"$fragment")"
+    ip="$(jq -re '.ipAddress // ""' <<<"$fragment")"
+
+    main_id="$(tedge config get device.id)" || die "cannot resolve tedge device.id"
+
+    # 1. Link the UI-created child MO: create the external id the c8y mapper derives for the
+    #    thin-edge child registration. 201 = created, 409 = already linked (re-assign) — both ok.
+    body="$(jq -nc --arg externalId "${main_id}:device:${name}" \
+        '{ externalId: $externalId, type: "c8y_Serial" }')"
+    out="$(mktemp)"
+    code="$(curl -s -o "$out" -w '%{http_code}' -X POST \
+        -H 'Content-Type: application/json' -H 'Accept: application/json' \
+        -d "$body" "${C8Y_PROXY}/identity/globalIds/${child_id}/externalIds")"
+    case "$code" in
+    201 | 409) ;;
+    *)
+        reason="$(cat "$out" 2>/dev/null)"
+        rm -f "$out"
+        die "creating external id for child MO $child_id failed: HTTP $code $reason"
+        ;;
+    esac
+    rm -f "$out"
+
+    # 2. Fetch the c8y_ModbusDeviceType managed object and translate it.
+    out="$(mktemp)"
+    curl -sf -H 'Accept: application/json' "${C8Y_PROXY}${type_path}" >"$out" ||
+        { rm -f "$out"; die "fetching device type ${C8Y_PROXY}${type_path} failed"; }
+    device_json="$(translate "$name" "$protocol" "$ip" "$address" <"$out")" ||
+        { rm -f "$out"; die "translating device type ${type_path} failed"; }
+    rm -f "$out"
+
+    # 3. Drive the connector's define-device verb and wait for the TOML to be persisted.
+    publish_and_wait "$device_json"
+}
+
+if [ "${1:-}" = "--translate" ]; then
+    shift
+    [ $# -eq 4 ] || die "--translate expects <name> <protocol> <ip_address> <address>"
+    translate "$1" "$2" "$3" "$4" || die "translation failed"
+else
+    main "$@"
+fi

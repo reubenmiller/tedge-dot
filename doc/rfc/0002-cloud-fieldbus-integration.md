@@ -74,3 +74,42 @@ c8y_ModbusDeviceType register        →  [[device.point]]
    connector spec gains a "fieldbus mapping" section).
 4. Export path: publish the effective TOML-derived descriptor as a twin fragment so the UI
    reflects device-side edits.
+
+## Status update (2026-07): increment 1 implemented — in the shim layer, not a flow
+
+Increment 1 has landed, but as a **Cumulocity custom-operation shim script** rather than the
+`ot-fieldbus-import` flow of option 1. The flow home is not currently possible: the tedge
+flows JS runtime (tedge 2.x) exposes no HTTP client — no `fetch`, no `XMLHttpRequest`, no
+module system. This was verified empirically by running a probe flow through
+`tedge flows test` and dumping `Object.getOwnPropertyNames(globalThis)`; the global set is
+the bare ECMAScript library plus `TextEncoder`/`TextDecoder`/`console`/`crypto`. Fetching the
+`c8y_ModbusDeviceType` managed object and creating the child external identity therefore
+cannot happen inside a flow.
+
+The translator lives in [`operations/c8y-fieldbus-import`](../../operations/c8y-fieldbus-import)
+(bash + jq), executed by the c8y mapper via the
+[`operations/c8y_ModbusDevice`](../../operations/c8y_ModbusDevice) template — the same
+execution point the legacy Python plugin used. On a Cloud Fieldbus assignment it
+
+1. creates the `<main device id>:device:<name>` external identity (type `c8y_Serial`) for the
+   UI-created child MO via the mapper's local proxy (`http://127.0.0.1:8001/c8y`), so the
+   thin-edge child registration adopts that MO (legacy parity; 409 = already linked is fine);
+2. fetches the device-type MO from the operation's `type` inventory path and translates
+   `c8y_Registers` **and** `c8y_Coils` (beyond legacy parity) into contract points:
+   `number`/`startBit`/`noBits`/`signed`/`input` → `address` + `datatype`,
+   `multiplier`/`divisor`/`offset` → `transform` (Cloud Fieldbus `offset` is a decimal shift,
+   i.e. `transform.decimal_shift`), `unit` → `unit`, and `measurementMapping.type/series` →
+   `meta.measurement.group/series`, which `ot-measurement` now honours per signal;
+3. publishes one `ot_define_device` command and waits for the connector to persist the TOML
+   (so the cloud operation only turns SUCCESSFUL once the config file is updated).
+
+The translation is offline-unit-tested by
+[`cloud/modbus/tests/test_fieldbus_import.sh`](../../cloud/modbus/tests/test_fieldbus_import.sh);
+the live round-trip is covered by
+[`cloud/modbus/tests/fieldbus_c8y.robot`](../../cloud/modbus/tests/fieldbus_c8y.robot)
+(increment 2).
+
+Deferred with TODOs in the script header: alarm/event/status mappings (gap G4), RTU
+serial-port resolution (env default until `[connection.serial]` is consulted), signed and
+multi-register bit fields. Should a future thin-edge release expose HTTP to flows, the jq
+translation can move into the originally planned `ot-fieldbus-import` flow unchanged.

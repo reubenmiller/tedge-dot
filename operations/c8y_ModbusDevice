@@ -1,15 +1,26 @@
-# c8y_ModbusDevice -> generic `ot_define_device` command (add/replace a device + points).
+# c8y_ModbusDevice -> Cloud Fieldbus import -> generic `ot_define_device` command.
 #
 # Combines the legacy `c8y_ModbusDevice` (transport/child device) with the point definitions the
-# legacy `c8y_Coils`/`c8y_Registers` operations used to stage. The operation payload must carry a
-# `device` object shaped like a `[[device]]` config entry (name, protocol_address, default_mode,
-# point[]). The SDK runtime inserts/replaces the device by name, persists, and live-reloads;
-# child-device registration in the cloud then happens via the ot-registration flow when the link
-# comes up.
+# legacy `c8y_Coils`/`c8y_Registers` operations used to stage. Two payload shapes are accepted
+# (both handled by /usr/bin/c8y-fieldbus-import, see operations/c8y-fieldbus-import):
+#
+#   1. The stock Cloud Fieldbus UI shape — {"protocol","address","ipAddress","id","name","type"}
+#      where `type` is the inventory path of a c8y_ModbusDeviceType MO. The script creates the
+#      `<main device id>:device:<name>` external identity for the UI-created child MO (so the
+#      thin-edge child registration adopts it), fetches the device type via the mapper's local
+#      c8y proxy, and translates its c8y_Registers/c8y_Coils into contract points.
+#   2. A connector-shaped `device` object ({"device": {...[[device]] config entry...}}), passed
+#      through unchanged.
+#
+# Either way the script publishes one `ot_define_device` command; ot-command-forward bridges it
+# to the connector's `define-device` verb, the SDK runtime inserts/replaces the device by name,
+# persists the TOML, and live-reloads. Child-device registration in the cloud then happens via
+# the ot-registration flow when the link comes up.
+#
+# This is a `command` shim (the c8y mapper executes the script, legacy-plugin style) rather than
+# an `[exec.workflow]` mapping because the Cloud Fieldbus path needs HTTP calls to the mapper's
+# c8y proxy, and the tedge flows JS runtime has no HTTP client (see the RFC 0002 status update).
 [exec]
   topic = "c8y/devicecontrol/notifications"
   on_fragment = "c8y_ModbusDevice"
-
-[exec.workflow]
-operation = "ot_define_device"
-input.device = "${.payload.c8y_ModbusDevice.device}"
+  command = "/usr/bin/c8y-fieldbus-import ${.payload.c8y_ModbusDevice}"

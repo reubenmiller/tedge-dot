@@ -124,6 +124,16 @@ shim assumes a connector-shaped `device` object that no stock UI produces.
      (`crates/sdk/src/runtime.rs` `apply_define_device`) and live-reloads.
 3. Round-trip Robot test in `cloud/modbus/tests/` (RFC 0002 increment 2, keywords in §4).
 
+> **Update (2026-07): closed** — but in the c8y shim layer, not a flow: the tedge flows JS
+> runtime has no HTTP client (no `fetch`/`XMLHttpRequest`/modules), so the fetch + external-id
+> steps cannot run in a flow. [`operations/c8y-fieldbus-import`](../../operations/c8y-fieldbus-import)
+> (bash + jq, executed by the [`operations/c8y_ModbusDevice`](../../operations/c8y_ModbusDevice)
+> template) now handles both payload shapes, creates the child external id, translates
+> `c8y_Registers`/`c8y_Coils` (measurementMapping → `meta.measurement`, honoured by
+> `ot-measurement`), and drives `ot_define_device`. Offline unit test:
+> [`cloud/modbus/tests/test_fieldbus_import.sh`](../../cloud/modbus/tests/test_fieldbus_import.sh).
+> Alarm/event/status mappings remain G4. See the RFC 0002 status update for details.
+
 ### G2 — Legacy `c8y_SetRegister` / `c8y_SetCoil` payload compatibility (partial)
 
 Explicit-address payloads (asset-table widget, existing runbooks, the legacy Robot tests) and

@@ -22,7 +22,7 @@ cloud operation completes.
 | `c8y_SetCoil` | [`c8y_SetCoil`](c8y_SetCoil) | `ot_write_coil` | `write-coil` | protocol module |
 | `c8y_ModbusConfiguration` | [`c8y_ModbusConfiguration`](c8y_ModbusConfiguration) | `ot_set_config` | `set-config` | SDK runtime |
 | `c8y_SerialConfiguration` | [`c8y_SerialConfiguration`](c8y_SerialConfiguration) | `ot_set_config` | `set-config` | SDK runtime |
-| `c8y_ModbusDevice` (+ `c8y_Coils`/`c8y_Registers`) | [`c8y_ModbusDevice`](c8y_ModbusDevice) | `ot_define_device` | `define-device` | SDK runtime |
+| `c8y_ModbusDevice` (+ `c8y_Coils`/`c8y_Registers`) | [`c8y_ModbusDevice`](c8y_ModbusDevice) → [`c8y-fieldbus-import`](c8y-fieldbus-import) | `ot_define_device` | `define-device` | SDK runtime |
 
 `c8y_Coils` and `c8y_Registers` no longer have standalone shims: the legacy operations only staged
 point definitions in TOML that `c8y_ModbusDevice` later assembled. In the generic model the points
@@ -51,7 +51,16 @@ the operation payloads carry logical fields:
 // c8y_SerialConfiguration
 { "c8y_SerialConfiguration": { "baudRate": 19200, "stopBits": 1, "parity": "N", "dataBits": 8 } }
 
-// c8y_ModbusDevice  (device shaped like a [[device]] config entry)
+// c8y_ModbusDevice, shape 1: the stock Cloud Fieldbus UI payload. The c8y-fieldbus-import
+// script creates the child's external identity, fetches the c8y_ModbusDeviceType MO named by
+// `type` via the mapper's c8y proxy, and translates its c8y_Registers/c8y_Coils into points.
+{ "c8y_ModbusDevice": {
+    "protocol": "TCP", "address": 1, "ipAddress": "10.0.0.9",
+    "id": "<child MO id>", "name": "plc-9",
+    "type": "/inventory/managedObjects/<c8y_ModbusDeviceType MO id>"
+} }
+
+// c8y_ModbusDevice, shape 2: a device shaped like a [[device]] config entry (passed through)
 { "c8y_ModbusDevice": { "device": {
     "name": "plc-9",
     "protocol_address": { "transport": "tcp", "host": "10.0.0.9", "port": 502, "unit_id": 1 },
@@ -62,6 +71,15 @@ the operation payloads carry logical fields:
     ]
 } } }
 ```
+
+`c8y_ModbusDevice` is a `command` shim (the mapper executes
+[`c8y-fieldbus-import`](c8y-fieldbus-import), legacy-plugin style) rather than an
+`[exec.workflow]` mapping: the Cloud Fieldbus path needs HTTP against the mapper's local c8y
+proxy, which the tedge flows JS runtime cannot do (no `fetch`/`XMLHttpRequest` — see the
+status update in [RFC 0002](../doc/rfc/0002-cloud-fieldbus-integration.md)). The register
+translation rules (datatype, transform, `meta.measurement` naming, coils) are documented in
+the script header and unit-tested offline by
+[`cloud/modbus/tests/test_fieldbus_import.sh`](../cloud/modbus/tests/test_fieldbus_import.sh).
 
 > The legacy operations carried raw register/coil addresses and per-register scaling. Those now
 > live in connector config (point `address`) and flows (scaling), so the cloud-facing operation
@@ -75,6 +93,7 @@ c8y mapper:
 
 ```sh
 sudo cp operations/c8y_* /etc/tedge/operations/c8y/
+sudo install -m 0755 operations/c8y-fieldbus-import /usr/bin/c8y-fieldbus-import  # needs jq + curl
 sudo cp -Ra flows/ot-command-forward flows/ot-command-result /etc/tedge/mappers/c8y/flows/
 ```
 

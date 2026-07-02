@@ -5,9 +5,12 @@ Documentation       Cloud Fieldbus round-trip (RFC 0002 increment 2): create a m
 ...                 device translates it into connector TOML and produces the type's
 ...                 measurements.
 ...
-...                 The assignment-translation tests are tagged gap:fieldbus-import until the
-...                 ot-fieldbus-import flow (doc/rfc/0002-cloud-fieldbus-integration.md) lands —
-...                 run with `--exclude gap:*` to check only what is expected to pass today.
+...                 The assignment translation is implemented by the c8y-fieldbus-import shim
+...                 (operations/c8y-fieldbus-import, executed via the c8y_ModbusDevice custom
+...                 operation template — see the RFC 0002 status update in
+...                 doc/rfc/0002-cloud-fieldbus-integration.md), which creates the child's
+...                 external identity, fetches the device type via the mapper's c8y proxy, and
+...                 drives the connector's define-device verb.
 ...
 ...                 Requires C8Y_BASEURL / C8Y_USER / C8Y_PASSWORD / C8Y_TENANT and DEVICE_ID,
 ...                 plus a running stack (see `just test-cloud modbus`).
@@ -55,18 +58,25 @@ Assign Device Type Sends Cloud Fieldbus Operation
     Dictionary Should Contain Key    ${ASSIGN_OP}    c8y_ModbusDevice
 
 Assignment Is Translated Into Connector Config
-    [Documentation]    The device converts the c8y_ModbusDevice operation into a define-device
-    ...                management command, persisting the point into the connector TOML.
-    [Tags]    gap:fieldbus-import
+    [Documentation]    The c8y-fieldbus-import shim converts the c8y_ModbusDevice operation
+    ...                into a define-device management command; the operation only turns
+    ...                SUCCESSFUL once the point is persisted into the connector TOML.
     Operation Should Be SUCCESSFUL    ${ASSIGN_OP}[id]    timeout=${OP_TIMEOUT}
     ${output}=    Execute Shell Command    cat /etc/tedge/plugins/modbus/modbus.toml
     Should Contain    ${output}    ${FB_CHILD}
     Should Contain    ${output}    temperature
 
+Child External Identity Links The UI-Created Managed Object
+    [Documentation]    The shim registers <gateway id>:device:<child name> (type c8y_Serial)
+    ...                against the placeholder MO the UI created, so the thin-edge child
+    ...                registration adopts it instead of creating a duplicate.
+    ${mo}=    External Identity Should Exist    ${DEVICE_ID}:device:${FB_CHILD}
+    Should Be Equal As Strings    ${mo}[id]    ${FB_CHILD_MO}[id]
+
 Imported Points Produce Mapped Measurements
     [Documentation]    Samples from the imported points surface as the measurement type/series
-    ...                declared in the device type's measurementMapping.
-    [Tags]    gap:fieldbus-import
+    ...                declared in the device type's measurementMapping (carried through the
+    ...                point's meta.measurement, honoured by ot-measurement).
     Set Device    ${DEVICE_ID}:device:${FB_CHILD}
     Device Should Have Measurements
     ...    minimum=1    type=modbus    timeout=${MEAS_TIMEOUT}

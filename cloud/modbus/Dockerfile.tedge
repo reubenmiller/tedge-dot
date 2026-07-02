@@ -11,9 +11,10 @@ FROM ghcr.io/thin-edge/tedge-demo-main-systemd:latest
 # `dpkg --print-architecture` (Docker COPY does not apply globs after variable substitution).
 RUN mkdir -p /opt/debs/
 COPY dist/*.deb /opt/debs/
+# jq + curl are runtime dependencies of the Cloud Fieldbus import shim (c8y-fieldbus-import).
 RUN arch=$(dpkg --print-architecture) \
     && apt-get update \
-    && apt-get install -y --no-install-recommends --allow-downgrades /opt/debs/tedge-dot_*_linux_${arch}.deb \
+    && apt-get install -y --no-install-recommends --allow-downgrades jq curl /opt/debs/tedge-dot_*_linux_${arch}.deb \
     && rm -rf /tmp/debs \
     && rm -rf /var/lib/apt/lists/*
 
@@ -38,6 +39,12 @@ COPY operations/c8y_ModbusConfiguration  /etc/tedge/operations/c8y/c8y_ModbusCon
 COPY operations/c8y_SerialConfiguration  /etc/tedge/operations/c8y/c8y_SerialConfiguration.template
 COPY operations/c8y_ModbusDevice         /etc/tedge/operations/c8y/c8y_ModbusDevice.template
 
+# Cloud Fieldbus import shim executed by the c8y_ModbusDevice template: creates the child's
+# external identity, fetches the c8y_ModbusDeviceType MO via the mapper's local c8y proxy, and
+# drives the connector's define-device verb (gap G1 / RFC 0002 increment 1).
+COPY operations/c8y-fieldbus-import      /usr/bin/c8y-fieldbus-import
+
 RUN chmod 0644 /etc/tedge/operations/c8y/c8y_*.template \
+    && chmod 0755 /usr/bin/c8y-fieldbus-import \
     && chown -R tedge:tedge /etc/tedge/mappers /etc/tedge/operations/c8y \
     && systemctl enable tedge-dot.service
