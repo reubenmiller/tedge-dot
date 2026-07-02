@@ -132,7 +132,10 @@ shell *args='bash':
 test-cloud proto *args="":
     #!/usr/bin/env bash
     set -euo pipefail
-    docker compose -f cloud/{{proto}}/docker-compose.yaml up -d --build
+    # build and up are split: `up -d --build` can hang after "resolving provenance"
+    # with a docker-container buildx builder (observed with compose 2.x + colima).
+    docker compose -f cloud/{{proto}}/docker-compose.yaml build
+    docker compose -f cloud/{{proto}}/docker-compose.yaml up -d
     echo "Bootstrapping device ${DEVICE_ID} to Cumulocity"
     docker compose -f cloud/{{proto}}/docker-compose.yaml exec -T \
         --env "DEVICE_ID=${DEVICE_ID}" --env "C8Y_BASEURL=${C8Y_BASEURL}" \

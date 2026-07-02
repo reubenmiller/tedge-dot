@@ -10,8 +10,12 @@
       harness not built yet).
 * [ ] Per-point `meta` support for the remaining flows: `ot-alarm` should read thresholds
       from `sample.meta`/measurement context so alarm limits can live next to the signal.
-* [ ] OPC-UA: integration/e2e test against the python-asyncua simulator covering
-      subscriptions (monitored items), not just read/write.
+* [ ] File an upstream async-opcua issue: the 0.18 server can strand a monitored-item value
+      written within one sampling interval of the previous source timestamp
+      (`maybe_enqueue_skipped_value` vs the `notified_monitored_items` drain; see the notes in
+      `crates/connector-opcua/tests/subscription_integration.rs`).
+* [ ] Wire tenant-gated cloud e2e (`just test-cloud modbus`, incl. the Cloud Fieldbus
+      round-trip suite) into CI as a manually-triggered/secret-gated workflow.
 
 ## Connector candidates
 
