@@ -5,9 +5,10 @@ device-type managed objects (c8y_ModbusDeviceType with c8y_Registers/c8y_Coils),
 UI-style child device placeholders, and the c8y_ModbusDevice assignment operation.
 
 The generic inventory CRUD keywords (Create/Update/Get Managed Object, Add Child
-Device Reference) live in robotframework-c8y >= 0.52.0 — this library keeps only the
-fieldbus-specific conveniences (plus private CRUD helpers for its own use) and the
-plain-REST operation wait (see Operation Should Eventually Be Successful).
+Device Reference) live in robotframework-c8y >= 0.52.0 (>= 0.53.0 also lets the
+operation keywords take plain ids and adds Execute Shell Command And Get Output) —
+this library keeps only the fieldbus-specific conveniences, with private CRUD
+helpers for its own use.
 
 Auth comes from the same environment variables as robotframework-c8y
 (C8Y_BASEURL, C8Y_USER, C8Y_PASSWORD, C8Y_TENANT), via c8y_test_core.
@@ -15,7 +16,6 @@ Auth comes from the same environment variables as robotframework-c8y
 
 import json
 import logging
-import time
 from typing import Any, Dict, List, Optional, Union
 
 from c8y_api.model import ManagedObject
@@ -195,31 +195,3 @@ class FieldbusLibrary:
     def remove_modbus_device_type(self, type_mo_id: str):
         """Delete a fieldbus device type managed object."""
         self.c8y.inventory.delete(type_mo_id)
-
-    @keyword("Operation Should Eventually Be Successful")
-    def operation_should_eventually_be_successful(
-        self, operation_id: str, timeout: float = 60, interval: float = 2
-    ) -> Dict[str, Any]:
-        """Poll an operation by ID until SUCCESSFUL; fail fast on FAILED (with reason).
-
-        Complements the Cumulocity library's `Operation Should Be SUCCESSFUL`, which
-        (as of 0.52.0) only accepts the AssertOperation object returned by
-        `Create Operation`. Once thin-edge/robotframework-c8y#50 (operation keywords
-        accept plain ids, plus `Execute Shell Command And Get Output`) is released,
-        this keyword can be dropped.
-        """
-        deadline = time.time() + float(timeout)
-        status = "UNKNOWN"
-        while time.time() < deadline:
-            op = self.c8y.get(f"/devicecontrol/operations/{operation_id}")
-            status = op.get("status", "UNKNOWN")
-            if status == "SUCCESSFUL":
-                return op
-            if status == "FAILED":
-                raise AssertionError(
-                    f"operation {operation_id} FAILED: {op.get('failureReason', '')}"
-                )
-            time.sleep(float(interval))
-        raise AssertionError(
-            f"operation {operation_id} still {status} after {timeout}s"
-        )

@@ -66,13 +66,11 @@ Assignment Is Translated Into Connector Config
     [Documentation]    The c8y-fieldbus-import shim converts the c8y_ModbusDevice operation
     ...                into a define-device management command; the operation only turns
     ...                SUCCESSFUL once the point is persisted into the connector TOML.
-    Operation Should Eventually Be Successful    ${ASSIGN_OP.id}    timeout=${OP_TIMEOUT}
-    # Execute Shell Command is asynchronous: it returns the c8y_Command operation, whose
-    # `result` fragment carries the command output once the operation has completed.
-    ${shell_op}=    Execute Shell Command    cat /etc/tedge/plugins/ot/modbus.toml
-    ${result}=    Operation Should Eventually Be Successful    ${shell_op.id}    timeout=${OP_TIMEOUT}
-    Should Contain    ${result}[c8y_Command][result]    ${FB_CHILD}
-    Should Contain    ${result}[c8y_Command][result]    temperature
+    Operation Should Be SUCCESSFUL    ${ASSIGN_OP}    timeout=${OP_TIMEOUT}
+    ${output}=    Execute Shell Command And Get Output
+    ...    cat /etc/tedge/plugins/ot/modbus.toml    timeout=${OP_TIMEOUT}
+    Should Contain    ${output}    ${FB_CHILD}
+    Should Contain    ${output}    temperature
 
 Child Is Registered With A Device-Owned Managed Object
     [Documentation]    The imported child's external identity must resolve to a managed object

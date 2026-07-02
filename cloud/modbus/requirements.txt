@@ -2,7 +2,8 @@
 robotframework~=7.0
 # Not on public PyPI — installed from the git tag (thin-edge convention).
 # >= 0.52.0: generic inventory CRUD keywords (Create/Update/Get Managed Object,
-# Add Child Device Reference) used by the Cloud Fieldbus suite.
-robotframework-c8y @ git+https://github.com/thin-edge/robotframework-c8y.git@0.52.0
+#            Add Child Device Reference) used by the Cloud Fieldbus suite.
+# >= 0.53.0: operation keywords accept plain ids; Execute Shell Command And Get Output.
+robotframework-c8y @ git+https://github.com/thin-edge/robotframework-c8y.git@0.53.0
 c8y-api
 python-dotenv
