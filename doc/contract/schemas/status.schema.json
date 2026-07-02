@@ -28,7 +28,11 @@
       "properties": {
         "status": { "enum": ["connected", "disconnected", "degraded"] },
         "since": { "type": "string", "format": "date-time" },
-        "reason": { "type": "string" }
+        "reason": { "type": "string" },
+        "info": {
+          "type": "object",
+          "description": "Optional device descriptor (transport/address details) supplied by the connector; flows can forward it into a digital-twin fragment."
+        }
       }
     },
     "capabilities": {
