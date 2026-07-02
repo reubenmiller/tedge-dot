@@ -1,0 +1,57 @@
+name: Cloud e2e (Cumulocity)
+
+# Tenant-gated: runs the full Cumulocity end-to-end suite (child registration, twin,
+# measurements, c8y_SetRegister/c8y_SetCoil, and the Cloud Fieldbus round-trip) against a
+# live tenant. Manual trigger only — requires the repository secrets
+# C8Y_BASEURL / C8Y_USER / C8Y_PASSWORD.
+on:
+  workflow_dispatch:
+    inputs:
+      protocol:
+        description: Protocol harness under cloud/
+        default: modbus
+        required: true
+
+concurrency:
+  group: cloud-e2e
+  cancel-in-progress: false
+
+env:
+  DEVICE_ID: ci_tedge_dot_${{ github.run_id }}
+  C8Y_BASEURL: ${{ secrets.C8Y_BASEURL }}
+  C8Y_USER: ${{ secrets.C8Y_USER }}
+  C8Y_PASSWORD: ${{ secrets.C8Y_PASSWORD }}
+
+jobs:
+  cloud-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+
+      - name: Build connector package (.deb)
+        run: |
+          docker build -f Dockerfile.package --build-arg PKG_ARCH=amd64 --target export --output dist .
+          mv dist/tedge-dot.deb dist/tedge-dot_0.0.0-ci_linux_amd64.deb
+
+      - name: Run cloud e2e suite
+        run: just test-cloud ${{ inputs.protocol }}
+
+      - name: Upload robot output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: robot-output-cloud-${{ inputs.protocol }}
+          path: cloud/${{ inputs.protocol }}/output/
+          if-no-files-found: ignore
+
+      - name: Install go-c8y-cli
+        if: always()
+        uses: reubenmiller/setup-go-c8y-cli@main
+      - name: Clean up tenant (device, children, certificates, device user)
+        if: always()
+        env:
+          C8Y_HOST: ${{ secrets.C8Y_BASEURL }}
+          C8Y_USERNAME: ${{ secrets.C8Y_USER }}
+          C8Y_SETTINGS_CI: "true"
+        run: just cleanup "$DEVICE_ID" || true

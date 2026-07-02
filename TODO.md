@@ -2,21 +2,22 @@
 
 ## In flight / next
 
-
-* [ ] Cloud Fieldbus integration — see `doc/rfc/0002-cloud-fieldbus-integration.md`
-      (device stays config-file driven; `ot-fieldbus-import` flow translates device types
-      into `define-device` commands). Start with increment 1 (modbus).
-* [ ] Wire `just fuzz-all` and `just test-properties` into CI (nightly job for fuzzing).
+* [ ] Cloud Fieldbus increments 3 + 4 (see `doc/rfc/0002-cloud-fieldbus-integration.md`;
+      increments 1 + 2 shipped and verified live 2026-07-02): generalise the device-type
+      translator per protocol, and the export path / UI-placeholder reconciliation (needs a
+      tenant-side actor — a device cannot own or delete the UI-created managed object).
 * [ ] Conformance suite implementation (`doc/conformance/conformance-suite.md` is spec'd,
       harness not built yet).
 * [ ] Per-point `meta` support for the remaining flows: `ot-alarm` should read thresholds
       from `sample.meta`/measurement context so alarm limits can live next to the signal.
-* [ ] File an upstream async-opcua issue: the 0.18 server can strand a monitored-item value
-      written within one sampling interval of the previous source timestamp
-      (`maybe_enqueue_skipped_value` vs the `notified_monitored_items` drain; see the notes in
-      `crates/connector-opcua/tests/subscription_integration.rs`).
-* [ ] Wire tenant-gated cloud e2e (`just test-cloud modbus`, incl. the Cloud Fieldbus
-      round-trip suite) into CI as a manually-triggered/secret-gated workflow.
+* [ ] File the upstream async-opcua issue (draft ready in
+      `doc/upstream/async-opcua-stranded-sample.md`).
+* [ ] c8y-fieldbus-import deferred items (script header TODOs): alarm/event/status mappings
+      (gap G4), RTU serial-port resolution from `[connection.serial]`, signed and
+      multi-register bit fields.
+* [ ] Legacy write-payload compatibility (gap G2): accept explicit-address
+      (`register`/`coil`/`address`/`ipAddress`) and name-based `metrics[]` payloads for
+      `c8y_SetRegister`/`c8y_SetCoil`, not only `{point, value}`.
 
 ## Connector candidates
 
