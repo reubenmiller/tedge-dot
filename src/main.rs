@@ -2,21 +2,27 @@
 //!
 //! Two modes of operation:
 //!
-//! * `run` (the default) — load the connector configuration, select the protocol module named in
-//!   `connector.protocol`, and run it under the SDK runtime (the long-lived MQTT-driven service).
+//! * `run` (the default) — discover connector configurations (files and/or directories of
+//!   `*.toml`), and run every connector concurrently in this one process: each config gets its
+//!   own protocol module + SDK runtime instance, supervised with an in-process restart loop.
 //! * `read` / `write` — connect directly to a configured device and read or write a point once,
 //!   then exit. These need no broker or running connector; they reuse the exact same protocol
 //!   module code path the runtime uses, which makes them handy for experimenting and debugging.
 
 use clap::{Args, Parser, Subcommand};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 use tedge_dot_sdk::{
     model::hex_grouped, runtime, CommandRequest, Connector, ConnectorConfig, DeviceConfig,
     LinkStatus, Quality, Sample, Value,
 };
+use tracing::{error, info, warn, Instrument};
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_CONFIG: &str = "/etc/tedge/plugins/ot/modbus.toml";
+const DEFAULT_CONFIG_DIR: &str = "/etc/tedge/plugins/ot";
+const DEFAULT_RESTART_DELAY_SECS: u64 = 5;
 
 /// thin-edge.io OT protocol connector.
 #[derive(Parser)]
@@ -28,7 +34,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run the connector service (default when invoked with just a config path).
+    /// Run the connector service (default when invoked with just config paths).
     Run(RunArgs),
     /// Read one or more points directly from a device, then exit (no broker required).
     Read(ReadArgs),
@@ -38,9 +44,11 @@ enum Command {
 
 #[derive(Args)]
 struct RunArgs {
-    /// Path to the connector configuration file.
-    #[arg(default_value = DEFAULT_CONFIG)]
-    config: String,
+    /// Connector configuration files and/or directories to scan for `*.toml` configs.
+    /// Every config found runs as its own connector within this process, each in a
+    /// restart loop (backoff: $TEDGE_DOT_RESTART_DELAY seconds, default 5).
+    #[arg(default_value = DEFAULT_CONFIG_DIR)]
+    configs: Vec<String>,
 }
 
 #[derive(Args)]
@@ -118,9 +126,9 @@ fn normalized_args() -> Vec<String> {
     args
 }
 
-/// Run the connector under the SDK runtime (long-lived service).
+/// Run every discovered connector concurrently in this process (long-lived service).
 async fn run(args: RunArgs) -> ExitCode {
-    let config = match load_config(&args.config) {
+    let configs = match discover_configs(&args.configs) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{e}");
@@ -130,23 +138,180 @@ async fn run(args: RunArgs) -> ExitCode {
 
     let filter = match EnvFilter::try_from_default_env() {
         Ok(f) => f,
-        Err(_) => silence_opcua_cert_noise(EnvFilter::new(&config.connector.log_level)),
+        Err(_) => silence_opcua_cert_noise(EnvFilter::new(pick_log_level(&configs))),
     };
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    let connector = match build_connector(&config.connector.protocol) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    if configs.is_empty() {
+        warn!(
+            "no connector configs found in {:?} — idle; add configs and restart the service",
+            args.configs
+        );
+        runtime::shutdown_signal().await;
+        return ExitCode::SUCCESS;
+    }
 
-    if let Err(e) = runtime::run(connector, config, args.config.into()).await {
-        eprintln!("connector exited with error: {e}");
-        return ExitCode::FAILURE;
+    warn_duplicate_service_names(&configs);
+    let restart_delay = restart_delay_from_env();
+
+    // One shutdown trigger shared by every connector: flipped on Ctrl-C / SIGTERM.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let mut tasks = tokio::task::JoinSet::new();
+    for path in configs {
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let span = tracing::info_span!("connector", %name);
+        tasks.spawn(supervise(path, restart_delay, shutdown_rx.clone()).instrument(span));
+    }
+
+    runtime::shutdown_signal().await;
+    info!("shutdown requested; stopping all connectors");
+    let _ = shutdown_tx.send(true);
+
+    // Give the connectors a moment to disconnect and publish their final health status.
+    if tokio::time::timeout(Duration::from_secs(10), async {
+        while tasks.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        warn!("some connectors did not stop in time; exiting anyway");
     }
     ExitCode::SUCCESS
+}
+
+/// Supervise one connector: (re)load its config, run it under the SDK runtime, and restart it
+/// with a backoff when it fails — the config file is re-read on every attempt, so fixing a bad
+/// config is picked up without restarting the service.
+async fn supervise(
+    path: PathBuf,
+    restart_delay: Duration,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    loop {
+        info!("starting connector ({})", path.display());
+        // Run each attempt on its own task so a panicking protocol module is contained and
+        // restarted like any other failure instead of taking the whole service down.
+        let attempt = tokio::spawn(
+            run_one(path.clone(), shutdown.clone()).in_current_span(),
+        )
+        .await
+        .unwrap_or_else(|join_err| Err(format!("connector task panicked: {join_err}")));
+
+        if *shutdown.borrow() {
+            break;
+        }
+        match attempt {
+            Ok(()) => break, // clean stop
+            Err(e) => error!(
+                "connector failed: {e}; restarting in {}s",
+                restart_delay.as_secs()
+            ),
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(restart_delay) => {}
+            _ = shutdown.changed() => break,
+        }
+    }
+}
+
+/// One connector attempt: parse the config, build the protocol module, run it until it fails
+/// or the shared shutdown trigger fires.
+async fn run_one(
+    path: PathBuf,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), String> {
+    let config = load_config(&path.display().to_string())?;
+    let connector = build_connector(&config.connector.protocol)?;
+    let shutdown_fut = async move {
+        let _ = shutdown.wait_for(|stop| *stop).await;
+    };
+    runtime::run_until(connector, config, path, shutdown_fut)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Expand the `run` arguments into concrete config files: directories contribute their `*.toml`
+/// entries (sorted), files are taken as-is, and duplicates are dropped.
+fn discover_configs(args: &[String]) -> Result<Vec<PathBuf>, String> {
+    let mut found = Vec::new();
+    for arg in args {
+        let path = Path::new(arg);
+        if path.is_dir() {
+            let mut entries: Vec<PathBuf> = std::fs::read_dir(path)
+                .map_err(|e| format!("failed to read config directory '{arg}': {e}"))?
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "toml"))
+                .collect();
+            entries.sort();
+            found.extend(entries);
+        } else if path.is_file() {
+            found.push(path.to_path_buf());
+        } else {
+            return Err(format!("config path '{arg}' does not exist"));
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    found.retain(|p| seen.insert(p.clone()));
+    Ok(found)
+}
+
+/// Default log filter for the service: the most verbose `connector.log_level` across the
+/// parseable configs, so a single-config invocation keeps its configured level exactly.
+/// `RUST_LOG` overrides this entirely.
+fn pick_log_level(configs: &[PathBuf]) -> String {
+    fn verbosity(level: &str) -> u8 {
+        match level {
+            "trace" => 4,
+            "debug" => 3,
+            "info" => 2,
+            "warn" => 1,
+            "error" => 0,
+            _ => 2,
+        }
+    }
+    configs
+        .iter()
+        .filter_map(|p| load_config(&p.display().to_string()).ok())
+        .map(|c| c.connector.log_level)
+        .max_by_key(|l| verbosity(l))
+        .unwrap_or_else(|| "info".to_string())
+}
+
+/// Two configs sharing a `service_name` fight over the same MQTT client id and health topic;
+/// call it out loudly instead of letting the connectors steal each other's session.
+fn warn_duplicate_service_names(configs: &[PathBuf]) {
+    let mut by_service: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for path in configs {
+        if let Ok(config) = load_config(&path.display().to_string()) {
+            by_service
+                .entry(config.connector.service_name)
+                .or_default()
+                .push(path.display().to_string());
+        }
+    }
+    for (service, paths) in by_service {
+        if paths.len() > 1 {
+            warn!(
+                "configs {} share service_name '{service}'; give each connector a unique \
+                 service_name or they will steal each other's MQTT session",
+                paths.join(", ")
+            );
+        }
+    }
+}
+
+/// Per-connector restart backoff, tunable via TEDGE_DOT_RESTART_DELAY (seconds).
+fn restart_delay_from_env() -> Duration {
+    std::env::var("TEDGE_DOT_RESTART_DELAY")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(DEFAULT_RESTART_DELAY_SECS))
 }
 
 /// Read one or more points directly from a device.
@@ -391,5 +556,64 @@ fn build_connector(protocol: &str) -> Result<Box<dyn Connector>, String> {
         other => Err(format!(
             "protocol '{other}' is not compiled in (enable its cargo feature)"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(dir: &Path, name: &str, contents: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn discover_configs_expands_directories_sorted_and_dedups() {
+        let dir = std::env::temp_dir().join(format!("tedge-dot-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write(&dir, "b.toml", "");
+        let a = write(&dir, "a.toml", "");
+        write(&dir, "ignored.txt", "");
+
+        // a directory plus one of its own files: expanded, sorted, deduplicated
+        let found =
+            discover_configs(&[dir.display().to_string(), a.display().to_string()]).unwrap();
+        let names: Vec<_> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["a.toml", "b.toml"]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn discover_configs_rejects_missing_paths() {
+        let err = discover_configs(&["/nonexistent/tedge-dot".into()]).unwrap_err();
+        assert!(err.contains("does not exist"), "{err}");
+    }
+
+    #[test]
+    fn pick_log_level_takes_most_verbose() {
+        let dir = std::env::temp_dir().join(format!("tedge-dot-loglevel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let info = write(
+            &dir,
+            "info.toml",
+            "[connector]\nprotocol = \"modbus\"\nlog_level = \"info\"\n",
+        );
+        let debug = write(
+            &dir,
+            "debug.toml",
+            "[connector]\nprotocol = \"opcua\"\nlog_level = \"debug\"\n",
+        );
+
+        assert_eq!(pick_log_level(std::slice::from_ref(&info)), "info");
+        assert_eq!(pick_log_level(&[info, debug]), "debug");
+        assert_eq!(pick_log_level(&[]), "info");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

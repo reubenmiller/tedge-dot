@@ -1,21 +1,22 @@
 [Unit]
-Description=thin-edge.io OT connectors (all protocols, supervised)
+Description=thin-edge.io OT connectors (all protocols, one process)
 Documentation=https://github.com/thin-edge/tedge-dot
 After=network-online.target mosquitto.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-# Runs as root so the supervisor can create the vcan0 interface and the
-# /dev/ttyPROFIBUS0 serial bridge. The individual connectors themselves need no
-# special privileges; for a hardened deployment, drop privileges per connector
-# or grant only CAP_NET_ADMIN + device access instead.
-User=root
-ExecStart=/usr/bin/tedge-dot-supervisor
+User=tedge
+Group=tedge
+# The canbus/canopen connectors open SocketCAN raw sockets, which needs
+# CAP_NET_RAW. The CAN interface itself must already exist and be up (brought
+# up by your network setup, or by the demo simulators — see demo/README.md).
+AmbientCapabilities=CAP_NET_RAW
+# One process runs every connector config found in the directory, each in an
+# in-process restart loop (backoff via TEDGE_DOT_RESTART_DELAY, default 5s).
+ExecStart=/usr/bin/tedge-dot run /etc/tedge/plugins/ot
 Restart=always
 RestartSec=5
-# Clean up every supervised connector and bridge process on stop/restart.
-KillMode=control-group
 TimeoutStopSec=15
 
 [Install]

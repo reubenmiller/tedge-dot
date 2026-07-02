@@ -78,7 +78,10 @@ default_mode     = "typed"
 
   # Reading this node returns a Bad status -> quality "bad"
   # (kept in the demo deliberately, to show quality propagation end to end).
+  # Excluded from push delivery: the server rejects a monitored item for an
+  # unknown node, which would make the whole device fall back to polling.
   [[device.point]]
-  id       = "bad_point"
-  datatype = "uint16"
-  address  = { node_id = "ns=2;s=DoesNotExist" }
+  id        = "bad_point"
+  datatype  = "uint16"
+  subscribe = false
+  address   = { node_id = "ns=2;s=DoesNotExist" }

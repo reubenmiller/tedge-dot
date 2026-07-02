@@ -102,8 +102,8 @@ services:
   # --- PROFIBUS-DP slave simulator (Python DP-V0 slave + socat) --------------
   # PTYs cannot cross the container/host boundary, so instead of sharing a serial
   # device we expose the simulated slave over TCP on port 9200.  The host-side
-  # connector reaches it through a socat serial<->TCP bridge that the
-  # tedge-dot supervisor sets up automatically (creating /dev/ttyPROFIBUS0).
+  # connector reaches it through a socat serial<->TCP bridge started on the
+  # host (creating /dev/ttyPROFIBUS0 — see the PROFIBUS caveat in README.md).
   #
   # Inside the container:
   #   socat builds a persistent PTY pair  ttySlave <-> ttyBridge

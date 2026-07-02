@@ -45,8 +45,8 @@ installs:
 - `tedge-dot` — the connector binary (also a standalone `read`/`write` CLI);
 - one default config per protocol in `/etc/tedge/plugins/ot/` (no devices
   configured, so the service starts and idles until you add some);
-- `tedge-dot.service` — a single systemd service whose supervisor runs one
-  connector process per config file;
+- `tedge-dot.service` — a single systemd service: one `tedge-dot` process runs
+  every configured connector, each in an in-process restart loop;
 - demo configs in `/usr/share/tedge-dot/demo/`, pre-wired to the Docker
   simulators in [demo/](demo/) — see there for the all-protocols demo.
 
@@ -82,7 +82,7 @@ all-protocols demo on a real device — both use the same configs in
 | [operations/](operations/) | Cumulocity operation shims (legacy `c8y_*` operations → generic OT commands) |
 | [connectors/](connectors/) | per-protocol e2e test stacks: simulator, Docker compose, Robot suites |
 | [cloud/](cloud/) | Cumulocity cloud e2e suites (live tenant) |
-| [packaging/](packaging/) | installed default configs, supervisor, systemd unit |
+| [packaging/](packaging/) | installed default configs, systemd unit, package scripts |
 | [doc/](doc/) | proposal, RFCs, contract + schemas, connector specs, testing strategy |
 | [demo/](demo/) | simulator compose file + demo configs: local CLI exploration and the all-protocols on-device demo |
 

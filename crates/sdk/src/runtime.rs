@@ -27,14 +27,51 @@ struct ScheduleEntry {
     next_due: Instant,
 }
 
-/// Run the connector under the SDK runtime until cancelled (Ctrl-C).
+/// Run the connector under the SDK runtime until the process receives Ctrl-C or SIGTERM.
 ///
 /// `config_path` is the file the typed `config` was loaded from; the runtime keeps the raw
 /// document so management commands (§6.3) can patch and persist it.
 pub async fn run(
+    connector: Box<dyn Connector>,
+    config: ConnectorConfig,
+    config_path: PathBuf,
+) -> Result<(), BoxError> {
+    run_until(connector, config, config_path, shutdown_signal()).await
+}
+
+/// Resolve when the process is asked to stop: Ctrl-C (all platforms) or SIGTERM (unix, what
+/// systemd sends on `systemctl stop`).
+pub async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// Run the connector under the SDK runtime until `shutdown` resolves.
+///
+/// This is the composable variant of [`run`]: a host binary that runs several connectors in
+/// one process passes each instance the same shutdown trigger and supervises them itself.
+pub async fn run_until(
     mut connector: Box<dyn Connector>,
     mut config: ConnectorConfig,
     config_path: PathBuf,
+    shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> Result<(), BoxError> {
     let protocol = config.connector.protocol.clone();
     let service = config.connector.service_name.clone();
@@ -94,6 +131,11 @@ pub async fn run(
                     }
                 }
                 Ok(_) => {}
+                // The client half was dropped and every queued request (including the final
+                // health "down") has been flushed: this runtime instance is gone, so the
+                // task must exit rather than retry — the process may host other connectors
+                // and restart this one, and leaked event loops would pile up.
+                Err(rumqttc::ConnectionError::RequestsDone) => break,
                 Err(e) => {
                     warn!("mqtt event loop error: {e}; retrying");
                     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -127,10 +169,11 @@ pub async fn run(
     // 6. Main loop: poll due points on a tick, route commands from the MQTT event-loop task.
     let mut tick = tokio::time::interval(Duration::from_millis(200));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    tokio::pin!(shutdown);
 
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
+            _ = &mut shutdown => {
                 info!("shutdown requested");
                 break;
             }

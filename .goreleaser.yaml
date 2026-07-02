@@ -56,23 +56,16 @@ nfpms:
       - deb
       - rpm
       - apk
-    # Runtime helpers the supervisor relies on:
-    #   socat     - PROFIBUS serial<->TCP bridge
-    #   iproute2  - bring up the vcan0 virtual CAN interface (canbus/canopen)
-    dependencies:
-      - socat
-      - iproute2
     scripts:
       postinstall: packaging/scripts/postinstall.sh
       preremove: packaging/scripts/preremove.sh
       postremove: packaging/scripts/postremove.sh
     contents:
-      # Supervisor that runs every connector under one systemd service.
-      - src: packaging/tedge-dot-supervisor.sh
-        dst: /usr/bin/tedge-dot-supervisor
-        file_info:
-          mode: 0755
-          owner: root
+      # The service (running as tedge) persists management-command config
+      # changes back into this directory, so it must be writable by tedge.
+      - dst: /etc/tedge/plugins/ot
+        type: dir
+        file_info: { owner: tedge, group: tedge, mode: 0755 }
 
       # Default connector configs (no devices configured): the service starts
       # and stays active on a fresh install. Add [[device]] sections (or copy a

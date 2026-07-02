@@ -110,9 +110,17 @@ The connectors publish samples to the thin-edge.io MQTT broker
 
 > **PROFIBUS caveat:** the released package is built without the `profibus`
 > cargo feature (its serial dependency does not cross-compile yet). To include
-> the PROFIBUS connector in the demo, build the binary from source on the
-> device (`cargo build --release --features profibus`) and copy
-> [config/profibus.toml](config/profibus.toml) into `/etc/tedge/plugins/ot/`.
+> the PROFIBUS connector in the demo: build the binary from source on the
+> device (`cargo build --release --features profibus`), copy
+> [config/profibus.toml](config/profibus.toml) into `/etc/tedge/plugins/ot/`,
+> and start the serial↔TCP bridge that materialises the containerised slave's
+> serial line on the host (`apt install socat`):
+>
+> ```sh
+> sudo socat "TCP:127.0.0.1:9200" \
+>     "pty,rawer,echo=0,b19200,link=/dev/ttyPROFIBUS0" &
+> ```
+>
 > The other four protocols work out of the box.
 
 ### Requirements
@@ -156,9 +164,8 @@ Installing the package:
 - ships the demo configs from [config/](config/) (pre-wired to the simulators)
   in `/usr/share/tedge-dot/demo/`, plus the CAN database at
   `/usr/share/tedge-dot/demo/can/test.dbc`;
-- installs the supervisor at `/usr/bin/tedge-dot-supervisor`;
-- installs and starts **one** service: `tedge-dot.service`;
-- pulls in `socat` and `iproute2` (used to bridge PROFIBUS and bring up `vcan0`).
+- installs and starts **one** service: `tedge-dot.service`, which runs every
+  configured connector inside a single `tedge-dot` process.
 
 ### 3. Enable the demo configs
 
@@ -200,18 +207,18 @@ with a source-built PROFIBUS binary, see the caveat above).
 
 ### How "one systemd service" runs every protocol
 
-`tedge-dot` runs exactly one protocol per process (selected by
-`connector.protocol` in its config). The package ships a small supervisor,
-`tedge-dot-supervisor`, started by `tedge-dot.service`, which:
+`tedge-dot run /etc/tedge/plugins/ot` (the service's `ExecStart`) discovers
+every `*.toml` in the directory and runs one connector per config **inside a
+single process**: each gets its own protocol module and SDK runtime instance
+(own MQTT session, health topic and capability descriptor), supervised by an
+in-process restart loop. A crashing or misconfigured connector is restarted
+with a backoff without disturbing the others, and its config file is re-read
+on every attempt — so fixing a bad config is picked up automatically.
+`systemctl stop tedge-dot` shuts every connector down cleanly (each publishes
+its final health status before exiting).
 
-1. ensures `vcan0` exists (for canbus/canopen);
-2. starts a `socat` serial↔TCP bridge that turns the containerised PROFIBUS
-   slave (TCP `:9200`) into a local serial device, `/dev/ttyPROFIBUS0`;
-3. launches one `tedge-dot <config>` per `*.toml` in `/etc/tedge/plugins/ot/`,
-   each in a restart loop.
-
-systemd owns the whole process group (`KillMode=control-group`), so
-`systemctl stop tedge-dot` cleanly tears down every connector and bridge.
+The `vcan0` interface the CAN connectors need is created by the canbus/canopen
+simulator containers themselves.
 
 To run only some protocols, remove the configs you don't want from
 `/etc/tedge/plugins/ot/` and restart the service.
@@ -221,22 +228,21 @@ To run only some protocols, remove the configs you don't want from
 PTY devices are per-container-namespace and can't be shared with the host, so a
 native host connector cannot open a PTY created inside the simulator container.
 The simulator therefore exposes its slave serial line over TCP (`:9200`), and
-the supervisor's `socat` bridge re-materialises it as `/dev/ttyPROFIBUS0` on the
-host — the device the PROFIBUS connector opens.
+the `socat` bridge from the caveat above re-materialises it as
+`/dev/ttyPROFIBUS0` on the host — the device the PROFIBUS connector opens.
 
 ### Tunables
 
-The supervisor honours these environment variables (set them via a systemd
+The service honours these environment variables (set them via a systemd
 drop-in, e.g. `systemctl edit tedge-dot.service`):
 
-| Variable                  | Default                  | Purpose                              |
-|---------------------------|--------------------------|--------------------------------------|
-| `TEDGE_DOT_CONF_DIR`      | `/etc/tedge/plugins/ot`  | Connector config directory           |
-| `TEDGE_DOT_BIN`           | `/usr/bin/tedge-dot`     | Connector binary                     |
-| `TEDGE_DOT_PROFIBUS_TCP`  | `127.0.0.1:9200`         | PROFIBUS simulator TCP endpoint      |
-| `TEDGE_DOT_PROFIBUS_PTY`  | `/dev/ttyPROFIBUS0`      | Host serial device to create         |
-| `TEDGE_DOT_VCAN_IF`       | `vcan0`                  | Virtual CAN interface                |
-| `TEDGE_DOT_RESTART_DELAY` | `5`                      | Per-connector restart backoff (sec)  |
+| Variable                  | Default | Purpose                              |
+|---------------------------|---------|--------------------------------------|
+| `TEDGE_DOT_RESTART_DELAY` | `5`     | Per-connector restart backoff (sec)  |
+| `RUST_LOG`                | per-config `log_level` | Log filter override   |
+
+The config directory is the `ExecStart` argument in
+[`tedge-dot.service`](../packaging/tedge-dot.service).
 
 ### Teardown
 
