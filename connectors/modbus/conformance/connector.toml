@@ -1,0 +1,114 @@
+# Connector configuration for the Modbus conformance run.
+#
+# The harness rewrites [mqtt] and every device protocol_address onto its own test broker and
+# simulator before starting the connector, so host/port values here are placeholders.
+#
+# The point set deliberately exercises every behavioural check:
+#   typed decodes across datatypes and word orders (B2), raw mode (B3), a seeded-invalid
+#   address (B4), read-only and read-write access (B6/B7), a transform, a bit-field, and a
+#   meta echo. Values line up with conformance/seed.json.
+
+[connector]
+protocol      = "modbus"
+service_name  = "tedge-dot-conformance"
+poll_interval = "200ms"
+log_level     = "warn"
+
+[mqtt]
+host = "127.0.0.1"
+port = 1883
+
+[[device]]
+name             = "plc1"
+protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id = 1 }
+default_mode     = "typed"
+
+  # uint16, read-only (B7 denies writes to it), unit echo.
+  [[device.point]]
+  id       = "temp_u16"
+  datatype = "uint16"
+  unit     = "counts"
+  address  = { table = "holding", address = 3, count = 1 }
+
+  # uint32 across two registers, big word order.
+  [[device.point]]
+  id       = "count_u32"
+  datatype = "uint32"
+  address  = { table = "holding", address = 4, count = 2 }
+
+  # float32 across two registers; meta is echoed verbatim in every sample.
+  [[device.point]]
+  id       = "level_f32"
+  datatype = "float32"
+  address  = { table = "holding", address = 6, count = 2 }
+  meta     = { on_change = true, deadband = 0.5 }
+
+  # linear transform applied after decode: 250 / 10 = 25.
+  [[device.point]]
+  id        = "scaled"
+  datatype  = "uint16"
+  address   = { table = "holding", address = 8, count = 1 }
+  transform = { divisor = 10 }
+
+  # bit-field extraction: register 0x01e0, bits 5..9 -> 15.
+  [[device.point]]
+  id       = "status_bits"
+  datatype = "uint16"
+  address  = { table = "holding", address = 9, count = 1, start_bit = 5, bit_count = 4 }
+
+  # raw mode: bytes only, no decoded value (B3).
+  [[device.point]]
+  id      = "raw_regs"
+  mode    = "raw"
+  address = { table = "holding", address = 6, count = 2 }
+
+  # reading this address raises a Modbus exception -> quality "bad" (B4).
+  [[device.point]]
+  id       = "bad_point"
+  datatype = "uint16"
+  address  = { table = "holding", address = 1, count = 1 }
+
+  # writable register points (B6 write round-trips).
+  [[device.point]]
+  id       = "setpoint_u16"
+  datatype = "uint16"
+  access   = "read_write"
+  address  = { table = "holding", address = 20, count = 1 }
+
+  [[device.point]]
+  id       = "setpoint_f32"
+  datatype = "float32"
+  access   = "read_write"
+  address  = { table = "holding", address = 22, count = 2 }
+
+  # writable coil (B6 boolean round-trip).
+  [[device.point]]
+  id       = "coil_rw"
+  datatype = "bool"
+  access   = "read_write"
+  address  = { table = "coil", address = 48, count = 1 }
+
+  # discrete input read as boolean.
+  [[device.point]]
+  id       = "door_contact"
+  datatype = "bool"
+  address  = { table = "discrete_input", address = 10, count = 1 }
+
+  # int64 across four registers (2^40, inside the JS safe-integer range).
+  [[device.point]]
+  id       = "big_i64"
+  datatype = "int64"
+  address  = { table = "holding", address = 30, count = 4 }
+
+  # float64 across four registers (3.14159).
+  [[device.point]]
+  id       = "pi_f64"
+  datatype = "float64"
+  address  = { table = "holding", address = 34, count = 4 }
+
+  # float32 with little word order (registers swapped in the seed).
+  [[device.point]]
+  id         = "swapped_f32"
+  datatype   = "float32"
+  word_order = "little"
+  address    = { table = "holding", address = 38, count = 2 }

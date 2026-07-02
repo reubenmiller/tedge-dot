@@ -1,30 +1,28 @@
 # Conformance manifest for the CAN bus connector.
 #
-# Declares what the connector claims to support so the conformance harness
-# can select the applicable Layer-2 decode vectors and Layer-3 behavioural
-# checks (B1–B10).
+#   cargo run -p ot-conformance -- check --spec connectors/canbus/conformance.toml
 #
-# See doc/conformance/conformance-suite.md for the full specification.
+# Runs the static layers (schema examples, golden decode vectors, manifest ↔ compiled
+# capability agreement). The declared simulator is the Dockerised vcan stack — SocketCAN only
+# exists on Linux, so the harness has no built-in implementation for it and skips the
+# behavioural layer (B1-B10); the e2e suite in connectors/canbus/tests covers it instead.
+#
+# `canbus-fd` matches the shipped binary's default build (the harness compiles the module
+# with CAN FD enabled for the capability check).
 
 [connector]
-protocol  = "canbus"
-modes     = ["raw", "typed"]
-datatypes = [
-  "bool",
-  "int8",  "uint8",
-  "int16", "uint16",
-  "int32", "uint32",
-  "int64", "uint64",
-  "float32", "float64",
-]
-verbs     = ["write"]
+protocol    = "canbus"
+modes       = ["raw", "typed"]
+datatypes   = ["bool", "int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64", "float32", "float64"]
+point_kinds = ["signal"]
+verbs       = ["write"]
 # CAN is entirely push-based; there is no polling.
-features  = ["subscribe"]
-subscribe = true
+features    = ["subscribe", "canbus-fd"]
+subscribe   = true
 
 [simulator]
-# The e2e simulator uses Linux virtual CAN (vcan0) — no external hardware.
+# Linux virtual CAN (vcan0) — served by the Dockerised e2e stack, not built into the harness.
 kind  = "canbus-vcan"
 image = "connectors/canbus/sim"
 # The DBC file is the seed: it defines signal layout & expected decode values.
-seed  = "connectors/canbus/sim/test.dbc"
+seed  = "sim/test.dbc"

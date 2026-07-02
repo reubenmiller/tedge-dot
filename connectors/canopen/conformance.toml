@@ -1,24 +1,25 @@
-# Conformance descriptor for the CANopen connector.
-# Used by the conformance test harness to validate connector capabilities.
+# Conformance manifest for the CANopen connector.
+#
+#   cargo run -p ot-conformance -- check --spec connectors/canopen/conformance.toml
+#
+# Runs the static layers (schema examples, golden decode vectors, manifest ↔ compiled
+# capability agreement). The declared simulator is the Dockerised vcan stack (python-canopen
+# SDO server on vcan0, node ID 1) — SocketCAN only exists on Linux, so the harness has no
+# built-in implementation for it and skips the behavioural layer (B1-B10); the e2e suite in
+# connectors/canopen/tests covers it instead.
 
 [connector]
-protocol  = "canopen"
-transport = "socketcan"
-
-[capabilities]
-modes     = ["raw", "typed"]
-datatypes = ["bool", "int8", "uint8", "int16", "uint16", "int32", "uint32",
-             "int64", "uint64", "float32", "float64", "string"]
-verbs     = ["write"]
-subscribe = false
-features  = ["management"]
+protocol    = "canopen"
+modes       = ["raw", "typed"]
+datatypes   = ["bool", "int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64", "float32", "float64", "string"]
+point_kinds = ["object"]
+verbs       = ["write"]
+features    = []
+subscribe   = false
 
 [simulator]
-name        = "canopen-vcan"
-description = "python-canopen SDO server on vcan0, node ID 1"
-node_id     = 1
-points = [
-  { id = "analog_in",   index = "0x2000", subindex = 0, datatype = "uint16", value = 1234 },
-  { id = "temperature", index = "0x2001", subindex = 0, datatype = "int16",  value = -100 },
-  { id = "digital_out", index = "0x2002", subindex = 0, datatype = "uint8",  value = 1, writable = true },
-]
+# python-canopen SDO server on vcan0 — served by the Dockerised e2e stack, not built into
+# the harness.
+kind  = "canopen-vcan"
+image = "connectors/canopen/sim"
+seed  = "sim/simulator.py"

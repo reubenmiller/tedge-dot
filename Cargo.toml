@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [workspace]
-members = ["crates/sdk", "crates/connector-modbus", "crates/connector-opcua", "crates/connector-canbus", "crates/connector-canopen", "crates/connector-profibus"]
+members = ["crates/sdk", "crates/connector-modbus", "crates/connector-opcua", "crates/connector-canbus", "crates/connector-canopen", "crates/connector-profibus", "crates/ot-conformance"]
 # The fuzz crate builds with cargo-fuzz (nightly, libFuzzer) and stays out of normal builds.
 exclude = ["crates/sdk/fuzz"]
 

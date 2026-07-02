@@ -1,0 +1,26 @@
+# Conformance manifest for the OPC UA connector.
+#
+# Run the full suite (layers 1-3, no external server or broker):
+#
+#   cargo run -p ot-conformance -- check --spec connectors/opcua/conformance.toml
+#
+# The behavioural layer runs against the harness's embedded async-opcua server (anonymous,
+# security "None"), fronted by a transport proxy for the link-drop checks. The behavioural
+# checks drive the polling path; push delivery (subscribe) is covered by the connector's own
+# integration tests.
+
+[connector]
+protocol    = "opcua"
+modes       = ["raw", "typed"]
+datatypes   = ["bool", "int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64", "float32", "float64", "string"]
+point_kinds = ["variable"]
+verbs       = ["write"]
+features    = ["polling", "subscribe"]
+subscribe   = true
+
+[simulator]
+kind = "opcua"
+seed = "conformance/seed.json"
+
+[harness]
+config = "conformance/connector.toml"

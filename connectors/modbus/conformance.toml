@@ -1,0 +1,30 @@
+# Conformance manifest for the Modbus connector.
+#
+# Run the full suite (layers 1-3, no hardware, no external broker):
+#
+#   cargo run -p ot-conformance -- check --spec connectors/modbus/conformance.toml
+#
+# The [connector] claims MUST agree with the live capability descriptor (check B9); the SDK
+# management verbs (set-config/define-device/remove-device) and the "management" feature are
+# added by the runtime and implicitly part of every manifest.
+
+[connector]
+protocol    = "modbus"
+modes       = ["raw", "typed"]
+datatypes   = ["bool", "int16", "uint16", "int32", "uint32", "int64", "uint64", "float32", "float64"]
+point_kinds = ["coil", "discrete_input", "holding_register", "input_register"]
+verbs       = ["write", "write-coil"]
+features    = ["polling", "bitfield"]
+subscribe   = false
+
+[simulator]
+kind = "modbus-tcp"
+seed = "conformance/seed.json"
+# Container-based setups can use the standalone simulator instead:
+image = "connectors/modbus/sim"
+
+[harness]
+config = "conformance/connector.toml"
+# The harness runs the modbus module in-process by default (identical code path to the
+# shipped binary). To exercise an external build instead, uncomment:
+# command = ["target/debug/tedge-dot", "run"]
