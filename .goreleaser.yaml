@@ -7,7 +7,11 @@ version: 2
 before:
   hooks:
     - rustup default stable
-    - cargo install --locked cargo-zigbuild
+    # CI (release.yaml) pre-installs cargo-zigbuild via taiki-e/install-action
+    # (a prebuilt binary, faster than building from source); `cargo install`
+    # would fail there since the binary already exists at the destination.
+    # Local `just build` has no such step, so still install it here if missing.
+    - sh -c 'command -v cargo-zigbuild >/dev/null || cargo install --locked cargo-zigbuild'
     - cargo fetch --locked
 
 builds:
