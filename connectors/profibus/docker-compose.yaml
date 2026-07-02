@@ -1,9 +1,9 @@
 # End-to-end harness for the PROFIBUS-DP connector.
 #
 #   broker     - lightweight MQTT broker (no cloud)
-#   connector  - combined container: Rust connector + Python DP-V0 slave simulator
-#                PTY devices are container-namespaced so both processes must share
-#                a single container (Dockerfile.e2e).
+#   simulator  - Python DP-V0 slave, its serial line exposed over TCP :9200
+#   connector  - the Rust tedge-dot speaking serial-over-TCP to the simulator
+#                (port = "tcp://simulator:9200") and publishing samples
 #
 # The Robot suite runs on the host and connects to the broker on localhost:11884.
 services:
@@ -15,10 +15,26 @@ services:
       # Use 11884 to avoid clashing with the modbus harness (11883).
       - "11884:1883"
 
+  simulator:
+    build:
+      context: ../..
+      dockerfile: connectors/profibus/sim/Dockerfile
+    restart: unless-stopped
+    healthcheck:
+      # The slave holds its pty end for its whole lifetime. (Probing TCP :9200
+      # would steal the single-connection socat listener from the connector.)
+      test: ["CMD", "test", "-e", "/tmp/profibus/ttySlave"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+      start_period: 3s
+
   connector:
     build:
       context: ../..
-      dockerfile: connectors/profibus/Dockerfile.e2e
+      dockerfile: connectors/profibus/Dockerfile.connector
     depends_on:
       broker:
         condition: service_started
+      simulator:
+        condition: service_healthy

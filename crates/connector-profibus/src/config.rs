@@ -12,7 +12,9 @@ use serde::Deserialize;
 /// `[connection]` block: parameters shared across all PROFIBUS peripherals on this bus.
 #[derive(Debug, Clone, Deserialize)]
 pub struct BusConnection {
-    /// Serial port device (e.g. `/dev/ttyUSB0`, `/dev/ttyS0`).
+    /// Bus transport: a serial port device (e.g. `/dev/ttyUSB0`, `/dev/ttyS0`)
+    /// or `tcp://host:port` for a serial-over-TCP byte stream (RS-485 ⇄ TCP
+    /// device servers, or the containerised slave simulator).
     pub port: String,
     /// Bus baudrate in bits/second. Must be one of the PROFIBUS standard rates.
     /// Supported: 9600, 19200, 93750, 187500, 500000, 1500000, 3000000, 6000000, 12000000.

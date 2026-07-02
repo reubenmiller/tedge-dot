@@ -1,8 +1,8 @@
 # PROFIBUS-DP connector configuration for the end-to-end test harness.
 #
 # This config targets the software slave simulator (connectors/profibus/sim/).
-# The simulator exposes two virtual serial ports via socat; the connector uses
-# /dev/ttyPROFIBUS0 (inside the container, mapped to the socat master pty).
+# The simulator exposes the slave's serial line over TCP (:9200); the connector
+# speaks serial-over-TCP to it directly (port = "tcp://simulator:9200").
 #
 # Peripheral layout (matches sim/slave_sim.py defaults):
 #   Inputs  (8 bytes): [DI0 byte, DI1 byte, AI0_hi, AI0_lo, AI1_hi, AI1_lo, rsvd, rsvd]
@@ -22,7 +22,7 @@ host = "broker"
 port = 1883
 
 [connection]
-port           = "/dev/ttyPROFIBUS0"
+port           = "tcp://simulator:9200"
 baudrate       = 19200
 master_address = 2
 slot_bits      = 300

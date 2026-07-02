@@ -98,7 +98,7 @@ systemd service.
 │  │ opcua-sim     tcp :4840  │◄──────────── tedge-dot (opcua)          │
 │  │ canbus-sim    vcan0      │◄── socketcan─ tedge-dot (canbus)        │
 │  │ canopen-sim   vcan0      │◄── socketcan─ tedge-dot (canopen)       │
-│  │ profibus-sim  tcp :9200  │◄── socat ⇄ /dev/ttyPROFIBUS0 ⇄ profibus │
+│  │ profibus-sim  tcp :9200  │◄──── tcp ──── tedge-dot (profibus)      │
 │  └─────────────────────────┘                     │                    │
 │                                                   ▼                    │
 │                              mosquitto :1883 (thin-edge.io broker)     │
@@ -110,18 +110,12 @@ The connectors publish samples to the thin-edge.io MQTT broker
 
 > **PROFIBUS caveat:** the released package is built without the `profibus`
 > cargo feature (its serial dependency does not cross-compile yet). To include
-> the PROFIBUS connector in the demo: build the binary from source on the
-> device (`cargo build --release --features profibus`), copy
-> [config/profibus.toml](config/profibus.toml) into `/etc/tedge/plugins/ot/`,
-> and start the serial↔TCP bridge that materialises the containerised slave's
-> serial line on the host (`apt install socat`):
->
-> ```sh
-> sudo socat "TCP:127.0.0.1:9200" \
->     "pty,rawer,echo=0,b19200,link=/dev/ttyPROFIBUS0" &
-> ```
->
-> The other four protocols work out of the box.
+> the PROFIBUS connector in the demo, build the binary from source on the
+> device (`cargo build --release --features profibus`) and copy
+> [config/profibus.toml](config/profibus.toml) into `/etc/tedge/plugins/ot/` —
+> the connector speaks serial-over-TCP to the simulator directly
+> (`port = "tcp://127.0.0.1:9200"`). The other four protocols work out of the
+> box.
 
 ### Requirements
 
@@ -223,13 +217,14 @@ simulator containers themselves.
 To run only some protocols, remove the configs you don't want from
 `/etc/tedge/plugins/ot/` and restart the service.
 
-### Why PROFIBUS is bridged over TCP
+### Why PROFIBUS runs over TCP
 
 PTY devices are per-container-namespace and can't be shared with the host, so a
 native host connector cannot open a PTY created inside the simulator container.
 The simulator therefore exposes its slave serial line over TCP (`:9200`), and
-the `socat` bridge from the caveat above re-materialises it as
-`/dev/ttyPROFIBUS0` on the host — the device the PROFIBUS connector opens.
+the connector's `tcp://` transport speaks to it directly — the same transport
+covers real serial-over-TCP device servers (RS-485 ⇄ TCP gateways). For real
+RS-485 hardware, set `port` to the serial device instead (e.g. `/dev/ttyUSB0`).
 
 ### Tunables
 

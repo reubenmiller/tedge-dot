@@ -6,13 +6,10 @@
 # this config needs a source-built binary: cargo build --features profibus
 # (Linux only). Copy it to /etc/tedge/plugins/ot/ to run it.
 #
-# Because PTYs cannot cross the container boundary,
-# run a socat serial<->TCP bridge on the host to materialise the slave's serial
-# line (see the PROFIBUS caveat in ../README.md):
-#
-#   sudo socat "TCP:127.0.0.1:9200" "pty,rawer,echo=0,b19200,link=/dev/ttyPROFIBUS0" &
-#
-# Publishes to the thin-edge.io broker on 127.0.0.1:1883.
+# The connector speaks serial-over-TCP to the simulator directly (the sim
+# container exposes the slave's serial line on TCP :9200) — no pty or socat
+# bridge is needed on the host. Publishes to the thin-edge.io broker on
+# 127.0.0.1:1883.
 #
 # Peripheral layout (matches sim/slave_sim.py defaults):
 #   Inputs  (8 bytes): [DI0, DI1, AI0_hi, AI0_lo, AI1_hi, AI1_lo, rsvd, rsvd]
@@ -29,7 +26,7 @@ host = "127.0.0.1"
 port = 1883
 
 [connection]
-port           = "/dev/ttyPROFIBUS0"
+port           = "tcp://127.0.0.1:9200"
 baudrate       = 19200
 master_address = 2
 slot_bits      = 300

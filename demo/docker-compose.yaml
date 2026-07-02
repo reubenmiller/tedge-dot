@@ -13,7 +13,7 @@
 #   │  │ opcua-sim    :4840     │◄── tcp ─────│ tedge-dot (opcua)        ││
 #   │  │ canbus-sim   vcan0     │◄── socketcan│ tedge-dot (canbus)       ││
 #   │  │ canopen-sim  vcan0     │◄── socketcan│ tedge-dot (canopen)      ││
-#   │  │ profibus-sim :9200     │◄── tcp ─────│ socat ⇄ /dev/ttyPROFI…   ││
+#   │  │ profibus-sim :9200     │◄── tcp ─────│ tedge-dot (profibus)     ││
 #   │  └───────────────────────┘              │   └─ tedge-dot(profibus) ││
 #   │                                         └─────────┬────────────────┘│
 #   │                          mosquitto :1883 ◄────────┘ (thin-edge)     │
@@ -100,15 +100,10 @@ services:
         condition: service_healthy
 
   # --- PROFIBUS-DP slave simulator (Python DP-V0 slave + socat) --------------
-  # PTYs cannot cross the container/host boundary, so instead of sharing a serial
-  # device we expose the simulated slave over TCP on port 9200.  The host-side
-  # connector reaches it through a socat serial<->TCP bridge started on the
-  # host (creating /dev/ttyPROFIBUS0 — see the PROFIBUS caveat in README.md).
-  #
-  # Inside the container:
-  #   socat builds a persistent PTY pair  ttySlave <-> ttyBridge
-  #   the slave simulator opens ttySlave
-  #   a second socat bridges ttyBridge <-> TCP-LISTEN:9200 (auto-reconnecting)
+  # PTYs cannot cross the container/host boundary, so the image exposes the
+  # simulated slave's serial line over TCP on port 9200 (see the sim
+  # Dockerfile). The host-side connector speaks serial-over-TCP to it directly:
+  # port = "tcp://127.0.0.1:9200".
   profibus-sim:
     build:
       context: ..
@@ -116,24 +111,3 @@ services:
     ports:
       - "9200:9200"
     restart: unless-stopped
-    command:
-      - /bin/sh
-      - -c
-      - |
-        set -e
-        mkdir -p /tmp/profibus
-        # Persistent PTY pair: the slave holds one end for its whole lifetime.
-        socat pty,rawer,echo=0,b19200,link=/tmp/profibus/ttySlave \
-              pty,rawer,echo=0,b19200,link=/tmp/profibus/ttyBridge &
-        sleep 1
-        # Bridge the other PTY end to TCP; auto-restart when the host disconnects.
-        ( while true; do
-            socat FILE:/tmp/profibus/ttyBridge,rawer,b19200 \
-                  TCP-LISTEN:9200,reuseaddr,nodelay 2>/dev/null || true
-            sleep 1
-          done ) &
-        echo "profibus-sim: slave on ttySlave, serial-over-tcp bridge on :9200"
-        exec python3 /slave_sim.py \
-            --port /tmp/profibus/ttySlave \
-            --address 7 --baudrate 19200 \
-            --input-bytes 8 --output-bytes 4

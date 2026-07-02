@@ -40,7 +40,7 @@ use tedge_dot_sdk::{
     WordOrder,
 };
 use time::OffsetDateTime;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 const PROTOCOL: &str = "profibus";
 
@@ -449,11 +449,13 @@ unsafe impl Send for LeakedBufs {}
 
 // ── PHY dispatch ─────────────────────────────────────────────────────────────
 
-/// Enum-dispatch PHY so we can use either `SerialPortPhy` (production, real RS-485)
-/// or `PtyPhy` (test/development, socat virtual serial pair) without `dyn` dispatch
+/// Enum-dispatch PHY so we can use `SerialPortPhy` (production, real RS-485),
+/// `TcpPhy` (serial-over-TCP device servers and the containerised simulator) or
+/// `PtyPhy` (test/development, socat virtual serial pair) without `dyn` dispatch
 /// (which profirust's `ProfibusPhy` trait doesn't support).
 enum AnyPhy {
     Serial(profirust::phy::SerialPortPhy),
+    Tcp(TcpPhy),
     Pty(PtyPhy),
 }
 
@@ -461,6 +463,7 @@ impl profirust::phy::ProfibusPhy for AnyPhy {
     fn poll_transmission(&mut self, now: profirust::time::Instant) -> bool {
         match self {
             Self::Serial(p) => p.poll_transmission(now),
+            Self::Tcp(p) => p.poll_transmission(now),
             Self::Pty(p) => p.poll_transmission(now),
         }
     }
@@ -470,6 +473,7 @@ impl profirust::phy::ProfibusPhy for AnyPhy {
     {
         match self {
             Self::Serial(p) => p.transmit_data(now, f),
+            Self::Tcp(p) => p.transmit_data(now, f),
             Self::Pty(p) => p.transmit_data(now, f),
         }
     }
@@ -479,16 +483,22 @@ impl profirust::phy::ProfibusPhy for AnyPhy {
     {
         match self {
             Self::Serial(p) => p.receive_data(now, f),
+            Self::Tcp(p) => p.receive_data(now, f),
             Self::Pty(p) => p.receive_data(now, f),
         }
     }
 }
 
-/// Select the appropriate PHY for `port`.
-/// Paths under `/dev/pts/`, `/tmp/tty`, `/dev/tty` with a small index, or
-/// containing `PROFIBUS` in the name are treated as ptys (no TIOCGSERIAL).
+/// Select the appropriate PHY for `port`:
+/// * `tcp://host:port` — a TCP byte stream (serial device server / simulator).
+/// * Paths under `/dev/pts/`, `/tmp/tty`, or containing `PROFIBUS` in the
+///   name — ptys (no TIOCGSERIAL).
+/// * Anything else — a real serial device.
 fn open_phy(port: &str, baudrate: profirust::Baudrate) -> AnyPhy {
-    if is_pty_path(port) {
+    if let Some(addr) = port.strip_prefix("tcp://") {
+        debug!(addr, "opening port as tcp byte stream");
+        AnyPhy::Tcp(TcpPhy::new(addr))
+    } else if is_pty_path(port) {
         debug!(port, "opening port as pty (skipping TIOCGSERIAL)");
         AnyPhy::Pty(PtyPhy::new(port))
     } else {
@@ -595,6 +605,154 @@ impl profirust::phy::ProfibusPhy for PtyPhy {
         };
         if n > 0 {
             self.rx_buf.extend_from_slice(&tmp[..n as usize]);
+        }
+        let (consumed, r) = f(&self.rx_buf);
+        if consumed > 0 {
+            self.rx_buf.drain(..consumed.min(self.rx_buf.len()));
+        }
+        r
+    }
+}
+
+// ── TcpPhy ────────────────────────────────────────────────────────────────────
+
+/// A `ProfibusPhy` over a TCP byte stream (`port = "tcp://host:port"`): serial
+/// device servers (RS-485 ⇄ TCP gateways) and the containerised slave
+/// simulator, with no pty or socat bridge in between.
+///
+/// Like a pty the stream is full-duplex with no line-level transmission timing,
+/// so `poll_transmission` reports "done" immediately. A dropped connection is
+/// re-established lazily from the bus loop with a backoff; while disconnected,
+/// frames are silently lost and the FDL layer's own retries/link watchdog
+/// surface the outage.
+struct TcpPhy {
+    addr: String,
+    stream: Option<std::net::TcpStream>,
+    rx_buf: Vec<u8>,
+    next_attempt: std::time::Instant,
+}
+
+impl TcpPhy {
+    const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+    const RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+    /// TCP endpoints (device servers, containerised sims) may come up after the
+    /// connector; retry the initial connect for this long before giving up.
+    const INITIAL_RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// Panics when the initial connect keeps failing — like the other phys,
+    /// `bus_thread_main`'s `catch_unwind` turns this into a clean connect error
+    /// report (and `connect()` allows the bus 30 s to become ready).
+    fn new(addr: &str) -> Self {
+        let deadline = std::time::Instant::now() + Self::INITIAL_RETRY_WINDOW;
+        loop {
+            match Self::open(addr) {
+                Ok(stream) => {
+                    return Self {
+                        addr: addr.to_string(),
+                        stream: Some(stream),
+                        rx_buf: Vec::with_capacity(512),
+                        next_attempt: std::time::Instant::now(),
+                    }
+                }
+                Err(e) if std::time::Instant::now() < deadline => {
+                    debug!(addr, "tcp phy connect failed: {e}; retrying");
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                Err(e) => panic!("TcpPhy: failed to connect to '{addr}': {e}"),
+            }
+        }
+    }
+
+    fn open(addr: &str) -> std::io::Result<std::net::TcpStream> {
+        use std::net::ToSocketAddrs;
+        let sock_addr = addr.to_socket_addrs()?.next().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "address did not resolve")
+        })?;
+        let stream = std::net::TcpStream::connect_timeout(&sock_addr, Self::CONNECT_TIMEOUT)?;
+        // The bus loop must never block on the socket, and PROFIBUS frames are
+        // latency-sensitive request/response exchanges: disable Nagle.
+        stream.set_nonblocking(true)?;
+        stream.set_nodelay(true)?;
+        Ok(stream)
+    }
+
+    /// The live stream, reconnecting lazily (at most every `RECONNECT_DELAY`)
+    /// after a drop.
+    fn stream(&mut self) -> Option<&mut std::net::TcpStream> {
+        if self.stream.is_none() {
+            let now = std::time::Instant::now();
+            if now < self.next_attempt {
+                return None;
+            }
+            self.next_attempt = now + Self::RECONNECT_DELAY;
+            match Self::open(&self.addr) {
+                Ok(stream) => {
+                    info!(addr = %self.addr, "tcp phy reconnected");
+                    self.stream = Some(stream);
+                }
+                Err(e) => {
+                    debug!(addr = %self.addr, "tcp phy reconnect failed: {e}");
+                    return None;
+                }
+            }
+        }
+        self.stream.as_mut()
+    }
+
+    fn drop_stream(&mut self, why: &std::io::Error) {
+        warn!(addr = %self.addr, "tcp phy connection lost: {why}; reconnecting");
+        self.stream = None;
+        self.next_attempt = std::time::Instant::now() + Self::RECONNECT_DELAY;
+    }
+}
+
+impl profirust::phy::ProfibusPhy for TcpPhy {
+    fn poll_transmission(&mut self, _now: profirust::time::Instant) -> bool {
+        // Writes complete synchronously in transmit_data (into the kernel socket
+        // buffer), so there is never an ongoing transmission from this phy's view.
+        false
+    }
+
+    fn transmit_data<F, R>(&mut self, _now: profirust::time::Instant, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> (usize, R),
+    {
+        use std::io::Write;
+        let mut buf = [0u8; 512];
+        let (len, r) = f(&mut buf);
+        if len > 0 {
+            if let Some(stream) = self.stream() {
+                match stream.write_all(&buf[..len]) {
+                    Ok(()) => {}
+                    // A full socket buffer means the peer stopped reading; the frame
+                    // is lost and the FDL layer retries. Keep the connection.
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        warn!(addr = %self.addr, "tcp phy send buffer full; frame dropped");
+                    }
+                    Err(e) => self.drop_stream(&e),
+                }
+            }
+        }
+        r
+    }
+
+    fn receive_data<F, R>(&mut self, _now: profirust::time::Instant, f: F) -> R
+    where
+        F: FnOnce(&[u8]) -> (usize, R),
+    {
+        use std::io::Read;
+        // Drain whatever is available without blocking.
+        let mut tmp = [0u8; 512];
+        if let Some(stream) = self.stream() {
+            match stream.read(&mut tmp) {
+                Ok(0) => self.drop_stream(&std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "peer closed the connection",
+                )),
+                Ok(n) => self.rx_buf.extend_from_slice(&tmp[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => self.drop_stream(&e),
+            }
         }
         let (consumed, r) = f(&self.rx_buf);
         if consumed > 0 {
@@ -1110,5 +1268,90 @@ pub mod __test_helpers {
             raw: Some(hex.to_string()),
         };
         encode_point(&model, buffer, &request).expect("encode failed");
+    }
+}
+
+#[cfg(test)]
+mod tcp_phy_tests {
+    use super::*;
+    use profirust::phy::ProfibusPhy;
+    use std::io::{Read, Write};
+
+    fn now() -> profirust::time::Instant {
+        profirust::time::Instant::ZERO
+    }
+
+    /// Full round-trip through a live socket: transmit reaches the peer, the
+    /// peer's reply comes back through receive_data's buffering.
+    #[test]
+    fn tcp_phy_round_trips_bytes() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 5];
+            sock.read_exact(&mut buf).unwrap();
+            assert_eq!(&buf, b"hello");
+            sock.write_all(b"world").unwrap();
+            sock // keep the connection open until the test is done
+        });
+
+        let mut phy = TcpPhy::new(&addr.to_string());
+        phy.transmit_data(now(), |buf| {
+            buf[..5].copy_from_slice(b"hello");
+            (5, ())
+        });
+        assert!(!phy.poll_transmission(now()), "tcp writes complete synchronously");
+
+        // Poll until the reply has arrived (nonblocking reads may need a few tries).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut got = Vec::new();
+        while got.len() < 5 && std::time::Instant::now() < deadline {
+            phy.receive_data(now(), |data| {
+                if data.len() >= 5 {
+                    got.extend_from_slice(data);
+                    (data.len(), ())
+                } else {
+                    (0, ()) // leave partial frames buffered
+                }
+            });
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(got, b"world");
+        drop(server.join().unwrap());
+    }
+
+    /// A closed peer must not panic the bus thread: the phy drops the stream
+    /// and keeps answering with an empty receive buffer until it reconnects.
+    #[test]
+    fn tcp_phy_survives_peer_disconnect() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (sock, _) = listener.accept().unwrap();
+            drop(sock); // immediately close
+        });
+
+        let mut phy = TcpPhy::new(&addr.to_string());
+        server.join().unwrap();
+
+        // Repeated polls after the peer vanished: no panic, no data.
+        for _ in 0..3 {
+            let seen = phy.receive_data(now(), |data| (data.len(), data.len()));
+            assert_eq!(seen, 0);
+            phy.transmit_data(now(), |buf| {
+                buf[0] = 0xAA;
+                (1, ())
+            });
+        }
+        assert!(phy.stream.is_none(), "stream dropped after disconnect");
+    }
+
+    #[test]
+    fn open_phy_dispatches_tcp_scheme() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let phy = open_phy(&format!("tcp://{addr}"), profirust::Baudrate::B19200);
+        assert!(matches!(phy, AnyPhy::Tcp(_)));
     }
 }

@@ -1,10 +1,15 @@
-# PROFIBUS simulator container:
-#   1. Creates a virtual serial port pair with socat (ttyPROFIBUS0 / ttyPROFIBUS1)
-#   2. Runs the Python DP-V0 slave simulator on ttyPROFIBUS1
+# PROFIBUS-DP slave simulator container.
 #
-# ttyPROFIBUS0 is used by the Rust connector container (shared via /tmp/profibus/).
-# Both containers mount the same named volume so the socat pseudo-ttys are visible
-# to the connector.
+# The Python DP-V0 slave needs a serial device, and PTYs cannot cross the
+# container boundary — so the slave's serial line is exposed as a TCP byte
+# stream on port 9200 instead:
+#
+#   socat builds a persistent PTY pair    ttySlave <-> ttyBridge
+#   the slave simulator opens ttySlave
+#   a second socat bridges ttyBridge <-> TCP-LISTEN:9200 (auto-reconnecting)
+#
+# The connector speaks serial-over-TCP natively (port = "tcp://<host>:9200"),
+# so nothing else is needed on the client side.
 
 FROM python:3.11-slim
 
@@ -17,17 +22,22 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY connectors/profibus/sim/slave_sim.py /slave_sim.py
 
-# Create the virtual serial pair, then start the slave simulator.
-# socat creates symlinks /tmp/profibus/ttyPROFIBUS0 and ttyPROFIBUS1.
+EXPOSE 9200
+
 CMD ["/bin/sh", "-c", "\
+    set -e && \
     mkdir -p /tmp/profibus && \
-    socat -d -d \
-        pty,rawer,echo=0,link=/tmp/profibus/ttyPROFIBUS0 \
-        pty,rawer,echo=0,link=/tmp/profibus/ttyPROFIBUS1 & \
-    SOCAT_PID=$! && \
+    socat pty,rawer,echo=0,b19200,link=/tmp/profibus/ttySlave \
+          pty,rawer,echo=0,b19200,link=/tmp/profibus/ttyBridge & \
     sleep 1 && \
-    echo 'socat ptys ready' && \
-    python3 /slave_sim.py --port /tmp/profibus/ttyPROFIBUS1 \
-        --address 7 --baudrate 19200 --input-bytes 8 --output-bytes 4 ; \
-    kill $SOCAT_PID \
+    ( while true; do \
+        socat FILE:/tmp/profibus/ttyBridge,rawer,b19200 \
+              TCP-LISTEN:9200,reuseaddr,nodelay 2>/dev/null || true; \
+        sleep 1; \
+      done ) & \
+    echo 'profibus-sim: slave on ttySlave, serial-over-tcp bridge on :9200' && \
+    exec python3 /slave_sim.py \
+        --port /tmp/profibus/ttySlave \
+        --address 7 --baudrate 19200 \
+        --input-bytes 8 --output-bytes 4 \
 "]

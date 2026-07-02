@@ -1,15 +1,9 @@
 #!/bin/sh
-# Wait for the PROFIBUS slave simulator and MQTT broker to be reachable,
-# then start the connector.
-#
-# The slave simulator exposes a virtual serial pty at /tmp/profibus/ttyPROFIBUS0
-# which is shared via the "profibus-ptys" Docker volume.
+# Wait for the MQTT broker, then start the connector. The simulator's TCP
+# endpoint needs no probing here: the connector's tcp:// transport retries the
+# initial connect itself (and probing would steal the sim's single-connection
+# socat listener).
 set -e
-
-SERIAL_PTY="/tmp/profibus/ttyPROFIBUS0"
-
-echo "waiting for serial pty ${SERIAL_PTY} ..."
-until [ -e "${SERIAL_PTY}" ]; do sleep 1; done
 
 echo "waiting for broker:1883 ..."
 until nc -z broker 1883; do sleep 1; done
