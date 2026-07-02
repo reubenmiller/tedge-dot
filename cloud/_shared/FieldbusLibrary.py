@@ -200,11 +200,13 @@ class FieldbusLibrary:
     def operation_should_eventually_be_successful(
         self, operation_id: str, timeout: float = 60, interval: float = 2
     ) -> Dict[str, Any]:
-        """Poll an operation until SUCCESSFUL; fail fast on FAILED.
+        """Poll an operation by ID until SUCCESSFUL; fail fast on FAILED (with reason).
 
-        Plain REST polling — avoids the c8y_test_core retry stack, which currently
-        raises a TypeError under Python 3.14 when an operation stays EXECUTING
-        across retry attempts.
+        Complements the Cumulocity library's `Operation Should Be SUCCESSFUL`, which
+        (as of 0.52.0) only accepts the AssertOperation object returned by
+        `Create Operation`. Once thin-edge/robotframework-c8y#50 (operation keywords
+        accept plain ids, plus `Execute Shell Command And Get Output`) is released,
+        this keyword can be dropped.
         """
         deadline = time.time() + float(timeout)
         status = "UNKNOWN"
