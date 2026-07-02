@@ -1,0 +1,881 @@
+{
+  "$comment": "Golden decode/encode vectors for the OT Connector conformance suite (Layer 2). Generated data - see doc/conformance/conformance-suite.md. Bytes are the natural wire buffer (16-bit words serialized big-endian, in word order).",
+  "vectors": [
+    {
+      "id": "bool-true",
+      "datatype": "bool",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "01",
+      "expect": {
+        "value": true,
+        "value_repr": "boolean"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "bool-false",
+      "datatype": "bool",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "00",
+      "expect": {
+        "value": false,
+        "value_repr": "boolean"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "bool-nonzero-word-true",
+      "datatype": "bool",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "0100",
+      "expect": {
+        "value": true,
+        "value_repr": "boolean"
+      },
+      "note": "any non-zero byte is true; multi-byte input allowed"
+    },
+    {
+      "id": "bool-zero-word-false",
+      "datatype": "bool",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "0000",
+      "expect": {
+        "value": false,
+        "value_repr": "boolean"
+      }
+    },
+    {
+      "id": "int8-nominal",
+      "datatype": "int8",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "2a",
+      "expect": {
+        "value": 42,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "int8-negative",
+      "datatype": "int8",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "ff",
+      "expect": {
+        "value": -1,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "int8-min",
+      "datatype": "int8",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "80",
+      "expect": {
+        "value": -128,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "int8-max",
+      "datatype": "int8",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "7f",
+      "expect": {
+        "value": 127,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "uint8-zero",
+      "datatype": "uint8",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "00",
+      "expect": {
+        "value": 0,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "uint8-max",
+      "datatype": "uint8",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "ff",
+      "expect": {
+        "value": 255,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "uint16-nominal-be",
+      "datatype": "uint16",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "1234",
+      "expect": {
+        "value": 4660,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "uint16-nominal-le",
+      "datatype": "uint16",
+      "endianness": "little",
+      "word_order": "big",
+      "bytes": "3412",
+      "expect": {
+        "value": 4660,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "uint16-zero",
+      "datatype": "uint16",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "0000",
+      "expect": {
+        "value": 0,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "uint16-max",
+      "datatype": "uint16",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "ffff",
+      "expect": {
+        "value": 65535,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "int16-negative",
+      "datatype": "int16",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "fffe",
+      "expect": {
+        "value": -2,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "int16-negative-le",
+      "datatype": "int16",
+      "endianness": "little",
+      "word_order": "big",
+      "bytes": "feff",
+      "expect": {
+        "value": -2,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "int16-min",
+      "datatype": "int16",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "8000",
+      "expect": {
+        "value": -32768,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "int16-max",
+      "datatype": "int16",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "7fff",
+      "expect": {
+        "value": 32767,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "uint32-nominal-bigword",
+      "datatype": "uint32",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "00010002",
+      "expect": {
+        "value": 65538,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "uint32-nominal-littleword",
+      "datatype": "uint32",
+      "endianness": "big",
+      "word_order": "little",
+      "bytes": "00020001",
+      "expect": {
+        "value": 65538,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "uint32-nominal-le-bigword",
+      "datatype": "uint32",
+      "endianness": "little",
+      "word_order": "big",
+      "bytes": "01000200",
+      "expect": {
+        "value": 65538,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "uint32-nominal-le-littleword",
+      "datatype": "uint32",
+      "endianness": "little",
+      "word_order": "little",
+      "bytes": "02000100",
+      "expect": {
+        "value": 65538,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "uint32-max",
+      "datatype": "uint32",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "ffffffff",
+      "expect": {
+        "value": 4294967295,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "int32-negative-bigword",
+      "datatype": "int32",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "fffffffe",
+      "expect": {
+        "value": -2,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "int32-negative-littleword",
+      "datatype": "int32",
+      "endianness": "big",
+      "word_order": "little",
+      "bytes": "fffeffff",
+      "expect": {
+        "value": -2,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "int32-min",
+      "datatype": "int32",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "80000000",
+      "expect": {
+        "value": -2147483648,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "int32-max",
+      "datatype": "int32",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "7fffffff",
+      "expect": {
+        "value": 2147483647,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "int64-nominal",
+      "datatype": "int64",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "0000010000000000",
+      "expect": {
+        "value": 1099511627776,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "int64-negative",
+      "datatype": "int64",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "fffffffffffffffe",
+      "expect": {
+        "value": -2,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "int64-negative-littleword",
+      "datatype": "int64",
+      "endianness": "big",
+      "word_order": "little",
+      "bytes": "fffeffffffffffff",
+      "expect": {
+        "value": -2,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "int64-safe-max",
+      "datatype": "int64",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "001fffffffffffff",
+      "expect": {
+        "value": 9007199254740991,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "int64-first-unsafe",
+      "datatype": "int64",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "0020000000000000",
+      "expect": {
+        "value": "9007199254740992",
+        "value_repr": "string"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "int64-min",
+      "datatype": "int64",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "8000000000000000",
+      "expect": {
+        "value": "-9223372036854775808",
+        "value_repr": "string"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "int64-max",
+      "datatype": "int64",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "7fffffffffffffff",
+      "expect": {
+        "value": "9223372036854775807",
+        "value_repr": "string"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "int64-le-bigword",
+      "datatype": "int64",
+      "endianness": "little",
+      "word_order": "big",
+      "bytes": "0000000100000000",
+      "expect": {
+        "value": 1099511627776,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "uint64-nominal",
+      "datatype": "uint64",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "000000000000002a",
+      "expect": {
+        "value": 42,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "uint64-safe-max",
+      "datatype": "uint64",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "001fffffffffffff",
+      "expect": {
+        "value": 9007199254740991,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "uint64-max",
+      "datatype": "uint64",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "ffffffffffffffff",
+      "expect": {
+        "value": "18446744073709551615",
+        "value_repr": "string"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "uint64-littleword",
+      "datatype": "uint64",
+      "endianness": "big",
+      "word_order": "little",
+      "bytes": "002a000000000000",
+      "expect": {
+        "value": 42,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "float32-be-bigword-42_5",
+      "datatype": "float32",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "422a0000",
+      "expect": {
+        "value": 42.5,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "float32-be-littleword-42_5",
+      "datatype": "float32",
+      "endianness": "big",
+      "word_order": "little",
+      "bytes": "0000422a",
+      "expect": {
+        "value": 42.5,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "float32-le-bigword-42_5",
+      "datatype": "float32",
+      "endianness": "little",
+      "word_order": "big",
+      "bytes": "2a420000",
+      "expect": {
+        "value": 42.5,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "float32-le-littleword-42_5",
+      "datatype": "float32",
+      "endianness": "little",
+      "word_order": "little",
+      "bytes": "00002a42",
+      "expect": {
+        "value": 42.5,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "float32-negative",
+      "datatype": "float32",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "c22a0000",
+      "expect": {
+        "value": -42.5,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "float32-max-finite",
+      "datatype": "float32",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "7f7fffff",
+      "expect": {
+        "value": 3.4028234663852886e+38,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "float32-min-positive-normal",
+      "datatype": "float32",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "00800000",
+      "expect": {
+        "value": 1.1754943508222875e-38,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "float32-lowest",
+      "datatype": "float32",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "ff7fffff",
+      "expect": {
+        "value": -3.4028234663852886e+38,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "float32-positive-zero",
+      "datatype": "float32",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "00000000",
+      "expect": {
+        "value": 0.0,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "float32-negative-zero",
+      "datatype": "float32",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "80000000",
+      "expect": {
+        "value": -0.0,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "float32-positive-infinity",
+      "datatype": "float32",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "7f800000",
+      "expect": {
+        "special": "+inf"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "float32-negative-infinity",
+      "datatype": "float32",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "ff800000",
+      "expect": {
+        "special": "-inf"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "float32-nan",
+      "datatype": "float32",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "7fc00000",
+      "expect": {
+        "special": "nan"
+      }
+    },
+    {
+      "id": "float64-be-bigword-pi5",
+      "datatype": "float64",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "400921f9f01b866e",
+      "expect": {
+        "value": 3.14159,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "float64-be-littleword-pi5",
+      "datatype": "float64",
+      "endianness": "big",
+      "word_order": "little",
+      "bytes": "866ef01b21f94009",
+      "expect": {
+        "value": 3.14159,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "float64-le-bigword-pi5",
+      "datatype": "float64",
+      "endianness": "little",
+      "word_order": "big",
+      "bytes": "0940f9211bf06e86",
+      "expect": {
+        "value": 3.14159,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "float64-negative",
+      "datatype": "float64",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "c00921f9f01b866e",
+      "expect": {
+        "value": -3.14159,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "float64-max-finite",
+      "datatype": "float64",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "7fefffffffffffff",
+      "expect": {
+        "value": 1.7976931348623157e+308,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "float64-positive-zero",
+      "datatype": "float64",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "0000000000000000",
+      "expect": {
+        "value": 0.0,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "float64-negative-zero",
+      "datatype": "float64",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "8000000000000000",
+      "expect": {
+        "value": -0.0,
+        "value_repr": "number"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "float64-positive-infinity",
+      "datatype": "float64",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "7ff0000000000000",
+      "expect": {
+        "special": "+inf"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "float64-negative-infinity",
+      "datatype": "float64",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "fff0000000000000",
+      "expect": {
+        "special": "-inf"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "float64-nan",
+      "datatype": "float64",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "7ff8000000000000",
+      "expect": {
+        "special": "nan"
+      }
+    },
+    {
+      "id": "string-nominal",
+      "datatype": "string",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "4142",
+      "expect": {
+        "value": "AB",
+        "value_repr": "string"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "string-null-padded",
+      "datatype": "string",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "41420000",
+      "expect": {
+        "value": "AB",
+        "value_repr": "string"
+      },
+      "note": "trailing NULs trimmed; encode does not re-pad, so no round-trip"
+    },
+    {
+      "id": "string-empty",
+      "datatype": "string",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "",
+      "expect": {
+        "value": "",
+        "value_repr": "string"
+      },
+      "roundtrip": true
+    },
+    {
+      "id": "bytes-has-no-typed-value",
+      "datatype": "bytes",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "0102",
+      "expect": {
+        "error": true
+      }
+    },
+    {
+      "id": "float32-short-buffer",
+      "datatype": "float32",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "422a",
+      "expect": {
+        "error": true
+      }
+    },
+    {
+      "id": "uint16-long-buffer",
+      "datatype": "uint16",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "00010002",
+      "expect": {
+        "error": true
+      }
+    },
+    {
+      "id": "bitfield-uint16-bits5to8",
+      "datatype": "uint16",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "01e0",
+      "expect": {
+        "value": 15,
+        "value_repr": "number"
+      },
+      "bitfield": {
+        "start_bit": 5,
+        "bit_count": 4
+      }
+    },
+    {
+      "id": "bitfield-uint16-le",
+      "datatype": "uint16",
+      "endianness": "little",
+      "word_order": "big",
+      "bytes": "e001",
+      "expect": {
+        "value": 15,
+        "value_repr": "number"
+      },
+      "bitfield": {
+        "start_bit": 5,
+        "bit_count": 4
+      }
+    },
+    {
+      "id": "bitfield-uint32-littleword",
+      "datatype": "uint32",
+      "endianness": "big",
+      "word_order": "little",
+      "bytes": "01e00000",
+      "expect": {
+        "value": 15,
+        "value_repr": "number"
+      },
+      "bitfield": {
+        "start_bit": 5,
+        "bit_count": 4
+      }
+    },
+    {
+      "id": "bitfield-lsb",
+      "datatype": "uint16",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "0001",
+      "expect": {
+        "value": 1,
+        "value_repr": "number"
+      },
+      "bitfield": {
+        "start_bit": 0,
+        "bit_count": 1
+      }
+    },
+    {
+      "id": "bitfield-zero-count-is-whole-value",
+      "datatype": "uint16",
+      "endianness": "big",
+      "word_order": "big",
+      "bytes": "ffff",
+      "expect": {
+        "value": 65535,
+        "value_repr": "number"
+      },
+      "bitfield": {
+        "start_bit": 0,
+        "bit_count": 0
+      }
+    }
+  ]
+}

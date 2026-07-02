@@ -196,13 +196,7 @@ impl Connector for ModbusConnector {
                             .as_ref()
                             .map(|m| if m.address.table.is_bit() { 1 } else { 2 })
                             .unwrap_or(2);
-                        bad_sample(
-                            &id,
-                            model.as_ref().map(|m| &m.address),
-                            unit_id,
-                            group,
-                            "device not connected",
-                        )
+                        bad_sample(&id, model.as_ref(), unit_id, group, "device not connected")
                     })
                     .collect());
             }
@@ -220,6 +214,34 @@ impl Connector for ModbusConnector {
             out.push(read_one(ctx, &id, &model, unit_id).await);
         }
         Ok(out)
+    }
+
+    async fn reconnect(&mut self, device: &DeviceId) -> Result<LinkReport, ConnectorError> {
+        let address = self
+            .devices
+            .get(device)
+            .map(|d| d.address.clone())
+            .ok_or_else(|| ConnectorError::Other(format!("unknown device '{device}'")))?;
+        // Drop the dead context first so reads fail fast ("device not connected") instead of
+        // timing out on a broken socket while the attempt is in flight.
+        self.contexts.remove(device);
+        match build_context(&address, &self.serial).await {
+            Ok(ctx) => {
+                self.contexts.insert(device.clone(), ctx);
+                Ok(LinkReport {
+                    device: device.clone(),
+                    status: LinkStatus::Connected,
+                    reason: None,
+                    info: Some(device_descriptor(&address)),
+                })
+            }
+            Err(e) => Ok(LinkReport {
+                device: device.clone(),
+                status: LinkStatus::Disconnected,
+                reason: Some(e),
+                info: Some(device_descriptor(&address)),
+            }),
+        }
     }
 
     async fn execute(
@@ -280,7 +302,7 @@ async fn read_one(ctx: &mut Context, id: &str, model: &ModbusPoint, unit_id: u8)
                 };
                 good_sample(id, model, unit_id, raw, 1, value)
             }
-            Err(e) => bad_sample(id, Some(addr), unit_id, 1, &e),
+            Err(e) => bad_sample(id, Some(model), unit_id, 1, &e),
         }
     } else {
         let count = register_count(addr, model);
@@ -295,7 +317,7 @@ async fn read_one(ctx: &mut Context, id: &str, model: &ModbusPoint, unit_id: u8)
                             None => {
                                 return bad_sample(
                                     id,
-                                    Some(addr),
+                                    Some(model),
                                     unit_id,
                                     2,
                                     "typed point missing datatype",
@@ -324,7 +346,7 @@ async fn read_one(ctx: &mut Context, id: &str, model: &ModbusPoint, unit_id: u8)
                                 Err(e) => {
                                     return bad_sample(
                                         id,
-                                        Some(addr),
+                                        Some(model),
                                         unit_id,
                                         2,
                                         &format!("decode error: {e}"),
@@ -336,7 +358,7 @@ async fn read_one(ctx: &mut Context, id: &str, model: &ModbusPoint, unit_id: u8)
                     }
                 }
             }
-            Err(e) => bad_sample(id, Some(addr), unit_id, 2, &e),
+            Err(e) => bad_sample(id, Some(model), unit_id, 2, &e),
         }
     }
 }
@@ -531,24 +553,31 @@ fn good_sample(
 
 fn bad_sample(
     id: &str,
-    addr: Option<&ModbusAddress>,
+    model: Option<&ModbusPoint>,
     unit_id: u8,
     group: usize,
     error: &str,
 ) -> Sample {
+    // Echo the point's mode/datatype so the envelope stays schema-valid: `typed` requires a
+    // `datatype`. A point we know nothing about reports as `raw`, which requires neither.
+    let mode = model.map(|m| m.mode).unwrap_or(Mode::Raw);
     Sample {
         ts: OffsetDateTime::now_utc(),
         device: String::new(),
         protocol: PROTOCOL,
         point: id.to_string(),
-        mode: Mode::Typed,
-        datatype: None,
+        mode,
+        datatype: if mode == Mode::Typed {
+            model.and_then(|m| m.datatype).or(Some(DataType::Bool))
+        } else {
+            None
+        },
         value: None,
         raw: Vec::new(),
         raw_group: group,
         quality: Quality::Bad,
         unit: None,
-        addr: addr_echo(addr, unit_id),
+        addr: addr_echo(model.map(|m| &m.address), unit_id),
         seq: None,
         error: Some(error.to_string()),
     }
