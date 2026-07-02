@@ -25,6 +25,10 @@ const NAMESPACE_URI: &str = "urn:tedge-dot-opcua-test:nodes";
 /// Start an anonymous, security-`None` OPC-UA server on an ephemeral port with two variables
 /// (`Temperature`: Double, `Counter`: UInt16) in a custom namespace.
 async fn start_server() -> (ServerHandle, Arc<SimpleNodeManager>, u16, u16) {
+    // Opt-in wire logging for debugging: RUST_LOG=opcua_client=debug,opcua_server=debug
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
 
@@ -83,8 +87,10 @@ fn pref(id: &str, datatype: DataType, interval_ms: u64) -> PointRef {
 }
 
 /// Receive samples until `pred` matches (skipping e.g. initial-value notifications).
+/// `what` names the expected sample in the timeout panic message.
 async fn wait_for_sample(
     rx: &mut mpsc::Receiver<Sample>,
+    what: &str,
     pred: impl Fn(&Sample) -> bool,
 ) -> Sample {
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -96,7 +102,7 @@ async fn wait_for_sample(
         }
     })
     .await
-    .expect("timed out waiting for sample")
+    .unwrap_or_else(|_| panic!("timed out waiting for sample: {what}"))
 }
 
 #[tokio::test]
@@ -145,7 +151,7 @@ async fn subscription_pushes_data_changes() {
     connector.subscribe(&device, &points, tx).await.unwrap();
 
     // Monitored items push their current value on creation.
-    let initial = wait_for_sample(&mut rx, |s| s.point == "temperature").await;
+    let initial = wait_for_sample(&mut rx, "initial temperature value", |s| s.point == "temperature").await;
     assert_eq!(initial.device, "plc-1");
     assert_eq!(initial.quality, Quality::Good);
     assert_eq!(initial.value, Some(Value::Number(21.5)));
@@ -153,7 +159,21 @@ async fn subscription_pushes_data_changes() {
     assert_eq!(initial.addr["node_id"], format!("ns={ns};s=Temperature"));
     assert!(initial.seq.is_none(), "connector must not stamp seq");
 
-    // Mutate both variables server-side and expect pushed samples with the new values.
+    // Space server-side writes more than one sampling interval (100 ms) apart. The async-opcua
+    // 0.18 server defers a value written less than one sampling interval after the previous
+    // source timestamp (`sample_skipped_data_value`), and a sub-millisecond race in the deferred
+    // flush can strand it forever, wedging the test on slow/contended CI hosts. Notifications
+    // arrive on the server's 100 ms publish tick, so reacting to a sample immediately with a
+    // write lands exactly on that knife edge unless we wait out the interval first.
+    let sampling_gap = Duration::from_millis(150);
+
+    // Mutate the variables server-side and expect pushed samples with the new values.
+    //
+    // Mutations are strictly sequential: write one value, await its sample, then write the
+    // next. `wait_for_sample` discards non-matching samples while it scans, and the server
+    // batches concurrent changes into one notification in arbitrary (hash-map) order — two
+    // outstanding expected samples would let the first wait swallow the second one.
+    tokio::time::sleep(sampling_gap).await;
     let temp_node = NodeId::new(ns, "Temperature");
     let counter_node = NodeId::new(ns, "Counter");
     nm.set_value(
@@ -163,15 +183,7 @@ async fn subscription_pushes_data_changes() {
         DataValue::new_now(42.5f64),
     )
     .unwrap();
-    nm.set_value(
-        handle.subscriptions(),
-        &counter_node,
-        None,
-        DataValue::new_now(7u16),
-    )
-    .unwrap();
-
-    let temp = wait_for_sample(&mut rx, |s| {
+    let temp = wait_for_sample(&mut rx, "temperature update 42.5", |s| {
         s.point == "temperature" && s.value == Some(Value::Number(42.5))
     })
     .await;
@@ -182,7 +194,15 @@ async fn subscription_pushes_data_changes() {
     let age = time::OffsetDateTime::now_utc() - temp.ts;
     assert!(age.whole_seconds() >= 0 && age.whole_seconds() < 30, "stale ts: {}", temp.ts);
 
-    let counter = wait_for_sample(&mut rx, |s| {
+    tokio::time::sleep(sampling_gap).await;
+    nm.set_value(
+        handle.subscriptions(),
+        &counter_node,
+        None,
+        DataValue::new_now(7u16),
+    )
+    .unwrap();
+    let counter = wait_for_sample(&mut rx, "counter update 7", |s| {
         s.point == "counter" && s.value == Some(Value::Number(7.0))
     })
     .await;
@@ -190,6 +210,7 @@ async fn subscription_pushes_data_changes() {
     assert_eq!(counter.datatype, Some(DataType::Uint16));
 
     // A bad status code on the server must surface as a `bad` quality sample.
+    tokio::time::sleep(sampling_gap).await;
     nm.set_value(
         handle.subscriptions(),
         &temp_node,
@@ -203,7 +224,7 @@ async fn subscription_pushes_data_changes() {
         },
     )
     .unwrap();
-    let bad = wait_for_sample(&mut rx, |s| {
+    let bad = wait_for_sample(&mut rx, "bad-status temperature", |s| {
         s.point == "temperature" && s.quality == Quality::Bad
     })
     .await;

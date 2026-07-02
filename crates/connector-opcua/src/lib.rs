@@ -302,6 +302,7 @@ impl Connector for OpcuaConnector {
         let device_name = device.clone();
         let callback = DataChangeCallback::new(move |dv, item| {
             let node_id = &item.item_to_monitor().node_id;
+            tracing::trace!(%node_id, "data change notification");
             if let Some(models) = by_node.get(node_id) {
                 for (id, model) in models {
                     let mut sample = build_sample(id, model, &dv);
@@ -309,6 +310,8 @@ impl Connector for OpcuaConnector {
                     // Ignore send errors: the forwarder has already shut down.
                     let _ = tx.send(sample);
                 }
+            } else {
+                tracing::debug!(%node_id, "data change for unrequested node id, dropped");
             }
         });
 
