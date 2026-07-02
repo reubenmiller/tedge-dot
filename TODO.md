@@ -2,12 +2,6 @@
 
 ## In flight / next
 
-* [ ] SDK runtime: decouple MQTT event-loop polling from publishing. Both live in one select
-      loop, so when the broker is down at startup the 32-slot publish queue fills,
-      `publish().await` blocks, the event loop stops being polled and the connector wedges
-      permanently (observed when tedge-dot started before mosquitto in the cloud harness;
-      worked around with a service restart). Spawn the rumqttc event loop as its own task and
-      route incoming publishes through a channel.
 
 * [ ] Cloud Fieldbus integration — see `doc/rfc/0002-cloud-fieldbus-integration.md`
       (device stays config-file driven; `ot-fieldbus-import` flow translates device types

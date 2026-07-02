@@ -78,6 +78,30 @@ pub async fn run(
 
     let (client, mut eventloop) = AsyncClient::new(opts, 32);
 
+    // Drive the MQTT event loop from its own task, forwarding incoming publishes to the main
+    // loop. The event loop MUST NOT share a select loop with publishing: while the broker is
+    // unreachable the client's request queue fills, `publish().await` then blocks the shared
+    // loop, the event loop stops being polled, and the connector wedges permanently — even
+    // after the broker comes back. (Observed when the connector service started before the
+    // broker.) A dedicated task keeps draining the queue no matter what the main loop awaits.
+    let (incoming_tx, mut incoming_rx) = tokio::sync::mpsc::channel::<rumqttc::Publish>(32);
+    tokio::spawn(async move {
+        loop {
+            match eventloop.poll().await {
+                Ok(Event::Incoming(Packet::Publish(p))) => {
+                    if incoming_tx.send(p).await.is_err() {
+                        break; // runtime shut down
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    warn!("mqtt event loop error: {e}; retrying");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    });
+
     // 3. Publish capability descriptor + service health (retained).
     publish_retained(&client, &cap_topic, caps.to_json().to_string()).await?;
     publish_health(&client, &health_topic, "up").await?;
@@ -100,16 +124,9 @@ pub async fn run(
     let mut meta_index = build_meta_index(&config);
     let mut seq_counters: HashMap<(String, String), u64> = HashMap::new();
 
-    // 6. Main loop: poll due points on a tick, route commands from the MQTT event loop.
+    // 6. Main loop: poll due points on a tick, route commands from the MQTT event-loop task.
     let mut tick = tokio::time::interval(Duration::from_millis(200));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    // Use a pinned sleep future as a select arm for MQTT retry backoff so that
-    // ctrl_c() is always polled (a bare `.await` inside a select branch would
-    // prevent that).
-    let mqtt_retry = tokio::time::sleep(Duration::ZERO);
-    tokio::pin!(mqtt_retry);
-    let mut mqtt_waiting = false;
 
     loop {
         tokio::select! {
@@ -148,41 +165,26 @@ pub async fn run(
                 publish_sample(&client, &protocol, &mut sample, &mut seq_counters, &meta_index)
                     .await;
             }
-            ev = eventloop.poll(), if !mqtt_waiting => {
-                match ev {
-                    Ok(Event::Incoming(Packet::Publish(p))) => {
-                        match handle_command(
-                            &mut connector, &client, &protocol,
-                            &mut config, &mut config_doc, &config_path,
-                            &p.topic, &p.payload,
-                        ).await {
-                            // A management command changed the config: re-establish push
-                            // delivery (the reload disconnected the old subscriptions) and
-                            // rebuild the polling schedule.
-                            Ok(true) => {
-                                subscribed = setup_subscriptions(
-                                    &mut connector, &config, caps.subscribe, &sample_tx,
-                                ).await;
-                                schedule = build_schedule(&config, &subscribed);
-                                meta_index = build_meta_index(&config);
-                                seq_counters.clear();
-                            }
-                            Ok(false) => {}
-                            Err(e) => warn!("command handling error: {e}"),
-                        }
+            Some(p) = incoming_rx.recv() => {
+                match handle_command(
+                    &mut connector, &client, &protocol,
+                    &mut config, &mut config_doc, &config_path,
+                    &p.topic, &p.payload,
+                ).await {
+                    // A management command changed the config: re-establish push
+                    // delivery (the reload disconnected the old subscriptions) and
+                    // rebuild the polling schedule.
+                    Ok(true) => {
+                        subscribed = setup_subscriptions(
+                            &mut connector, &config, caps.subscribe, &sample_tx,
+                        ).await;
+                        schedule = build_schedule(&config, &subscribed);
+                        meta_index = build_meta_index(&config);
+                        seq_counters.clear();
                     }
-                    Ok(_) => {}
-                    Err(e) => {
-                        warn!("mqtt event loop error: {e}; retrying");
-                        mqtt_retry.as_mut().reset(
-                            tokio::time::Instant::now() + Duration::from_secs(1)
-                        );
-                        mqtt_waiting = true;
-                    }
+                    Ok(false) => {}
+                    Err(e) => warn!("command handling error: {e}"),
                 }
-            }
-            _ = &mut mqtt_retry, if mqtt_waiting => {
-                mqtt_waiting = false;
             }
         }
     }
