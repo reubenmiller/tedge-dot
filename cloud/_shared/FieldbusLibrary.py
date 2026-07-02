@@ -4,10 +4,10 @@ Creates and manages the inventory entries the Cloud Fieldbus UI would create:
 device-type managed objects (c8y_ModbusDeviceType with c8y_Registers/c8y_Coils),
 UI-style child device placeholders, and the c8y_ModbusDevice assignment operation.
 
-The generic inventory CRUD half of this library (Create/Update/Get Managed Object,
-Add Child Device Reference) is proposed for upstreaming to robotframework-c8y
-(branch feat/inventory-crud-keywords); once released there, this library shrinks
-to the fieldbus-specific conveniences.
+The generic inventory CRUD keywords (Create/Update/Get Managed Object, Add Child
+Device Reference) live in robotframework-c8y >= 0.52.0 — this library keeps only the
+fieldbus-specific conveniences (plus private CRUD helpers for its own use) and the
+plain-REST operation wait (see Operation Should Eventually Be Successful).
 
 Auth comes from the same environment variables as robotframework-c8y
 (C8Y_BASEURL, C8Y_USER, C8Y_PASSWORD, C8Y_TENANT), via c8y_test_core.
@@ -61,10 +61,9 @@ class FieldbusLibrary:
                 logger.warning("cleanup failed: %s", ex)
         self._cleanup.clear()
 
-    # ── Generic inventory CRUD (upstream candidates) ────────────────────────
+    # ── Private inventory helpers (public keywords: robotframework-c8y >= 0.52) ─
 
-    @keyword("Create Managed Object")
-    def create_managed_object(
+    def _create_managed_object(
         self, fragments: Fragments = None, cleanup: bool = True, **kwargs
     ) -> Dict[str, Any]:
         """Create a managed object from arbitrary fragments; returns its json."""
@@ -79,8 +78,7 @@ class FieldbusLibrary:
         data["id"] = created.id
         return data
 
-    @keyword("Update Managed Object")
-    def update_managed_object(self, mo_id: str, fragments: Fragments) -> Dict[str, Any]:
+    def _update_managed_object(self, mo_id: str, fragments: Fragments) -> Dict[str, Any]:
         """Merge the given fragments into an existing managed object."""
         return self.c8y.put(
             f"/inventory/managedObjects/{mo_id}",
@@ -88,21 +86,18 @@ class FieldbusLibrary:
             accept="application/vnd.com.nsn.cumulocity.managedobject+json",
         )
 
-    @keyword("Get Managed Object")
-    def get_managed_object(self, mo_id: str) -> Dict[str, Any]:
+    def _get_managed_object(self, mo_id: str) -> Dict[str, Any]:
         """Fetch a managed object by id."""
         mo = self.c8y.inventory.get(mo_id)
         data = mo.to_json()
         data["id"] = mo.id
         return data
 
-    @keyword("Delete Managed Object By Id")
-    def delete_managed_object_by_id(self, mo_id: str):
+    def _delete_managed_object_by_id(self, mo_id: str):
         """Delete a managed object by id."""
         self.c8y.inventory.delete(mo_id)
 
-    @keyword("Add Child Device Reference")
-    def add_child_device_reference(self, parent_id: str, child_id: str):
+    def _add_child_device_reference(self, parent_id: str, child_id: str):
         """Attach an existing managed object as child device of a parent."""
         self.c8y.post(
             f"/inventory/managedObjects/{parent_id}/childDevices",
@@ -139,7 +134,7 @@ class FieldbusLibrary:
             "c8y_Registers": regs or [],
             "c8y_Coils": cls or [],
         }
-        return self.create_managed_object(body, cleanup=cleanup)
+        return self._create_managed_object(body, cleanup=cleanup)
 
     @keyword("Create Fieldbus Child")
     def create_fieldbus_child(
@@ -161,11 +156,11 @@ class FieldbusLibrary:
         ).get("managedObjects", [])
         if existing:
             return existing[0]
-        child = self.create_managed_object(
+        child = self._create_managed_object(
             {"name": child_name, "type": "c8y_ModbusDevice", "c8y_IsDevice": {}},
             cleanup=cleanup,
         )
-        self.add_child_device_reference(gateway_mo_id, child["id"])
+        self._add_child_device_reference(gateway_mo_id, child["id"])
         return child
 
     @keyword("Build Modbus Device Assignment")

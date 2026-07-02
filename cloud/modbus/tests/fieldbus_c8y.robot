@@ -43,7 +43,7 @@ Create Fieldbus Device Type
     # at suite end would strand those measurements. `just cleanup` wipes the test device.
     ${type}=    Create Modbus Device Type    ${TYPE_NAME}    registers=${REGISTERS}    cleanup=${False}
     Set Suite Variable    ${TYPE_MO}    ${type}
-    ${fetched}=    FieldbusLibrary.Get Managed Object    ${type}[id]
+    ${fetched}=    Get Managed Object    ${type}[id]
     Should Be Equal    ${fetched}[type]    c8y_ModbusDeviceType
     ${regs}=    Get From Dictionary    ${fetched}    c8y_Registers
     Length Should Be    ${regs}    1
@@ -81,7 +81,7 @@ Child Is Registered With A Device-Owned Managed Object
     ...                the device owns it — otherwise thin-edge registers its own child (the
     ...                tenant-user-owned placeholder stays behind as a UI artifact).
     ${mo}=    External Identity Should Exist    ${DEVICE_ID}:device:${FB_CHILD}
-    ${full}=    FieldbusLibrary.Get Managed Object    ${mo}[id]
+    ${full}=    Get Managed Object    ${mo}[id]
     Should Be Equal As Strings    ${full}[owner]    device_${DEVICE_ID}
 
 Imported Points Produce Mapped Measurements
