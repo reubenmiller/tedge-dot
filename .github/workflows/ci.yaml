@@ -57,6 +57,23 @@ jobs:
             cargo +nightly fuzz run "$t" -- -max_total_time=30
           done
 
+  conformance:
+    name: Conformance (${{ matrix.protocol }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        protocol: [modbus, opcua, canbus, canopen, profibus]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system deps (libudev for the profibus serial transport)
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v2
+      - name: Run conformance suite
+        run: just conformance ${{ matrix.protocol }}
+
   e2e:
     name: e2e (${{ matrix.protocol }})
     runs-on: ubuntu-latest
