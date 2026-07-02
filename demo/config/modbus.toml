@@ -1,34 +1,42 @@
-# Modbus connector config for LOCAL exploration on your machine.
+# Demo Modbus connector config — pairs with the pymodbus simulator
+# (modbus-sim in ../docker-compose.yaml, or `just sim modbus`), which maps the
+# container's port 502 to host port 5020.
 #
-# Pairs with the pymodbus simulator started by `just sim modbus`, which maps the
-# container's port 502 to host port 5020 (see connectors/modbus/docker-compose.yaml). Unlike the
-# e2e config this points at 127.0.0.1:5020 so the CLI can reach it directly.
+# Two ways to use it:
 #
-# The points map onto the values seeded in connectors/modbus/sim/modbus.json (shared
-# address space):
+#   * Local exploration, no broker needed — the read/write CLI ignores [mqtt]:
+#       cargo run -- read  -c demo/config/modbus.toml -d plc1 -p temp_u16 -p level_f32
+#       cargo run -- write -c demo/config/modbus.toml -d plc1 -p coil_rw --value true
+#       cargo run -- read  -c demo/config/modbus.toml -d plc1 -p bad_point  # exits 1 (bad quality)
+#
+#   * Installed demo — ships with the tedge-dot package in /usr/share/tedge-dot/demo/.
+#     Copy it to /etc/tedge/plugins/ot/ and restart tedge-dot.service to run it
+#     against the simulator. Publishes to the thin-edge.io broker on 127.0.0.1:1883.
+#
+# The points map onto the values seeded in connectors/modbus/sim/modbus.json
+# (shared address space):
 #
 #   holding 3      -> uint16  17001
 #   holding 4..5   -> uint32  617001
 #   holding 6..7   -> float32 404.17
 #   coil    48     -> bool    false (initially)
 #   holding 1      -> flagged "invalid" -> read raises a Modbus exception (bad quality)
-#
-# Try it (after `just sim modbus`):
-#   cargo run -- read  -c examples/modbus-local.toml -d plc1 -p temp_u16 -p level_f32 -p coil_rw
-#   cargo run -- write -c examples/modbus-local.toml -d plc1 -p coil_rw  --value true
-#   cargo run -- write -c examples/modbus-local.toml -d plc1 -p temp_u16 --value 1234
-#   cargo run -- read  -c examples/modbus-local.toml -d plc1 -p bad_point   # exits 1 (bad quality)
 
 [connector]
 protocol      = "modbus"
-service_name  = "tedge-dot"
-poll_interval = "1s"
+service_name  = "tedge-dot-modbus"
+poll_interval = "2s"
 log_level     = "info"
 
 [mqtt]
 host = "127.0.0.1"
-# port = 1883
-port = 2883
+port = 1883
+
+[connection.serial]
+baudrate = 9600
+parity   = "N"
+stopbits = 2
+databits = 8
 
 [[device]]
 name             = "plc1"
@@ -43,7 +51,7 @@ default_mode     = "typed"
   address  = { table = "holding", address = 3, count = 1 }
 
   # Same register, but with a per-point linear transform applied by the connector:
-  # (17001 * 1 * 10^-3 / 1) + 0 = 17.001. Scaling is a property of the signal, not the flow.
+  # (17001 * 10^-3) + 0 = 17.001. Scaling is a property of the signal, not the flow.
   # The free-form `meta` table is echoed verbatim in every sample envelope; flows read it for
   # per-signal behaviour (ot-measurement honours on_change / deadband / min_interval / debounce).
   [[device.point]]
@@ -66,7 +74,8 @@ default_mode     = "typed"
   datatype = "float32"
   address  = { table = "holding", address = 6, count = 2 }
 
-  # Reading this address makes the simulator return an exception -> quality "bad".
+  # Reading this address makes the simulator return an exception -> quality "bad"
+  # (kept in the demo deliberately, to show quality propagation end to end).
   [[device.point]]
   id       = "bad_point"
   datatype = "uint16"

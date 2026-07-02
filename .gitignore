@@ -15,4 +15,4 @@ connectors/*/output/
 cloud/*/.venv/
 cloud/*/output/
 __pycache__/
-*.pyc
+*.pycpki/

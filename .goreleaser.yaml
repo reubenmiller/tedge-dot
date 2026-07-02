@@ -95,18 +95,18 @@ nfpms:
         file_info: { owner: tedge, group: tedge, mode: 0644 }
 
       # Demo connector configs (one per OT protocol), paired with the simulators
-      # in docker-compose.simulators.yaml. Copy to /etc/tedge/plugins/ot/ to run
+      # in demo/docker-compose.yaml. Copy to /etc/tedge/plugins/ot/ to run
       # them (see demo/README.md).
-      - src: packaging/demo/ot/modbus.toml
+      - src: demo/config/modbus.toml
         dst: /usr/share/tedge-dot/demo/modbus.toml
         file_info: { owner: tedge, group: tedge, mode: 0644 }
-      - src: packaging/demo/ot/opcua.toml
+      - src: demo/config/opcua.toml
         dst: /usr/share/tedge-dot/demo/opcua.toml
         file_info: { owner: tedge, group: tedge, mode: 0644 }
-      - src: packaging/demo/ot/canbus.toml
+      - src: demo/config/canbus.toml
         dst: /usr/share/tedge-dot/demo/canbus.toml
         file_info: { owner: tedge, group: tedge, mode: 0644 }
-      - src: packaging/demo/ot/canopen.toml
+      - src: demo/config/canopen.toml
         dst: /usr/share/tedge-dot/demo/canopen.toml
         file_info: { owner: tedge, group: tedge, mode: 0644 }
 

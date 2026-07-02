@@ -48,7 +48,7 @@ installs:
 - `tedge-dot.service` — a single systemd service whose supervisor runs one
   connector process per config file;
 - demo configs in `/usr/share/tedge-dot/demo/`, pre-wired to the Docker
-  simulators in this repo — see [demo/](demo/) for the all-protocols demo.
+  simulators in [demo/](demo/) — see there for the all-protocols demo.
 
 Add `[[device]]` sections to a config (each file documents the syntax), then:
 
@@ -64,11 +64,12 @@ poke — the CLI talks to the device directly:
 
 ```sh
 just sim modbus     # pymodbus simulator on 127.0.0.1:5020
-cargo run -- read -c examples/modbus-local.toml -d plc1 -p temp_u16
+cargo run -- read -c demo/config/modbus.toml -d plc1 -p temp_u16
 ```
 
-See [examples/](examples/) for the local exploration guide and
-[demo/](demo/) for the full all-protocols demo on a real device.
+See [demo/](demo/) for the local exploration guide and the full
+all-protocols demo on a real device — both use the same configs in
+[demo/config/](demo/config/).
 
 ## Repository layout
 
@@ -81,10 +82,9 @@ See [examples/](examples/) for the local exploration guide and
 | [operations/](operations/) | Cumulocity operation shims (legacy `c8y_*` operations → generic OT commands) |
 | [connectors/](connectors/) | per-protocol e2e test stacks: simulator, Docker compose, Robot suites |
 | [cloud/](cloud/) | Cumulocity cloud e2e suites (live tenant) |
-| [packaging/](packaging/) | installed configs, supervisor, systemd unit, demo configs |
+| [packaging/](packaging/) | installed default configs, supervisor, systemd unit |
 | [doc/](doc/) | proposal, RFCs, contract + schemas, connector specs, testing strategy |
-| [examples/](examples/) | local exploration configs for the `read`/`write` CLI |
-| [demo/](demo/) | all-protocols demo on a single device |
+| [demo/](demo/) | simulator compose file + demo configs: local CLI exploration and the all-protocols on-device demo |
 
 ## Development
 

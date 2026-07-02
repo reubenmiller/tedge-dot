@@ -1,5 +1,5 @@
 # Demo CANopen connector config — pairs with the canopen-sim service in
-# docker-compose.simulators.yaml (python-canopen SDO server, node ID 1 on vcan0).
+# ../docker-compose.yaml (python-canopen SDO server, node ID 1 on vcan0).
 #
 # Ships with the tedge-dot package in /usr/share/tedge-dot/demo/. Copy it to
 # /etc/tedge/plugins/ot/ and restart tedge-dot.service to run it against the

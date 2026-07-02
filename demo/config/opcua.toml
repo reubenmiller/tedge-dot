@@ -1,0 +1,84 @@
+# Demo OPC-UA connector config — pairs with the asyncua simulator
+# (opcua-sim in ../docker-compose.yaml, or `just sim opcua`), which advertises
+# its endpoint as opc.tcp://127.0.0.1:4840/.
+#
+# NOTE: the connector follows the server's ADVERTISED endpoint URL, so the sim
+# must advertise 127.0.0.1 (not a docker service name) to be reachable from the
+# host.
+#
+# Two ways to use it:
+#
+#   * Local exploration, no broker needed — the read/write CLI ignores [mqtt]:
+#       cargo run -- read  -c demo/config/opcua.toml -d opc1 -p temperature -p count_u32 --json
+#       cargo run -- write -c demo/config/opcua.toml -d opc1 -p setpoint --value 42
+#       cargo run -- read  -c demo/config/opcua.toml -d opc1 -p bad_point  # exits 1 (bad quality)
+#
+#   * Installed demo — ships with the tedge-dot package in /usr/share/tedge-dot/demo/.
+#     Copy it to /etc/tedge/plugins/ot/ and restart tedge-dot.service to run it
+#     against the simulator. Publishes to the thin-edge.io broker on 127.0.0.1:1883.
+#
+# The points map onto the nodes exposed by connectors/opcua/sim/server.py
+# (namespace index 2):
+#
+#   ns=2;s=Temperature   -> float64 21.5
+#   ns=2;s=Count         -> uint32  617001
+#   ns=2;s=Setpoint      -> int32   0      (read/write round-trip)
+#   ns=2;s=Running       -> bool    false  (read/write round-trip)
+#   ns=2;s=DoesNotExist  -> read returns a Bad status -> quality "bad"
+#
+# With security_policy = "None" no client certificate is needed. The connector
+# silences async-opcua's spurious "missing application instance certificate"
+# logs by default; set RUST_LOG (e.g. RUST_LOG=info) to see the full client logs.
+
+[connector]
+protocol      = "opcua"
+service_name  = "tedge-dot-opcua"
+poll_interval = "2s"
+log_level     = "info"
+
+[mqtt]
+host = "127.0.0.1"
+port = 1883
+
+[connection]
+application_name  = "tedge-dot"
+security_policy   = "None"
+security_mode     = "none"
+connect_timeout_s = 10
+
+[[device]]
+name             = "opc1"
+protocol_address = { endpoint = "opc.tcp://127.0.0.1:4840/", security_policy = "None", security_mode = "none" }
+default_mode     = "typed"
+
+  [[device.point]]
+  id       = "temperature"
+  datatype = "float64"
+  unit     = "°C"
+  address  = { node_id = "ns=2;s=Temperature" }
+
+  [[device.point]]
+  id       = "count_u32"
+  datatype = "uint32"
+  address  = { node_id = "ns=2;s=Count" }
+
+  # Int32 used for the numeric write round-trip.
+  [[device.point]]
+  id       = "setpoint"
+  datatype = "int32"
+  access   = "read_write"
+  address  = { node_id = "ns=2;s=Setpoint" }
+
+  # Boolean used for the boolean write round-trip.
+  [[device.point]]
+  id       = "running"
+  datatype = "bool"
+  access   = "read_write"
+  address  = { node_id = "ns=2;s=Running" }
+
+  # Reading this node returns a Bad status -> quality "bad"
+  # (kept in the demo deliberately, to show quality propagation end to end).
+  [[device.point]]
+  id       = "bad_point"
+  datatype = "uint16"
+  address  = { node_id = "ns=2;s=DoesNotExist" }

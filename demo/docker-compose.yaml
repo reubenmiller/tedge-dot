@@ -9,7 +9,7 @@
 #   │                                                                     │
 #   │  docker compose (this file)            tedge-dot.service (package)  │
 #   │  ┌───────────────────────┐              ┌──────────────────────────┐│
-#   │  │ modbus-sim   :502      │◄── tcp ─────│ tedge-dot (modbus)       ││
+#   │  │ modbus-sim   :5020     │◄── tcp ─────│ tedge-dot (modbus)       ││
 #   │  │ opcua-sim    :4840     │◄── tcp ─────│ tedge-dot (opcua)        ││
 #   │  │ canbus-sim   vcan0     │◄── socketcan│ tedge-dot (canbus)       ││
 #   │  │ canopen-sim  vcan0     │◄── socketcan│ tedge-dot (canopen)      ││
@@ -25,25 +25,25 @@
 #       CONFIG_CAN, CONFIG_CAN_RAW, CONFIG_CAN_VCAN  (modprobe vcan)
 #
 # Usage:
-#   docker compose -f docker-compose.simulators.yaml up -d --build
-#   docker compose -f docker-compose.simulators.yaml down -v
+#   docker compose -f demo/docker-compose.yaml up -d --build
+#   docker compose -f demo/docker-compose.yaml down -v
 #
 # Or via just:  just demo-sims-up  /  just demo-sims-down
 #
-# Build context for every service is the repository root (.), matching the
+# Build context for every service is the repository root (..), matching the
 # COPY paths inside each connectors/<proto>/sim/Dockerfile.
 
 name: tedge-dot-simulators
 
 services:
   # --- Modbus TCP simulator (pymodbus) ---------------------------------------
-  # Exposes a real Modbus TCP server on host port 502.
+  # Exposes a real Modbus TCP server on host port 5020.
   modbus-sim:
     build:
-      context: .
+      context: ..
       dockerfile: connectors/modbus/sim/Dockerfile
     ports:
-      - "502:502"
+      - "5020:502"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080')"]
@@ -59,7 +59,7 @@ services:
   # the robust choice here.) The connector dials opc.tcp://127.0.0.1:4840/.
   opcua-sim:
     build:
-      context: .
+      context: ..
       dockerfile: connectors/opcua/sim/Dockerfile
     network_mode: host
     environment:
@@ -72,7 +72,7 @@ services:
   # ENGINE_STATUS frames at 10 Hz.
   canbus-sim:
     build:
-      context: .
+      context: ..
       dockerfile: connectors/canbus/sim/Dockerfile
     network_mode: host
     privileged: true
@@ -90,7 +90,7 @@ services:
   # so the two coexist on the same virtual bus, exactly as on real hardware.
   canopen-sim:
     build:
-      context: .
+      context: ..
       dockerfile: connectors/canopen/sim/Dockerfile
     network_mode: host
     privileged: true
@@ -111,7 +111,7 @@ services:
   #   a second socat bridges ttyBridge <-> TCP-LISTEN:9200 (auto-reconnecting)
   profibus-sim:
     build:
-      context: .
+      context: ..
       dockerfile: connectors/profibus/sim/Dockerfile
     ports:
       - "9200:9200"

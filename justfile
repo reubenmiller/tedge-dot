@@ -47,29 +47,29 @@ test-flows:
 
 # Bring up all simulators (build + start).
 demo-sims-up:
-    docker compose -f docker-compose.simulators.yaml up -d --build
+    docker compose -f demo/docker-compose.yaml up -d --build
     @echo "All OT simulators are up. Install the tedge-dot package and start tedge-dot.service to run the connectors."
 
 # Tear down all simulators.
 demo-sims-down:
-    docker compose -f docker-compose.simulators.yaml down -v
+    docker compose -f demo/docker-compose.yaml down -v
 
 # Show simulator status / logs.
 demo-sims-status:
-    docker compose -f docker-compose.simulators.yaml ps
+    docker compose -f demo/docker-compose.yaml ps
 
 demo-sims-logs *args="":
-    docker compose -f docker-compose.simulators.yaml logs -f {{args}}
+    docker compose -f demo/docker-compose.yaml logs -f {{args}}
 
 # --- Local exploration -------------------------------------------------------
 # Spin up a single simulator and poke it with the CLI (no MQTT broker / cloud).
-# See examples/README.md and connectors/README.md for the full quickstart.
+# See demo/README.md and connectors/README.md for the full quickstart.
 
-# Start the protocol simulator in Docker (pairs with examples/<proto>-local.toml).
+# Start the protocol simulator in Docker (pairs with demo/config/<proto>.toml).
 # Usage: just sim modbus   just sim opcua
 sim proto:
     docker compose -f connectors/{{proto}}/docker-compose.yaml up -d --build simulator
-    @echo "{{proto}} simulator ready — see examples/{{proto}}-local.toml for usage"
+    @echo "{{proto}} simulator ready — see demo/config/{{proto}}.toml for usage"
 
 # Stop the protocol simulator container.
 sim-down proto:

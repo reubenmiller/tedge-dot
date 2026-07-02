@@ -1,5 +1,5 @@
 # Demo PROFIBUS-DP connector config — pairs with the profibus-sim service in
-# docker-compose.simulators.yaml (Python DP-V0 slave exposed over TCP :9200).
+# ../docker-compose.yaml (Python DP-V0 slave exposed over TCP :9200).
 #
 # Not shipped in the released package: the packaged binary is built without the
 # profibus cargo feature (its serial dependency does not cross-compile yet), so

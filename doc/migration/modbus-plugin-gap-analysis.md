@@ -87,7 +87,7 @@ does more than tedge-dot.
 | Modbus RTU (serial) | pymodbus `ModbusSerialClient` + `[serial]` defaults merged per device | `tokio-modbus` rtu + `tokio-serial`, `[connection.serial]` defaults ([`crates/connector-modbus/src/lib.rs`](../../crates/connector-modbus/src/lib.rs) `build_context`) | covered |
 | Contiguous-range read batching | `_build_query_model` | spec §5 batching | covered |
 | Failed reads visible | logged only (silently dropped downstream) | `quality: "bad"` samples with `error` | covered (superset) |
-| deb/rpm packaging | nfpm, package `tedge-modbus-plugin`, systemd `tedge-modbus-plugin.service`, config under `/etc/tedge/plugins/modbus/` | goreleaser deb/rpm (`.goreleaser.yaml`), `packaging/tedge-dot.service`, config `/etc/tedge/plugins/modbus/modbus.toml` (same path — eases migration) | covered |
+| deb/rpm packaging | nfpm, package `tedge-modbus-plugin`, systemd `tedge-modbus-plugin.service`, config under `/etc/tedge/plugins/modbus/` | goreleaser deb/rpm (`.goreleaser.yaml`), `packaging/tedge-dot.service`, config `/etc/tedge/plugins/ot/modbus.toml` | covered |
 | `conflicts`/`replaces` on the legacy package for clean cut-over | n/a | not declared in `.goreleaser.yaml` | partial |
 | tedge-log-plugin / tedge-configuration-plugin integration snippets (`type = "modbus"`, `type = "modbus-devices"`) | documented in README | not yet documented for the connector config | partial (docs only) |
 | Install via c8y Software Management | yes (deb) | yes (deb; exercised by `cloud/modbus/Dockerfile.tedge`) | covered |

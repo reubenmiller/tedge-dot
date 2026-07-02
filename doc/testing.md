@@ -10,7 +10,7 @@ class of bug the others cannot.
 | Property-based tests | `crates/sdk/tests/properties.rs` | Invariant violations across the whole input space | `just test-properties` |
 | Fuzzing | `crates/sdk/fuzz/` | Panics/crashes on hostile or malformed input | `just fuzz <target>` |
 | Integration tests | `crates/connector-*/tests/` | Protocol framing against an in-process or scripted peer | `just test` |
-| Simulator e2e | `connectors/<proto>/sim/`, `docker-compose.simulators.yaml` | Real protocol stacks end to end | `just test-e2e <proto>` |
+| Simulator e2e | `connectors/<proto>/sim/`, `demo/docker-compose.yaml` | Real protocol stacks end to end | `just test-e2e <proto>` |
 | Flow tests | `flows/test-flows.sh` (`tedge flows test`) | Sample→measurement/alarm/event mapping, offline | `just test-flows` |
 | Cloud e2e | `cloud/<proto>/tests/*.robot` | Cumulocity operation round-trips on a live tenant | Robot Framework |
 
@@ -60,6 +60,6 @@ compile while the host build was green.
 
 1. Unit tests for its address parsing and any protocol-specific decode beyond the SDK.
 2. An integration test against an in-process or scripted peer where feasible.
-3. A Docker simulator (`connectors/<proto>/sim/`) wired into `docker-compose.simulators.yaml`.
+3. A Docker simulator (`connectors/<proto>/sim/`) wired into `demo/docker-compose.yaml`.
 4. Acceptance vectors in its spec (`doc/connectors/<proto>-connector-spec.md`).
 5. If it adds parsing of external input (files, frames), a fuzz target for that parser.
