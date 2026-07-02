@@ -12,6 +12,10 @@
       "format": "date-time",
       "description": "Read completion time, RFC 3339, millisecond precision, UTC (Z)."
     },
+    "ts_ms": {
+      "type": "number",
+      "description": "Read completion time as Unix epoch milliseconds (float; the numeric companion to 'ts' for consumers doing time arithmetic)."
+    },
     "device": { "type": "string", "minLength": 1 },
     "protocol": { "type": "string", "minLength": 1 },
     "point": { "type": "string", "minLength": 1 },
@@ -76,6 +80,7 @@
   "examples": [
     {
       "ts": "2026-05-30T10:00:00.000Z",
+      "ts_ms": 1780221600000.0,
       "device": "plc-1",
       "protocol": "modbus",
       "point": "boiler_temp_raw",

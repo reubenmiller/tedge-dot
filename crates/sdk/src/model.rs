@@ -176,6 +176,7 @@ impl Sample {
     pub fn to_envelope(&self) -> serde_json::Value {
         let mut obj = serde_json::Map::new();
         obj.insert("ts".into(), serde_json::Value::String(format_rfc3339_ms(self.ts)));
+        obj.insert("ts_ms".into(), serde_json::json!(unix_ms(self.ts)));
         obj.insert("device".into(), serde_json::Value::String(self.device.clone()));
         obj.insert("protocol".into(), serde_json::Value::String(self.protocol.into()));
         obj.insert("point".into(), serde_json::Value::String(self.point.clone()));
@@ -210,6 +211,13 @@ impl Sample {
         }
         serde_json::Value::Object(obj)
     }
+}
+
+/// Unix epoch milliseconds as a float (sub-millisecond precision preserved), the numeric
+/// companion to the RFC 3339 `ts` — consumers doing time math get a number instead of a
+/// string to parse.
+pub fn unix_ms(ts: OffsetDateTime) -> f64 {
+    ts.unix_timestamp_nanos() as f64 / 1e6
 }
 
 /// Format an `OffsetDateTime` as RFC 3339, millisecond precision, UTC `Z`.
@@ -293,6 +301,31 @@ mod tests {
         };
         assert_eq!(t.apply(Value::Bool(true)), Value::Bool(true));
         assert_eq!(t.apply(Value::Text("hi".into())), Value::Text("hi".into()));
+    }
+
+    #[test]
+    fn envelope_carries_both_timestamp_forms() {
+        let ts = OffsetDateTime::from_unix_timestamp_nanos(1_500_000_000_123_456_789).unwrap();
+        let sample = Sample {
+            ts,
+            device: "plc-1".into(),
+            protocol: "modbus",
+            point: "temp".into(),
+            mode: Mode::Typed,
+            datatype: Some(DataType::Uint16),
+            value: Some(Value::Number(1.0)),
+            raw: vec![0x00, 0x01],
+            raw_group: 2,
+            quality: Quality::Good,
+            unit: None,
+            addr: serde_json::Value::Null,
+            seq: None,
+            error: None,
+        };
+        let env = sample.to_envelope();
+        assert_eq!(env["ts"], serde_json::json!("2017-07-14T02:40:00.123Z"));
+        // ts_ms is the same instant as unix epoch milliseconds (float, sub-ms preserved)
+        assert!((env["ts_ms"].as_f64().unwrap() - 1_500_000_000_123.456_8).abs() < 1e-3);
     }
 
     #[test]

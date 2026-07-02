@@ -257,6 +257,7 @@ native address so flows can route or debug). The example below uses Modbus to ma
 ```json
 {
   "ts": "2026-05-30T10:00:00.000Z",
+  "ts_ms": 1780221600000.0,
   "device": "plc-1",
   "protocol": "modbus",
   "point": "boiler_temp",
@@ -275,6 +276,7 @@ native address so flows can route or debug). The example below uses Modbus to ma
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `ts` | string (RFC 3339, ms, UTC `Z`) | yes | Read completion time. |
+| `ts_ms` | number | no | The same instant as Unix epoch milliseconds (float); the numeric companion to `ts` for consumers doing time arithmetic. |
 | `device` | string | yes | thin-edge device entity id segment. |
 | `protocol` | string | yes | Protocol module id. |
 | `point` | string | yes | Point `id`. |

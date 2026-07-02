@@ -64,7 +64,9 @@ poke — the CLI talks to the device directly:
 
 ```sh
 just sim modbus     # pymodbus simulator on 127.0.0.1:5020
-cargo run -- read -c demo/config/modbus.toml -d plc1 -p temp_u16
+cargo run -- read -c demo/config/modbus.toml                    # all devices, all readable points
+cargo run -- read -c demo/config/modbus.toml -d plc1 -p 'temp_*' --poll   # keep polling (Ctrl-C stops)
+cargo run -- run  -c demo/config/modbus.toml --output stdout --duration 10s  # sample JSON lines, no broker
 ```
 
 See [demo/](demo/) for the local exploration guide and the full

@@ -5,9 +5,11 @@
 # Two ways to use it:
 #
 #   * Local exploration, no broker needed — the read/write CLI ignores [mqtt]:
-#       cargo run -- read  -c demo/config/modbus.toml -d plc1 -p temp_u16 -p level_f32
+#       cargo run -- read  -c demo/config/modbus.toml                        # all readable points, once
+#       cargo run -- read  -c demo/config/modbus.toml -p 'temp_*' --poll     # keep polling (Ctrl-C stops)
 #       cargo run -- write -c demo/config/modbus.toml -d plc1 -p coil_rw --value true
-#       cargo run -- read  -c demo/config/modbus.toml -d plc1 -p bad_point  # exits 1 (bad quality)
+#       cargo run -- read  -c demo/config/modbus.toml -d plc1 -p bad_point   # exits 1 (bad quality)
+#       cargo run -- run   -c demo/config/modbus.toml --output stdout        # sample JSON lines on stdout
 #
 #   * Installed demo — ships with the tedge-dot package in /usr/share/tedge-dot/demo/.
 #     Copy it to /etc/tedge/plugins/ot/ and restart tedge-dot.service to run it
