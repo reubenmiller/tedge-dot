@@ -1,7 +1,7 @@
 # Modbus connector configuration for the end-to-end test harness.
 #
 # Points map onto the values baked into the pymodbus simulator
-# (see images/simulator/modbus.json). With "shared blocks": true the holding,
+# (see sim/modbus.json). With "shared blocks": true the holding,
 # input and coil tables share one address space, so the holding-register
 # addresses below read the simulator's seeded values:
 #

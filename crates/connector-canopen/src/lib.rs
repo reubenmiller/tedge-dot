@@ -670,7 +670,7 @@ fn json_to_value(v: &serde_json::Value, dt: DataType) -> Result<Value, Connector
 
 fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
     let s = s.trim();
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err("odd number of hex digits".into());
     }
     (0..s.len())

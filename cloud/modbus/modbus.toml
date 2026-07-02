@@ -2,7 +2,7 @@
 #
 # The connector runs inside the tedge container, talks to the local MQTT broker
 # (127.0.0.1:1883) and reads the pymodbus simulator over TCP (service "simulator").
-# Points map onto the values baked into images/simulator/modbus.json:
+# Points map onto the values baked into connectors/modbus/sim/modbus.json:
 #
 #   holding 3      -> uint16  17001   (read/write -> c8y_SetRegister round-trip)
 #   holding 4..5   -> uint32  617001

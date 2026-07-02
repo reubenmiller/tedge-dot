@@ -1,9 +1,10 @@
-# Default CAN bus connector configuration installed by the package.
+# Default CAN bus connector configuration installed by the tedge-dot package.
 #
 # No devices are configured out of the box, so the service starts and stays
-# active on a fresh install.  Add [[device]] sections and restart the service:
+# active on a fresh install. Add `[[device]]` sections (see the demo configs in
+# /usr/share/tedge-dot/demo/ or the project README) and restart the service:
 #
-#   sudo systemctl restart tedge-canbus-plugin
+#   sudo systemctl restart tedge-dot
 #
 # Requirements:
 #   - Linux with SocketCAN support (kernel module: can, can_raw)
@@ -12,7 +13,7 @@
 
 [connector]
 protocol     = "canbus"
-service_name = "tedge-canbus-plugin"
+service_name = "tedge-dot-canbus"
 log_level    = "info"
 
 [mqtt]

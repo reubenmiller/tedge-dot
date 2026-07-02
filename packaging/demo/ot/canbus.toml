@@ -1,15 +1,15 @@
 # Demo CAN bus connector config — pairs with the canbus-sim service in
 # docker-compose.simulators.yaml (python-can broadcasting on vcan0).
 #
-# Installed to /etc/tedge/plugins/ot/canbus.toml and launched automatically by
-# the tedge-dot supervisor, which ensures vcan0 exists on the host.  Publishes
-# to 127.0.0.1:1883.
+# Ships with the tedge-dot package in /usr/share/tedge-dot/demo/. Copy it to
+# /etc/tedge/plugins/ot/ and restart tedge-dot.service to run it against the
+# simulator. Publishes to the thin-edge.io broker on 127.0.0.1:1883.
 #
 # Requires kernel CAN/vcan support on the host (modprobe vcan).
 
 [connector]
 protocol     = "canbus"
-service_name = "tedge-canbus-plugin"
+service_name = "tedge-dot-canbus"
 log_level    = "info"
 
 [mqtt]
@@ -18,7 +18,7 @@ port = 1883
 
 [[device]]
 name             = "engine"
-protocol_address = { interface = "vcan0", dbc_file = "/etc/tedge/plugins/ot/can/test.dbc" }
+protocol_address = { interface = "vcan0", dbc_file = "/usr/share/tedge-dot/demo/can/test.dbc" }
 default_mode     = "typed"
 
   [[device.point]]

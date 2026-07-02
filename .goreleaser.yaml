@@ -1,17 +1,11 @@
-# This is an example .goreleaser.yml file with some sensible defaults.
-# Make sure to check the documentation at https://goreleaser.com
-
-# The lines below are called `modelines`. See `:help modeline`
-# Feel free to remove those if you don't want/need to use them.
+# goreleaser configuration for tedge-dot.
+# Docs: https://goreleaser.com
 # yaml-language-server: $schema=https://goreleaser.com/static/schema.json
-# vim: set ts=2 sw=2 tw=0 fo=cnqoj
 
 version: 2
 
 before:
   hooks:
-    # if you don't do these things before calling goreleaser, it might be a
-    # good idea to do them here:
     - rustup default stable
     - cargo install --locked cargo-zigbuild
     - cargo fetch --locked
@@ -21,10 +15,14 @@ builds:
     flags:
       - --release
       - --package=tedge-dot
-      # Compile every protocol module into the single binary so one service can
-      # run modbus, opcua, canbus, canopen and profibus connectors.
+      # Compile the cross-compilable protocol modules into the single binary so
+      # one service can run modbus, opcua, canbus and canopen connectors.
+      #
+      # profibus is deliberately excluded: its serial dependency (serialport via
+      # profirust) has a native libudev build script that does not cross-compile
+      # with cargo-zigbuild. Build from source on Linux with
+      # `cargo build --features profibus` to use it.
       - --features=modbus,opcua,canbus,canopen
-      # - --all-features
     targets:
       - x86_64-unknown-linux-gnu
       - x86_64-apple-darwin
@@ -49,7 +47,7 @@ archives:
 nfpms:
   - id: linux
     maintainer: thin-edge.io <info@thin-edge.io>
-    description: "thin-edge.io Driver for OT connectors"
+    description: "thin-edge.io OT protocol connectors (Modbus, OPC UA, CAN bus, CANopen)"
     homepage: "https://github.com/thin-edge/tedge-dot"
     section: "default"
     priority: "extra"
@@ -76,32 +74,45 @@ nfpms:
           mode: 0755
           owner: root
 
-      # Demo connector configs (one per OT protocol), paired with the
-      # simulators in docker-compose.simulators.yaml.
-      - src: packaging/demo/ot/modbus.toml
+      # Default connector configs (no devices configured): the service starts
+      # and stays active on a fresh install. Add [[device]] sections (or copy a
+      # demo config from /usr/share/tedge-dot/demo/) and restart the service.
+      - src: packaging/config/modbus.toml
         dst: /etc/tedge/plugins/ot/modbus.toml
         type: config|noreplace
         file_info: { owner: tedge, group: tedge, mode: 0644 }
-      - src: packaging/demo/ot/opcua.toml
+      - src: packaging/config/opcua.toml
         dst: /etc/tedge/plugins/ot/opcua.toml
         type: config|noreplace
         file_info: { owner: tedge, group: tedge, mode: 0644 }
-      - src: packaging/demo/ot/canbus.toml
+      - src: packaging/config/canbus.toml
         dst: /etc/tedge/plugins/ot/canbus.toml
         type: config|noreplace
         file_info: { owner: tedge, group: tedge, mode: 0644 }
-      - src: packaging/demo/ot/canopen.toml
+      - src: packaging/config/canopen.toml
         dst: /etc/tedge/plugins/ot/canopen.toml
         type: config|noreplace
         file_info: { owner: tedge, group: tedge, mode: 0644 }
-      - src: packaging/demo/ot/profibus.toml
-        dst: /etc/tedge/plugins/ot/profibus.toml
-        type: config|noreplace
+
+      # Demo connector configs (one per OT protocol), paired with the simulators
+      # in docker-compose.simulators.yaml. Copy to /etc/tedge/plugins/ot/ to run
+      # them (see demo/README.md).
+      - src: packaging/demo/ot/modbus.toml
+        dst: /usr/share/tedge-dot/demo/modbus.toml
+        file_info: { owner: tedge, group: tedge, mode: 0644 }
+      - src: packaging/demo/ot/opcua.toml
+        dst: /usr/share/tedge-dot/demo/opcua.toml
+        file_info: { owner: tedge, group: tedge, mode: 0644 }
+      - src: packaging/demo/ot/canbus.toml
+        dst: /usr/share/tedge-dot/demo/canbus.toml
+        file_info: { owner: tedge, group: tedge, mode: 0644 }
+      - src: packaging/demo/ot/canopen.toml
+        dst: /usr/share/tedge-dot/demo/canopen.toml
         file_info: { owner: tedge, group: tedge, mode: 0644 }
 
       # DBC database describing the CAN signals the canbus simulator emits.
       - src: connectors/canbus/sim/test.dbc
-        dst: /etc/tedge/plugins/ot/can/test.dbc
+        dst: /usr/share/tedge-dot/demo/can/test.dbc
         file_info: { owner: tedge, group: tedge, mode: 0644 }
 
       # SystemD Unit File

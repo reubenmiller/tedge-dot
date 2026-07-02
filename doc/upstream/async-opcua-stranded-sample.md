@@ -37,4 +37,4 @@ compare against the pre-rewrite timestamp when draining) seems warranted.
 
 Context: found while testing a client (monitored-item subscription) against the in-process
 test server in https://github.com/reubenmiller/tedge-dot
-(`crates/connector-opcua/tests/subscription_integration.rs` documents the analysis).
+(`crates/connector-opcua/tests/integration.rs` documents the analysis).

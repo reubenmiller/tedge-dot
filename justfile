@@ -5,7 +5,7 @@ set dotenv-load := true
 # Default cross-compilation target and matching package architecture.
 TARGET := "aarch64-unknown-linux-musl"
 PKG_ARCH := "arm64"
-VERSION := `awk -F '"' '/^version/ {print $2; exit}' Cargo.toml`
+VERSION := `awk -F '"' '/^version = /{print $2; exit}' Cargo.toml`
 
 # Run the Rust unit + integration tests
 test *args="":
@@ -109,22 +109,15 @@ e2e-down proto:
 build:
     goreleaser release --snapshot --clean
 
-# Same as test-data but builds the deb fully inside Docker (no host toolchain needed)
+# Build the deb fully inside Docker (no host toolchain needed); writes to ../tests/data
 test-data-docker pkg_arch=PKG_ARCH:
     @mkdir -p ../tests/data
     docker build -f Dockerfile.package --build-arg PKG_ARCH={{pkg_arch}} --target export --output ../tests/data .
 
-# Configure and register the device to the cloud
-bootstrap *args="":
-    docker compose exec --env "DEVICE_ID=${DEVICE_ID:-}" --env "C8Y_BASEURL=${C8Y_BASEURL:-}" --env "C8Y_USER=${C8Y_USER:-}" --env "C8Y_PASSWORD=${C8Y_PASSWORD:-}" tedge bootstrap.sh {{args}}
+# Start a shell in the cloud e2e tedge container (after `just cloud-up <proto>`)
+shell proto *args='bash':
+    docker compose -f cloud/{{proto}}/docker-compose.yaml exec tedge {{args}}
 
-# Start a shell
-shell *args='bash':
-    docker compose exec tedge {{args}}
-
-# Full Cumulocity end-to-end for the Rust OT connector: build the connector .deb + tedge image,
-# bring up the stack (tedge + simulator), bootstrap to Cumulocity, then run the Robot suite.
-# Requires C8Y_BASEURL / C8Y_USER / C8Y_PASSWORD / DEVICE_ID (and an active C8Y_TENANT) in the env.
 # Full Cumulocity end-to-end for a protocol: build the connector .deb + tedge image,
 # bring up the stack, bootstrap to Cumulocity, then run the Robot suite.
 # Requires C8Y_BASEURL / C8Y_USER / C8Y_PASSWORD / DEVICE_ID in the env.

@@ -21,14 +21,18 @@ connectors/
       ...
     tests/
       <proto>_e2e.robot         # Robot Framework e2e suite
-    packaging/
-      <proto>.toml              # default installed connector config
     docker-compose.yaml         # 3-service stack: broker, simulator, connector
     Dockerfile.connector        # builds the Rust connector binary for e2e
     connector.toml              # connector config used inside the container
     entrypoint.sh               # waits for deps, then execs tedge-dot
+    conformance.toml            # conformance-suite manifest (optional, see doc/conformance/)
     requirements.txt            # protocol-specific extra Python deps (optional)
 ```
+
+The configs the package installs live in [`packaging/`](../packaging/) at the
+repo root: `packaging/config/<proto>.toml` (empty defaults installed to
+`/etc/tedge/plugins/ot/`) and `packaging/demo/ot/<proto>.toml` (demo configs
+shipped to `/usr/share/tedge-dot/demo/`).
 
 ### Broker port convention
 
@@ -94,7 +98,9 @@ The `test-e2e` recipe installs Python deps automatically:
    Library    ../../_shared/MqttClient.py
    ```
 
-5. **Packaging config** — create `connectors/<proto>/packaging/<proto>.toml`
-   with sane defaults (no devices, correct `protocol` and `service_name`).
+5. **Packaging configs** — create `packaging/config/<proto>.toml` (sane
+   defaults: no devices, correct `protocol` and `service_name`) and
+   `packaging/demo/ot/<proto>.toml` (pre-wired to the simulator), and add both
+   to the `nfpms.contents` list in `.goreleaser.yaml`.
 
 That's it. `just sim <proto>` and `just test-e2e <proto>` work immediately.

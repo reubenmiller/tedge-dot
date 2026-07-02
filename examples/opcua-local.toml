@@ -1,6 +1,6 @@
 # OPC-UA connector config for LOCAL exploration on your machine.
 #
-# Pairs with the asyncua simulator started by `just sim-opcua`, which advertises
+# Pairs with the asyncua simulator started by `just sim opcua`, which advertises
 # its endpoint as opc.tcp://127.0.0.1:4840/ (OPCUA_ENDPOINT_HOST=127.0.0.1).
 #
 # NOTE: the connector follows the server's ADVERTISED endpoint URL, so the sim must
@@ -14,7 +14,7 @@
 #   ns=2;s=Running       -> bool    false  (read/write round-trip)
 #   ns=2;s=DoesNotExist  -> read returns a Bad status -> quality "bad"
 #
-# Try it (after `just sim-opcua`):
+# Try it (after `just sim opcua`):
 #   cargo run -- read  -c examples/opcua-local.toml -d opc1 -p temperature -p count_u32 --json
 #   cargo run -- write -c examples/opcua-local.toml -d opc1 -p setpoint --value 42
 #   cargo run -- write -c examples/opcua-local.toml -d opc1 -p running  --value true

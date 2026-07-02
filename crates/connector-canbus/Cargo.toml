@@ -1,9 +1,10 @@
 [package]
 name = "connector-canbus"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "CAN bus connector module for thin-edge.io OT connectors (Linux SocketCAN + DBC)"
-license = "Apache-2.0"
+license.workspace = true
+repository.workspace = true
 
 [features]
 # Enable CAN FD support (frames up to 64 bytes).  Requires a kernel with CAN FD support.

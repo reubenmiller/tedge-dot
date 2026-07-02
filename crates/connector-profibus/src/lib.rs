@@ -766,7 +766,7 @@ use profirust::{dp, fdl};
 
         // ── 7. Cleanup ────────────────────────────────────────────────────
         drop(dp_master);
-        drop(fdl);
+        let _ = fdl;
         drop(phy);
 
         // SAFETY: Reconstruct Boxes from the raw pointers to free the heap.
@@ -795,7 +795,7 @@ use profirust::{dp, fdl};
         error!("PROFIBUS bus thread panicked: {msg}");
         // best-effort: tell connect() that we failed if it is still waiting
         // (the ready_tx may have already been consumed, which is fine)
-        let _ = shared
+        shared
             .lock()
             .unwrap()
             .peripherals
@@ -1011,7 +1011,7 @@ fn json_to_value(v: &serde_json::Value) -> Option<Value> {
 
 fn parse_hex(s: &str) -> Result<Vec<u8>, String> {
     let s = s.trim().replace(' ', "");
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(format!("odd-length hex string: '{s}'"));
     }
     (0..s.len())

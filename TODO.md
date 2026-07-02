@@ -2,6 +2,12 @@
 
 ## In flight / next
 
+* [ ] Ship profibus in the released packages: the `profibus` cargo feature is excluded from
+      the goreleaser builds because its serial dependency (`serialport` via `profirust`) has a
+      native libudev build script that does not cross-compile with cargo-zigbuild. Options:
+      disable the libudev feature upstream, vendor a libudev stub per target, or build the
+      Linux packages natively per architecture.
+
 * [ ] Cloud Fieldbus increments 3 + 4 (see `doc/rfc/0002-cloud-fieldbus-integration.md`;
       increments 1 + 2 shipped and verified live 2026-07-02): generalise the device-type
       translator per protocol, and the export path / UI-placeholder reconciliation (needs a

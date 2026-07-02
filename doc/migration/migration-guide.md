@@ -225,7 +225,7 @@ is written to `MIGRATION_NOTES.md` for human review rather than guessed.
 
 1. Run `tedge-ot-migrate` to produce config + flows.
 2. Validate offline: `tedge flows test` each generated flow against representative samples;
-   run the connector against the [simulator](../../../images/simulator/) with the new config.
+   run the connector against the [simulator](../../connectors/modbus/sim/) with the new config.
 3. Deploy the connector and flows on a staging device; compare cloud data with the legacy
    plugin side-by-side.
 4. Disable the Python plugin's service; enable `tedge-dot`.

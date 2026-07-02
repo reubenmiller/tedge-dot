@@ -623,7 +623,7 @@ fn decode_signal(raw: u64, dt: DataType, signal: &ResolvedSignal) -> Result<Valu
         }
         DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
             let signed = sign_extend(raw, signal.bit_count);
-            if signed < -MAX_SAFE_INT || signed > MAX_SAFE_INT {
+            if !(-MAX_SAFE_INT..=MAX_SAFE_INT).contains(&signed) {
                 Ok(Value::Text(signed.to_string()))
             } else {
                 Ok(Value::Number(signed as f64))
@@ -670,7 +670,7 @@ fn value_to_bits(json_value: &serde_json::Value, dt: DataType, signal: &Resolved
 
 fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
     let s = s.trim();
-    if s.len() % 2 != 0 { return Err("odd number of hex digits".into()); }
+    if !s.len().is_multiple_of(2) { return Err("odd number of hex digits".into()); }
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string())).collect()
 }
 

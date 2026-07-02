@@ -170,8 +170,9 @@ each item with the corresponding section of this spec.
 - [ ] **Tests** — `connectors/<protocol>/tests/<protocol>_e2e.robot` covers
   capabilities descriptor, health, link status, at least one typed read, a bad
   read, and a write round-trip (§8).
-- [ ] **Packaging config** — `connectors/<protocol>/packaging/<protocol>.toml`
-  created with `protocol`, `service_name`, and sensible defaults (§10).
+- [ ] **Packaging config** — `packaging/config/<protocol>.toml` created with
+  `protocol`, `service_name`, and sensible defaults, and listed in
+  `.goreleaser.yaml` (§10).
 - [ ] **`just test-e2e <protocol>`** passes locally.
 - [ ] **Port table** in `connectors/README.md` updated.
 

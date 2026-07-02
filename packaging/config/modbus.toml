@@ -1,14 +1,14 @@
-# Default Modbus connector configuration installed by the package.
+# Default Modbus connector configuration installed by the tedge-dot package.
 #
 # No devices are configured out of the box, so the service starts and stays
-# active on a fresh install. Add `[[device]]` sections (see the project README
-# or config/modbus.toml in the source tree) and restart the service:
+# active on a fresh install. Add `[[device]]` sections (see the demo configs in
+# /usr/share/tedge-dot/demo/ or the project README) and restart the service:
 #
 #   sudo systemctl restart tedge-dot
 
 [connector]
 protocol      = "modbus"
-service_name  = "tedge-modbus-plugin"
+service_name  = "tedge-dot-modbus"
 poll_interval = "2s"
 log_level     = "info"
 

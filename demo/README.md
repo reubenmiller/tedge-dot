@@ -23,6 +23,13 @@ runs all the connectors under **one** systemd service.
 The connectors publish samples to the thin-edge.io MQTT broker
 (`127.0.0.1:1883`), so thin-edge.io must already be installed on the device.
 
+> **PROFIBUS caveat:** the released package is built without the `profibus`
+> cargo feature (its serial dependency does not cross-compile yet). To include
+> the PROFIBUS connector in the demo, build the binary from source on the
+> device (`cargo build --release --features profibus`) and copy
+> `packaging/demo/ot/profibus.toml` into `/etc/tedge/plugins/ot/`. The other
+> four protocols work out of the box.
+
 ## Requirements
 
 - A real Linux host (not macOS Docker Desktop — its LinuxKit kernel has no
@@ -58,14 +65,25 @@ sudo apt install ./tedge-dot_*_linux_amd64.deb     # deb
 
 Installing the package:
 
-- drops one demo config per protocol into `/etc/tedge/plugins/ot/`
-  (`modbus.toml`, `opcua.toml`, `canbus.toml`, `canopen.toml`, `profibus.toml`)
-  plus the CAN database at `/etc/tedge/plugins/ot/can/test.dbc`;
+- drops one *empty* default config per protocol into `/etc/tedge/plugins/ot/`
+  (`modbus.toml`, `opcua.toml`, `canbus.toml`, `canopen.toml`) — no devices
+  are configured, so the service starts and idles;
+- ships the demo configs (pre-wired to the simulators) in
+  `/usr/share/tedge-dot/demo/`, plus the CAN database at
+  `/usr/share/tedge-dot/demo/can/test.dbc`;
 - installs the supervisor at `/usr/bin/tedge-dot-supervisor`;
 - installs and starts **one** service: `tedge-dot.service`;
 - pulls in `socat` and `iproute2` (used to bridge PROFIBUS and bring up `vcan0`).
 
-## 3. Start the simulators
+## 3. Enable the demo configs
+
+Replace the empty defaults with the demo configs that point at the simulators:
+
+```sh
+sudo cp /usr/share/tedge-dot/demo/*.toml /etc/tedge/plugins/ot/
+```
+
+## 4. Start the simulators
 
 From a checkout of this repo on the device:
 
@@ -81,7 +99,7 @@ Restart the connector service so every connector picks up its simulator:
 sudo systemctl restart tedge-dot.service
 ```
 
-## 4. Watch it work
+## 5. Watch it work
 
 ```sh
 # One service, all connectors:
@@ -92,7 +110,8 @@ journalctl -u tedge-dot.service -f
 tedge mqtt sub 'te/+/+/+/+/m/+'
 ```
 
-You should see telemetry from all five protocols flowing in.
+You should see telemetry from all four packaged protocols flowing in (five
+with a source-built PROFIBUS binary, see the caveat above).
 
 ## How "one systemd service" runs every protocol
 

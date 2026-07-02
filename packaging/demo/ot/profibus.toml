@@ -1,8 +1,12 @@
 # Demo PROFIBUS-DP connector config — pairs with the profibus-sim service in
 # docker-compose.simulators.yaml (Python DP-V0 slave exposed over TCP :9200).
 #
-# Installed to /etc/tedge/plugins/ot/profibus.toml and launched automatically by
-# the tedge-dot supervisor.  Because PTYs cannot cross the container boundary,
+# Not shipped in the released package: the packaged binary is built without the
+# profibus cargo feature (its serial dependency does not cross-compile yet), so
+# this config needs a source-built binary: cargo build --features profibus
+# (Linux only). Copy it to /etc/tedge/plugins/ot/ to run it.
+#
+# Because PTYs cannot cross the container boundary,
 # the supervisor runs a socat serial<->TCP bridge that materialises the slave's
 # serial line as /dev/ttyPROFIBUS0 on the host.  Publishes to 127.0.0.1:1883.
 #
@@ -12,7 +16,7 @@
 
 [connector]
 protocol      = "profibus"
-service_name  = "tedge-profibus-plugin"
+service_name  = "tedge-dot-profibus"
 poll_interval = "500ms"
 log_level     = "info"
 

@@ -1,9 +1,10 @@
 [package]
 name = "tedge-dot-sdk"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "SDK (runtime + Connector trait + shared model and decode helpers) for thin-edge.io OT connectors"
-license = "Apache-2.0"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 async-trait = "0.1"

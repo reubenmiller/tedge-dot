@@ -15,7 +15,7 @@ cargo build
 The Modbus simulator (pymodbus) runs in Docker and exposes port 502 as host **5020**.
 
 ```sh
-just sim-modbus     # docker compose up the simulator on 127.0.0.1:5020
+just sim modbus     # docker compose up the simulator on 127.0.0.1:5020
 
 # read typed values (uint16 / float32 / bool)
 cargo run -- read  -c examples/modbus-local.toml -d plc1 -p temp_u16 -p level_f32 -p coil_rw
@@ -28,20 +28,16 @@ cargo run -- read  -c examples/modbus-local.toml -d plc1 -p temp_u16 --json
 # a point that returns a Modbus exception -> bad quality, exit code 1
 cargo run -- read  -c examples/modbus-local.toml -d plc1 -p bad_point
 
-just sim-modbus-down
+just sim-down modbus
 ```
 
 ## OPC-UA
 
-The OPC-UA simulator (python-asyncua) runs on the host and advertises
+The OPC-UA simulator (python-asyncua) runs in Docker and advertises
 `opc.tcp://127.0.0.1:4840/`.
 
-> asyncua needs **Python 3.10–3.13** (3.14 breaks its binary serialization, which
-> shows up as a `BadTimeout` on connect). `just sim-opcua` picks a compatible
-> interpreter automatically.
-
 ```sh
-just sim-opcua      # foreground; Ctrl-C to stop. Run the CLI in another shell.
+just sim opcua      # docker compose up the simulator on 127.0.0.1:4840
 
 # read typed values (float64 / uint32 / int32 / bool)
 cargo run -- read  -c examples/opcua-local.toml -d opc1 -p temperature -p count_u32 -p setpoint -p running --json
@@ -53,6 +49,8 @@ cargo run -- read  -c examples/opcua-local.toml -d opc1 -p setpoint
 
 # a node that returns a Bad status -> bad quality, exit code 1
 cargo run -- read  -c examples/opcua-local.toml -d opc1 -p bad_point
+
+just sim-down opcua
 ```
 
 The `Client is missing its application instance certificate` logs that async-opcua
@@ -66,8 +64,8 @@ To exercise the complete pipeline (connector + broker + simulator, publishing
 samples over MQTT) use the Docker-based harnesses instead:
 
 ```sh
-just test-e2e         # Modbus: bring stack up, run Robot suite, tear down
-just test-e2e-opcua   # OPC-UA: same, against the asyncua simulator
-just e2e-up           # Modbus stack up for manual inspection
-just e2e-down
+just test-e2e modbus   # bring stack up, run Robot suite, tear down
+just test-e2e opcua    # same, against the asyncua simulator
+just e2e-up modbus     # stack up for manual inspection
+just e2e-down modbus
 ```

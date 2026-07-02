@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags: ["*"]
+  # Manual runs build a snapshot (no GitHub release, no publish) so the
+  # pipeline can be tested before tagging.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # goreleaser derives the changelog from the full tag history
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: >-
+            x86_64-unknown-linux-gnu,
+            aarch64-unknown-linux-gnu,
+            x86_64-apple-darwin,
+            aarch64-apple-darwin,
+            x86_64-pc-windows-gnu
+
+      # cargo-zigbuild (used by the goreleaser Rust builder) links every
+      # target with zig, so no per-target C toolchains are needed.
+      - uses: mlugg/setup-zig@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build packages (and GitHub release on tags)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean ${{ github.ref_type != 'tag' && '--snapshot' || '' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload snapshot packages
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: |
+            dist/*.deb
+            dist/*.rpm
+            dist/*.apk
+            dist/*.tar.gz
+            dist/*.zip
+
+      - name: Publish packages to Cloudsmith
+        if: github.ref_type == 'tag'
+        env:
+          PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+          PUBLISH_OWNER: thinedge
+          PUBLISH_REPO: community
+        run: |
+          if [ -z "$PUBLISH_TOKEN" ]; then
+            echo "PUBLISH_TOKEN secret not set; skipping Cloudsmith publish"
+            exit 0
+          fi
+          ./ci/publish.sh --path ./dist

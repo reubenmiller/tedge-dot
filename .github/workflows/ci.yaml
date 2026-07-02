@@ -27,9 +27,7 @@ jobs:
       - name: Unit + integration + property tests
         run: cargo test --workspace
       - name: Clippy
-        # Not -D warnings yet: pre-existing lints in the CAN/profibus crates are tracked
-        # separately; new warnings still surface in the log.
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   flows:
     name: Flow tests (tedge flows test)

@@ -1,9 +1,10 @@
 [package]
 name = "connector-modbus"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Reference Modbus connector module (TCP + RTU) for thin-edge.io OT connectors"
-license = "Apache-2.0"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 tedge-dot-sdk = { path = "../sdk" }

@@ -1,9 +1,10 @@
 [package]
 name = "tedge-dot"
-version = "0.1.0"
-edition = "2021"
-description = "thin-edge.io OT protocol connector binary (Modbus reference module)"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+description = "thin-edge.io OT protocol connector binary (Modbus, OPC UA, CAN bus, CANopen and PROFIBUS modules behind feature flags)"
+license.workspace = true
+repository.workspace = true
 
 [workspace]
 members = ["crates/sdk", "crates/connector-modbus", "crates/connector-opcua", "crates/connector-canbus", "crates/connector-canopen", "crates/connector-profibus"]
@@ -34,5 +35,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [workspace.package]
+version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
+repository = "https://github.com/thin-edge/tedge-dot"

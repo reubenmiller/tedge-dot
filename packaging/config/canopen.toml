@@ -1,0 +1,46 @@
+# Default CANopen connector configuration installed by the tedge-dot package.
+#
+# No devices are configured out of the box, so the service starts and stays
+# active on a fresh install. Add `[[device]]` sections (see the demo configs in
+# /usr/share/tedge-dot/demo/ or the project README) and restart the service:
+#
+#   sudo systemctl restart tedge-dot
+#
+# Requirements:
+#   - Linux with SocketCAN support (kernel module: can, can_raw)
+#   - A CAN interface (e.g. can0) connected to the CANopen bus, configured and up
+
+[connector]
+protocol      = "canopen"
+service_name  = "tedge-dot-canopen"
+poll_interval = "2s"
+log_level     = "info"
+
+# The SocketCAN interface that connects to your CANopen bus.
+[connection]
+interface = "can0"
+
+[mqtt]
+host = "127.0.0.1"
+port = 1883
+
+# Add one [[device]] block per CANopen node (device) on the bus.
+# protocol_address.node_id must be in the range 1-127.
+#
+# [[device]]
+# name             = "drive1"
+# protocol_address = { node_id = 5 }
+# default_mode     = "typed"
+# poll_interval    = "1s"
+#
+#   [[device.point]]
+#   id       = "actual_velocity"
+#   datatype = "int32"
+#   access   = "read"
+#   address  = { index = 0x606C, subindex = 0 }   # CiA 402 velocity actual value
+#
+#   [[device.point]]
+#   id       = "control_word"
+#   datatype = "uint16"
+#   access   = "read_write"
+#   address  = { index = 0x6040, subindex = 0 }   # CiA 402 controlword

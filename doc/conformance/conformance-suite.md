@@ -95,7 +95,7 @@ broker, then asserts the MQTT side of the contract.
 ```
 
 Reusable harness, per-protocol simulator. For Modbus the simulator is the existing
-[`images/simulator`](../../../images/simulator/) Modbus server (or a `tokio-modbus` server),
+[`connectors/modbus/sim`](../../connectors/modbus/sim/) Modbus server (or a `tokio-modbus` server),
 seeded with known register/coil contents.
 
 ### 3.1 Required behavioural checks
@@ -135,7 +135,7 @@ subscribe = false
 
 [simulator]
 kind  = "modbus-tcp"
-image = "images/simulator"
+image = "connectors/modbus/sim"
 seed  = "conformance/seed/modbus.json"
 ```
 

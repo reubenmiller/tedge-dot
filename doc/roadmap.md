@@ -29,7 +29,7 @@ value lands early and the contract is proven before the community is invited in.
   [modbus-alarm](flows/modbus-alarm/), [device-registration](flows/device-registration/),
   plus an event flow.
 - Behavioural conformance (Layer 3) against the
-  [Modbus simulator](../../images/simulator/): checks B1–B10.
+  [Modbus simulator](../connectors/modbus/sim/): checks B1–B10.
 - Write the C8y operation shims that translate `c8y_SetRegister`/`c8y_SetCoil` into `cmd/write`.
 
 **Exit criteria:** a device can be read, scaled, alarmed, registered, and written entirely via

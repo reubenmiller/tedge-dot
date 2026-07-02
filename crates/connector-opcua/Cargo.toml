@@ -1,9 +1,10 @@
 [package]
 name = "connector-opcua"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "OPC-UA connector module for thin-edge.io OT connectors"
-license = "Apache-2.0"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 tedge-dot-sdk = { path = "../sdk" }
