@@ -17,13 +17,13 @@ The suite has three layers, run in order:
 ```text
  ┌────────────────────────────────────────────────────────────────────┐
  │ Layer 1 — Schema conformance (static, no connector running)        │
- │   validate sample/command/status/config payloads vs JSON Schemas    │
+ │   validate sample/command/status/config payloads vs JSON Schemas   │
  ├────────────────────────────────────────────────────────────────────┤
  │ Layer 2 — Decode conformance (pure functions, no I/O)              │
- │   golden vectors: bytes + datatype + endianness/word_order → value  │
+ │   golden vectors: bytes + datatype + endianness/word_order → value │
  ├────────────────────────────────────────────────────────────────────┤
- │ Layer 3 — Behavioural conformance (connector ⇄ protocol simulator)  │
- │   run the real connector against a simulator, assert MQTT traffic    │
+ │ Layer 3 — Behavioural conformance (connector ⇄ protocol simulator) │
+ │   run the real connector against a simulator, assert MQTT traffic  │
  └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -88,10 +88,10 @@ Layer 3 runs the **real connector binary** against a **protocol simulator** and 
 broker, then asserts the MQTT side of the contract.
 
 ```text
- ┌───────────────┐   protocol    ┌──────────────────┐   MQTT    ┌──────────────────┐
- │  Protocol     │◀─────────────▶│ tedge-dot│◀────────▶│  test broker +   │
- │  simulator    │   (e.g. TCP)  │ (under test)      │           │  assertion probe │
- └───────────────┘               └──────────────────┘           └──────────────────┘
+ ┌───────────────┐   protocol    ┌──────────────────┐   MQTT   ┌──────────────────┐
+ │  Protocol     │◀─────────────▶│ tedge-dot        │◀────────▶│  test broker +   │
+ │  simulator    │   (e.g. TCP)  │ (under test)     │          │  assertion probe │
+ └───────────────┘               └──────────────────┘          └──────────────────┘
 ```
 
 Reusable harness, per-protocol simulator. For Modbus the simulator is the existing

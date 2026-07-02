@@ -83,14 +83,14 @@ a machine-readable spec — can complete and prove correct.
 
 ```text
    ┌─────────────┐   ┌────────────────────┐   ┌──────────────────────┐
-   │  Transport  │──▶│  Decode (optional) │──▶│  Publish sample       │
-   │  protocol   │   │  raw │ typed        │   │  envelope to MQTT     │
+   │  Transport  │──▶│  Decode (optional) │──▶│  Publish sample      │
+   │  protocol   │   │  raw │ typed       │   │  envelope to MQTT    │
    └─────────────┘   └────────────────────┘   └──────────────────────┘
           ▲                                              │
           │ write_point                                  ▼  (te/device/<d>/ot/<proto>/...)
    ┌─────────────┐                              ┌──────────────────────┐
-   │  Command    │◀── cmd/write request ────────│  thin-edge.io flows   │
-   │  router     │──▶ result (init→…→done)      │  (all transformation) │
+   │  Command    │◀── cmd/write request ────────│  thin-edge.io flows  │
+   │  router     │──▶ result (init→…→done)      │  (all transformation)│
    └─────────────┘                              └──────────┬───────────┘
                                                             ▼
                                                  te/device/<d>///m|e|a/...

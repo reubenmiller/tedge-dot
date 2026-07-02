@@ -63,25 +63,25 @@ business logic* and reserves Rust for *everything that is protocol plumbing*.
 ## The shape of the solution
 
 ```text
-        ┌──────────────────────────────────────────────────────────────────────┐
-        │                         tedge-dot                            │
-        │  (single Rust binary, protocol modules behind cargo feature flags)    │
+        ┌────────────────────────────────────────────────────────────────────────┐
+        │                         tedge-dot                                      │
+        │  (single Rust binary, protocol modules behind cargo feature flags)     │
         │                                                                        │
         │   ┌────────────┐     ┌──────────────────┐      ┌────────────────────┐  │
    OT ──┼──▶│ Transport  │────▶│ Decode (optional)│─────▶│ Publish: canonical │  │
- device │   │ (protocol) │     │ raw │ typed       │      │ "sample" envelope  │  │
+ device │   │ (protocol) │     │ raw │ typed       │      │ "sample" envelope │  │
         │   └────────────┘     └──────────────────┘      └─────────┬──────────┘  │
         │   ▲ write_point            capability model              │             │
-        └───┼─────────────────────────────────────────────────────┼─────────────┘
-            │                                                       │ MQTT
-   command  │                                                       ▼
+        └───┼──────────────────────────────────────────────────────┼─────────────┘
+            │                                                      │ MQTT
+   command  │                                                      ▼
    results  │                                        ┌────────────────────────────┐
-            │                                        │  thin-edge.io flows (JS)    │
+            │                                        │  thin-edge.io flows (JS)   │
             └────────────────────────────────────────│  scale · rename · units ·  │
                        cmd/write request             │  alarms · events · shape · │
-                                                      │  aggregate · register      │
-                                                      └─────────────┬──────────────┘
-                                                                    ▼
+                                                     │  aggregate · register      │
+                                                     └─────────────┬──────────────┘
+                                                                   ▼
                                                        te/device/<d>///m|e|a/...
                                                        (standard thin-edge data)
 ```

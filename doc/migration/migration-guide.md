@@ -10,13 +10,13 @@ home.
 
 ```text
             OLD (one Python plugin)                         NEW (driver + flows)
- ┌──────────────────────────────────────┐      ┌───────────────────────────────────────────┐
- │ tedge_modbus.reader                   │      │ tedge-dot (Rust, modbus module)   │
- │   transport + decode + scale + alarm  │ ───▶ │   transport + primitive decode only        │
- │   + thin-edge JSON + registration     │      ├───────────────────────────────────────────┤
- │ tedge_modbus.operations (c8y_*)       │      │ flows: scaling, alarm, registration, …     │
+ ┌──────────────────────────────────────┐      ┌────────────────────────────────────────────┐
+ │ tedge_modbus.reader                  │      │ tedge-dot (Rust, modbus module)            │
+ │   transport + decode + scale + alarm │ ───▶ │   transport + primitive decode only        │
+ │   + thin-edge JSON + registration    │      ├────────────────────────────────────────────┤
+ │ tedge_modbus.operations (c8y_*)      │      │ flows: scaling, alarm, registration, …     │
  └──────────────────────────────────────┘      │ command verb `write` + thin-edge operations│
-                                                └───────────────────────────────────────────┘
+                                               └────────────────────────────────────────────┘
 ```
 
 One Python responsibility becomes either a **connector config field** (transport/decode) or a
