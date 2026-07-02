@@ -1335,7 +1335,24 @@ mod tcp_phy_tests {
         let mut phy = TcpPhy::new(&addr.to_string());
         server.join().unwrap();
 
-        // Repeated polls after the peer vanished: no panic, no data.
+        // The peer's close() has returned, but its FIN reaches this socket through the
+        // kernel asynchronously — a nonblocking read may see WouldBlock a few times before
+        // it sees EOF. Poll until the phy notices the disconnect (a fixed iteration count
+        // here flakes under parallel test load); every poll must stay panic-free and empty.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while phy.stream.is_some() && std::time::Instant::now() < deadline {
+            let seen = phy.receive_data(now(), |data| (data.len(), data.len()));
+            assert_eq!(seen, 0, "no data must surface from a closed peer");
+            phy.transmit_data(now(), |buf| {
+                buf[0] = 0xAA;
+                (1, ())
+            });
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(phy.stream.is_none(), "stream dropped after disconnect");
+
+        // Repeated polls on the dropped stream: no panic, no data, no premature reconnect
+        // (the listener is gone and the backoff hasn't elapsed).
         for _ in 0..3 {
             let seen = phy.receive_data(now(), |data| (data.len(), data.len()));
             assert_eq!(seen, 0);
@@ -1344,7 +1361,7 @@ mod tcp_phy_tests {
                 (1, ())
             });
         }
-        assert!(phy.stream.is_none(), "stream dropped after disconnect");
+        assert!(phy.stream.is_none(), "stream stays down until the backoff elapses");
     }
 
     #[test]
