@@ -38,7 +38,10 @@ ${REGISTERS}            [{"number": 3, "startBit": 0, "noBits": 16, "signed": fa
 Create Fieldbus Device Type
     [Documentation]    A c8y_ModbusDeviceType managed object with register definitions can be
     ...                created and read back (exercises the inventory CRUD keywords).
-    ${type}=    Create Modbus Device Type    ${TYPE_NAME}    registers=${REGISTERS}
+    # cleanup=False: the connector keeps publishing for the imported child between suite
+    # runs, and the c8y mapper caches the external-id mapping — deleting the placeholder MO
+    # at suite end would strand those measurements. `just cleanup` wipes the test device.
+    ${type}=    Create Modbus Device Type    ${TYPE_NAME}    registers=${REGISTERS}    cleanup=${False}
     Set Suite Variable    ${TYPE_MO}    ${type}
     ${fetched}=    FieldbusLibrary.Get Managed Object    ${type}[id]
     Should Be Equal    ${fetched}[type]    c8y_ModbusDeviceType
@@ -50,28 +53,36 @@ Assign Device Type Sends Cloud Fieldbus Operation
     [Documentation]    Assigning the type to a child creates the UI-shaped c8y_ModbusDevice
     ...                operation against the gateway.
     ${gateway}=    Set Managed Object    ${DEVICE_ID}
-    ${result}=    Assign Modbus Device Type To Child
-    ...    ${gateway}[id]    ${FB_CHILD}    ${TYPE_MO}[id]
+    ${child}=    Create Fieldbus Child    ${gateway}[id]    ${FB_CHILD}    cleanup=${False}
+    ${fragment}=    Build Modbus Device Assignment
+    ...    ${child}[id]    ${FB_CHILD}    ${TYPE_MO}[id]
     ...    address=1    ip_address=simulator    protocol=TCP
-    Set Suite Variable    ${ASSIGN_OP}    ${result}[operation]
-    Set Suite Variable    ${FB_CHILD_MO}    ${result}[child]
-    Dictionary Should Contain Key    ${ASSIGN_OP}    c8y_ModbusDevice
+    ${operation}=    Cumulocity.Create Operation
+    ...    fragments=${fragment}    description=Assign modbus device type to ${FB_CHILD}
+    Set Suite Variable    ${ASSIGN_OP}    ${operation}
+    Set Suite Variable    ${FB_CHILD_MO}    ${child}
 
 Assignment Is Translated Into Connector Config
     [Documentation]    The c8y-fieldbus-import shim converts the c8y_ModbusDevice operation
     ...                into a define-device management command; the operation only turns
     ...                SUCCESSFUL once the point is persisted into the connector TOML.
-    Operation Should Be SUCCESSFUL    ${ASSIGN_OP}[id]    timeout=${OP_TIMEOUT}
-    ${output}=    Execute Shell Command    cat /etc/tedge/plugins/modbus/modbus.toml
-    Should Contain    ${output}    ${FB_CHILD}
-    Should Contain    ${output}    temperature
+    Operation Should Eventually Be Successful    ${ASSIGN_OP.id}    timeout=${OP_TIMEOUT}
+    # Execute Shell Command is asynchronous: it returns the c8y_Command operation, whose
+    # `result` fragment carries the command output once the operation has completed.
+    ${shell_op}=    Execute Shell Command    cat /etc/tedge/plugins/ot/modbus.toml
+    ${result}=    Operation Should Eventually Be Successful    ${shell_op.id}    timeout=${OP_TIMEOUT}
+    Should Contain    ${result}[c8y_Command][result]    ${FB_CHILD}
+    Should Contain    ${result}[c8y_Command][result]    temperature
 
-Child External Identity Links The UI-Created Managed Object
-    [Documentation]    The shim registers <gateway id>:device:<child name> (type c8y_Serial)
-    ...                against the placeholder MO the UI created, so the thin-edge child
-    ...                registration adopts it instead of creating a duplicate.
+Child Is Registered With A Device-Owned Managed Object
+    [Documentation]    The imported child's external identity must resolve to a managed object
+    ...                OWNED by the device user: Cumulocity's JSON-over-MQTT rejects telemetry
+    ...                for foreign-owned MOs, so the shim only adopts the UI placeholder when
+    ...                the device owns it — otherwise thin-edge registers its own child (the
+    ...                tenant-user-owned placeholder stays behind as a UI artifact).
     ${mo}=    External Identity Should Exist    ${DEVICE_ID}:device:${FB_CHILD}
-    Should Be Equal As Strings    ${mo}[id]    ${FB_CHILD_MO}[id]
+    ${full}=    FieldbusLibrary.Get Managed Object    ${mo}[id]
+    Should Be Equal As Strings    ${full}[owner]    device_${DEVICE_ID}
 
 Imported Points Produce Mapped Measurements
     [Documentation]    Samples from the imported points surface as the measurement type/series

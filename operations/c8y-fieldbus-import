@@ -251,22 +251,36 @@ main() {
 
     main_id="$(tedge config get device.id)" || die "cannot resolve tedge device.id"
 
-    # 1. Link the UI-created child MO: create the external id the c8y mapper derives for the
-    #    thin-edge child registration. 201 = created, 409 = already linked (re-assign) — both ok.
-    body="$(jq -nc --arg externalId "${main_id}:device:${name}" \
-        '{ externalId: $externalId, type: "c8y_Serial" }')"
+    # 1. Link the UI-created child MO — but ONLY when the device user owns it. Cumulocity's
+    #    JSON-over-MQTT rejects telemetry for managed objects the device does not own
+    #    ("Current device is not the owner of the given source ID"), and a device cannot
+    #    transfer ownership (403). Pointing the child external identity at a tenant-user-owned
+    #    placeholder would therefore route the thin-edge child registration onto an MO that can
+    #    never receive the device's measurements (a constraint the legacy plugin shared). When
+    #    the owner differs, skip the link: thin-edge registers its own device-owned child under
+    #    the same name and the UI placeholder remains as an unlinked artifact.
     out="$(mktemp)"
-    code="$(curl -s -o "$out" -w '%{http_code}' -X POST \
-        -H 'Content-Type: application/json' -H 'Accept: application/json' \
-        -d "$body" "${C8Y_PROXY}/identity/globalIds/${child_id}/externalIds")"
-    case "$code" in
-    201 | 409) ;;
-    *)
-        reason="$(cat "$out" 2>/dev/null)"
-        rm -f "$out"
-        die "creating external id for child MO $child_id failed: HTTP $code $reason"
-        ;;
-    esac
+    owner="$(curl -sf -H 'Accept: application/json' \
+        "${C8Y_PROXY}/inventory/managedObjects/${child_id}" | jq -r '.owner // ""')" || owner=""
+    if [ "$owner" = "device_${main_id}" ]; then
+        body="$(jq -nc --arg externalId "${main_id}:device:${name}" \
+            '{ externalId: $externalId, type: "c8y_Serial" }')"
+        code="$(curl -s -o "$out" -w '%{http_code}' -X POST \
+            -H 'Content-Type: application/json' -H 'Accept: application/json' \
+            -d "$body" "${C8Y_PROXY}/identity/globalIds/${child_id}/externalIds")"
+        case "$code" in
+        201 | 409) ;;
+        *)
+            reason="$(cat "$out" 2>/dev/null)"
+            rm -f "$out"
+            die "creating external id for child MO $child_id failed: HTTP $code $reason"
+            ;;
+        esac
+    else
+        echo "c8y-fieldbus-import: not linking child MO ${child_id}: owner '${owner}' is not" \
+            "'device_${main_id}' — the device could not publish telemetry to it;" \
+            "thin-edge will register its own child device '${name}'" >&2
+    fi
     rm -f "$out"
 
     # 2. Fetch the c8y_ModbusDeviceType managed object and translate it.

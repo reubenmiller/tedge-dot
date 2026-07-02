@@ -19,7 +19,11 @@ RUN arch=$(dpkg --print-architecture) \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Connector configuration pointing at the simulator -------------------------------------
-COPY cloud/modbus/modbus.toml /etc/tedge/plugins/modbus/modbus.toml
+# The package's tedge-dot supervisor launches one connector per /etc/tedge/plugins/ot/*.toml.
+# Replace the demo configs with the single modbus config for this harness (host "simulator").
+COPY cloud/modbus/modbus.toml /etc/tedge/plugins/ot/modbus.toml
+RUN rm -f /etc/tedge/plugins/ot/canbus.toml /etc/tedge/plugins/ot/canopen.toml \
+    /etc/tedge/plugins/ot/opcua.toml /etc/tedge/plugins/ot/profibus.toml
 
 # --- thin-edge flows that map the generic OT envelopes to the thin-edge data model ----------
 COPY flows/ot-measurement     /etc/tedge/mappers/c8y/flows/ot-measurement
@@ -43,6 +47,15 @@ COPY operations/c8y_ModbusDevice         /etc/tedge/operations/c8y/c8y_ModbusDev
 # external identity, fetches the c8y_ModbusDeviceType MO via the mapper's local c8y proxy, and
 # drives the connector's define-device verb (gap G1 / RFC 0002 increment 1).
 COPY operations/c8y-fieldbus-import      /usr/bin/c8y-fieldbus-import
+
+# Gateway-level operations must exist WITHOUT the .template suffix so the mapper adds them to
+# the main device's c8y_SupportedOperations and Cumulocity actually delivers the operations
+# (templates alone are only instantiated per child device). Without this, a Cloud Fieldbus
+# assignment stays PENDING forever.
+RUN cd /etc/tedge/operations/c8y \
+    && cp c8y_ModbusDevice.template c8y_ModbusDevice \
+    && cp c8y_ModbusConfiguration.template c8y_ModbusConfiguration \
+    && cp c8y_SerialConfiguration.template c8y_SerialConfiguration
 
 RUN chmod 0644 /etc/tedge/operations/c8y/c8y_*.template \
     && chmod 0755 /usr/bin/c8y-fieldbus-import \

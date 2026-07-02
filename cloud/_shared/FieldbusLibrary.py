@@ -15,6 +15,7 @@ Auth comes from the same environment variables as robotframework-c8y
 
 import json
 import logging
+import time
 from typing import Any, Dict, List, Optional, Union
 
 from c8y_api.model import ManagedObject
@@ -140,46 +141,88 @@ class FieldbusLibrary:
         }
         return self.create_managed_object(body, cleanup=cleanup)
 
-    @keyword("Assign Modbus Device Type To Child")
-    def assign_modbus_device_type_to_child(
-        self,
-        gateway_mo_id: str,
-        child_name: str,
-        type_mo_id: str,
-        address: int = 1,
-        ip_address: str = "127.0.0.1",
-        protocol: str = "TCP",
-        cleanup: bool = True,
+    @keyword("Create Fieldbus Child")
+    def create_fieldbus_child(
+        self, gateway_mo_id: str, child_name: str, cleanup: bool = True
     ) -> Dict[str, Any]:
-        """Mirror the Cloud Fieldbus UI assignment.
+        """Create the UI-style child placeholder MO and reference it under the gateway.
 
-        Creates the child placeholder managed object, references it under the
-        gateway, and creates the c8y_ModbusDevice operation the UI would send.
-        Returns {"child": <child mo json>, "operation": <operation json>}.
+        Mirrors what the Cloud Fieldbus UI does before it sends the c8y_ModbusDevice
+        assignment operation. Idempotent: an existing placeholder with the same name is
+        reused, so repeated suite runs keep one child (and its external identity) stable.
+        Returns the child managed object json.
         """
+        existing = self.c8y.get(
+            "/inventory/managedObjects",
+            params={
+                "query": f"$filter=(name eq '{child_name}' and type eq 'c8y_ModbusDevice')",
+                "pageSize": "1",
+            },
+        ).get("managedObjects", [])
+        if existing:
+            return existing[0]
         child = self.create_managed_object(
             {"name": child_name, "type": "c8y_ModbusDevice", "c8y_IsDevice": {}},
             cleanup=cleanup,
         )
         self.add_child_device_reference(gateway_mo_id, child["id"])
-        operation = self.c8y.post(
-            "/devicecontrol/operations",
-            json={
-                "deviceId": str(gateway_mo_id),
-                "description": f"Assign modbus device type to {child_name}",
+        return child
+
+    @keyword("Build Modbus Device Assignment")
+    def build_modbus_device_assignment(
+        self,
+        child_mo_id: str,
+        child_name: str,
+        type_mo_id: str,
+        address: int = 1,
+        ip_address: str = "127.0.0.1",
+        protocol: str = "TCP",
+    ) -> str:
+        """Return the UI-shaped c8y_ModbusDevice operation fragment as a JSON string.
+
+        Pass it to the Cumulocity library's `Create Operation` (against the gateway
+        context) so the standard operation assertion keywords apply.
+        """
+        return json.dumps(
+            {
                 "c8y_ModbusDevice": {
                     "protocol": protocol,
                     "address": int(address),
                     "ipAddress": ip_address,
-                    "id": str(child["id"]),
+                    "id": str(child_mo_id),
                     "name": child_name,
                     "type": f"/inventory/managedObjects/{type_mo_id}",
-                },
-            },
+                }
+            }
         )
-        return {"child": child, "operation": operation}
 
     @keyword("Remove Modbus Device Type")
     def remove_modbus_device_type(self, type_mo_id: str):
         """Delete a fieldbus device type managed object."""
         self.c8y.inventory.delete(type_mo_id)
+
+    @keyword("Operation Should Eventually Be Successful")
+    def operation_should_eventually_be_successful(
+        self, operation_id: str, timeout: float = 60, interval: float = 2
+    ) -> Dict[str, Any]:
+        """Poll an operation until SUCCESSFUL; fail fast on FAILED.
+
+        Plain REST polling — avoids the c8y_test_core retry stack, which currently
+        raises a TypeError under Python 3.14 when an operation stays EXECUTING
+        across retry attempts.
+        """
+        deadline = time.time() + float(timeout)
+        status = "UNKNOWN"
+        while time.time() < deadline:
+            op = self.c8y.get(f"/devicecontrol/operations/{operation_id}")
+            status = op.get("status", "UNKNOWN")
+            if status == "SUCCESSFUL":
+                return op
+            if status == "FAILED":
+                raise AssertionError(
+                    f"operation {operation_id} FAILED: {op.get('failureReason', '')}"
+                )
+            time.sleep(float(interval))
+        raise AssertionError(
+            f"operation {operation_id} still {status} after {timeout}s"
+        )

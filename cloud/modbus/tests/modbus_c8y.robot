@@ -55,9 +55,9 @@ Set Register Operation Round-Trips
     ...    fragments={"c8y_SetRegister":{"point":"temp_u16","value":4242}}
     ...    description=Set temp_u16 to 4242
     Cumulocity.Operation Should Be SUCCESSFUL    ${operation}    timeout=${OP_TIMEOUT}
-    Cumulocity.Device Should Have Measurements
+    ${measurements}=    Cumulocity.Device Should Have Measurements
     ...    minimum=1    type=modbus    fragment=modbus    series=temp_u16
-    ...    timeout=${MEAS_TIMEOUT}
+    ...    sort_newest=${True}    timeout=${MEAS_TIMEOUT}
     Should Be Equal As Integers    ${measurements[0]["modbus"]["temp_u16"]["value"]}    4242
 
 Set Coil Operation Round-Trips

@@ -67,14 +67,14 @@ function deepMerge(target, src) {
 }
 
 // Shape the measurement body (without the time field) from a scaled value:
-//   { <group>: { <series>: value | { value, unit } } }
-// The unit is a per-signal property declared on the connector point and echoed in the sample,
-// so it is taken from sample.unit (not a flow-wide override).
+//   { <group>: { <series>: value } }
+// Series values are BARE numbers on purpose: the tedge c8y mapper's measurement converter
+// silently drops any object-shaped series value ({ value } and { value, unit } alike), so
+// embedding sample.unit here would strand the measurement on the device. The unit remains
+// available to consumers in the sample envelope (sample.unit).
 function shapeBody(cfg, sample, scaled) {
   const { group, series } = resolveNaming(cfg, sample);
-  const unit = sample.unit || "";
-  const seriesValue = unit ? { value: scaled, unit } : scaled;
-  return { [group]: { [series]: seriesValue } };
+  return { [group]: { [series]: scaled } };
 }
 
 // Resolve the measurement group + series for a sample. Precedence:
