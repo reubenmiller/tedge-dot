@@ -1,0 +1,49 @@
+[package]
+name = "ot-conformance"
+version.workspace = true
+edition.workspace = true
+description = "Conformance harness for thin-edge.io OT connectors: schema, decode-vector and behavioural layers"
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Protocol modules compiled into the harness, used for the static manifest ↔ capability
+# agreement check and for in-process behavioural runs. An out-of-tree connector is tested
+# instead via `[harness] command` in its manifest. `canbus` enables CAN FD to match the
+# shipped binary's default capability descriptor. `profibus` is off by default for the same
+# packaging reasons as in the main binary.
+default = ["modbus", "opcua", "canbus", "canopen"]
+modbus = ["dep:connector-modbus", "dep:tokio-modbus"]
+opcua = ["dep:connector-opcua", "dep:async-opcua"]
+canbus = ["dep:connector-canbus", "connector-canbus/canbus-fd"]
+canopen = ["dep:connector-canopen"]
+profibus = ["dep:connector-profibus"]
+
+[dependencies]
+tedge-dot-sdk = { path = "../sdk" }
+async-trait = "0.1"
+connector-modbus = { path = "../connector-modbus", optional = true }
+connector-opcua = { path = "../connector-opcua", optional = true }
+connector-canbus = { path = "../connector-canbus", optional = true }
+connector-canopen = { path = "../connector-canopen", optional = true }
+connector-profibus = { path = "../connector-profibus", optional = true }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "sync", "io-util", "process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+jsonschema = "0.46"
+# Only the vendored `mqttbytes` v4 codec is used (for the built-in test broker);
+# the SDK already depends on rumqttc, so this adds nothing new.
+rumqttc = "0.24"
+bytes = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio-modbus = { version = "0.16", default-features = false, features = ["tcp", "tcp-server"], optional = true }
+# The in-process OPC UA test server (MPL-2.0; a test-harness dependency only — the shipped
+# tedge-dot binary never links it).
+async-opcua = { version = "0.18", default-features = false, features = ["server"], optional = true }
+
+[dev-dependencies]
+rumqttc = "0.24"
+tokio-modbus = { version = "0.16", default-features = false, features = ["tcp"] }

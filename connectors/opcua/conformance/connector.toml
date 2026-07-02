@@ -1,0 +1,117 @@
+# Connector configuration for the OPC UA conformance run.
+#
+# The harness rewrites [mqtt] and the device endpoint onto its own test broker and embedded
+# OPC UA server, so host/port values here are placeholders. Node addresses use namespace 2 —
+# the index the simulator's namespace deterministically lands on.
+#
+# Every point sets `subscribe = false`: the behavioural checks drive the polling path, whose
+# batch health feeds link-status transitions and reconnect (B5). The connector's push
+# delivery is covered separately by its own integration tests.
+
+[connector]
+protocol      = "opcua"
+service_name  = "tedge-dot-conformance-opcua"
+poll_interval = "200ms"
+log_level     = "warn"
+
+[connection]
+# Fail reads fast when the transport dies so the link-drop checks (B5) run quickly.
+request_timeout_s = 2
+
+[[device]]
+name             = "plant-server"
+protocol_address = { endpoint = "opc.tcp://127.0.0.1:4840" }
+default_mode     = "typed"
+
+  # float64, read-only (B7 denies writes to it), unit echo.
+  [[device.point]]
+  id        = "temperature"
+  datatype  = "float64"
+  unit      = "°C"
+  subscribe = false
+  address   = { namespace = 2, identifier = "Temperature" }
+
+  [[device.point]]
+  id        = "counter"
+  datatype  = "uint16"
+  subscribe = false
+  address   = { namespace = 2, identifier = "Counter" }
+
+  # uint64 above the JS safe range: value must be emitted as a string.
+  [[device.point]]
+  id        = "big_counter"
+  datatype  = "uint64"
+  subscribe = false
+  address   = { namespace = 2, identifier = "BigCounter" }
+
+  [[device.point]]
+  id        = "negative_offset"
+  datatype  = "int32"
+  subscribe = false
+  address   = { namespace = 2, identifier = "NegativeOffset" }
+
+  # boolean read; meta is echoed verbatim in every sample.
+  [[device.point]]
+  id        = "running"
+  datatype  = "bool"
+  subscribe = false
+  address   = { namespace = 2, identifier = "Running" }
+  meta      = { on_change = true }
+
+  # string value.
+  [[device.point]]
+  id        = "label"
+  datatype  = "string"
+  subscribe = false
+  address   = { namespace = 2, identifier = "Label" }
+
+  # linear transform applied after decode: 250 / 10 = 25.
+  [[device.point]]
+  id        = "scaled"
+  datatype  = "uint16"
+  subscribe = false
+  address   = { namespace = 2, identifier = "RawPressure" }
+  transform = { divisor = 10 }
+
+  # raw mode: bytes only, no decoded value (B3).
+  [[device.point]]
+  id        = "raw_pressure"
+  mode      = "raw"
+  subscribe = false
+  address   = { namespace = 2, identifier = "RawPressure" }
+
+  # reading this node answers BadSensorFailure -> quality "bad" (B4).
+  [[device.point]]
+  id        = "broken"
+  datatype  = "uint16"
+  subscribe = false
+  address   = { namespace = 2, identifier = "Broken" }
+
+  # writable points (B6 write round-trips per datatype).
+  [[device.point]]
+  id        = "setpoint"
+  datatype  = "uint16"
+  access    = "read_write"
+  subscribe = false
+  address   = { namespace = 2, identifier = "Setpoint" }
+
+  [[device.point]]
+  id        = "target_temp"
+  datatype  = "float64"
+  access    = "read_write"
+  subscribe = false
+  address   = { namespace = 2, identifier = "TargetTemp" }
+
+  [[device.point]]
+  id        = "enable"
+  datatype  = "bool"
+  access    = "read_write"
+  subscribe = false
+  address   = { namespace = 2, identifier = "Enable" }
+
+  [[device.point]]
+  id        = "recipe"
+  datatype  = "string"
+  access    = "read_write"
+  subscribe = false
+  address   = { namespace = 2, identifier = "Recipe" }

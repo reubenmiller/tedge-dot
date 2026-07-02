@@ -229,8 +229,17 @@ impl Connector for OpcuaConnector {
         }
 
         if !reads.is_empty() {
-            match session.read(&reads, TimestampsToReturn::Neither, 0.0).await {
-                Ok(values) => {
+            // Bound the service call: while the transport is down the client queues requests
+            // waiting to resurrect the session, and an unbounded await here would wedge the
+            // runtime's poll loop instead of reporting the outage.
+            let timeout = Duration::from_secs(self.conn.request_timeout_s.max(1));
+            match tokio::time::timeout(
+                timeout,
+                session.read(&reads, TimestampsToReturn::Neither, 0.0),
+            )
+            .await
+            {
+                Ok(Ok(values)) => {
                     for ((id, model), dv) in known.iter().zip(values) {
                         let mut sample = build_sample(id, model, &dv);
                         // Contract §5: polled samples carry the read-completion time. Servers
@@ -240,9 +249,16 @@ impl Connector for OpcuaConnector {
                         out.push(sample);
                     }
                 }
-                Err(status) => {
+                Ok(Err(status)) => {
                     for (id, model) in &known {
                         out.push(bad_sample(id, Some(model), &format!("read failed: {status}")));
+                    }
+                }
+                Err(_) => {
+                    let reason =
+                        format!("read timed out after {}s (transport down?)", timeout.as_secs());
+                    for (id, model) in &known {
+                        out.push(bad_sample(id, Some(model), &reason));
                     }
                 }
             }
@@ -388,6 +404,34 @@ impl Connector for OpcuaConnector {
         Ok(())
     }
 
+    async fn reconnect(&mut self, device: &DeviceId) -> Result<LinkReport, ConnectorError> {
+        let endpoint = self
+            .devices
+            .get(device)
+            .map(|d| d.endpoint.clone())
+            .ok_or_else(|| ConnectorError::Other(format!("unknown device '{device}'")))?;
+        // Tear down the dead session first. No graceful CloseSession: the transport is
+        // presumed gone, and a blocking farewell would stall the reconnect schedule; the
+        // server times the old session out.
+        if let Some(sub) = self.subscriptions.remove(device) {
+            sub.forwarder.abort();
+        }
+        if let Some(handle) = self.sessions.remove(device) {
+            handle._event_loop.abort();
+        }
+        match connect_device(&self.conn, &endpoint).await {
+            Ok(handle) => {
+                self.sessions.insert(device.clone(), handle);
+                Ok(LinkReport::new(device.clone(), LinkStatus::Connected, None))
+            }
+            Err(e) => Ok(LinkReport::new(
+                device.clone(),
+                LinkStatus::Disconnected,
+                Some(e),
+            )),
+        }
+    }
+
     async fn execute(
         &mut self,
         device: &DeviceId,
@@ -436,9 +480,15 @@ impl Connector for OpcuaConnector {
                 ..Default::default()
             },
         };
-        let results = session
-            .write(&[write])
+        let timeout = Duration::from_secs(self.conn.request_timeout_s.max(1));
+        let results = tokio::time::timeout(timeout, session.write(&[write]))
             .await
+            .map_err(|_| {
+                ConnectorError::Transport(format!(
+                    "write timed out after {}s (transport down?)",
+                    timeout.as_secs()
+                ))
+            })?
             .map_err(|s| ConnectorError::Transport(format!("write failed: {s}")))?;
         let status = results.first().copied().unwrap_or(StatusCode::Good);
         if !status.is_good() {
@@ -522,18 +572,30 @@ async fn connect_device(
         _ => IdentityToken::Anonymous,
     };
 
-    let (session, event_loop) = client
-        .connect_to_matching_endpoint(
-            (
-                endpoint.endpoint.as_str(),
-                policy.to_str(),
-                mode,
-                UserTokenPolicy::anonymous(),
-            ),
-            identity,
-        )
-        .await
-        .map_err(|e| format!("connect failed: {e}"))?;
+    let endpoint_desc = (
+        endpoint.endpoint.as_str(),
+        policy.to_str(),
+        mode,
+        UserTokenPolicy::anonymous(),
+    );
+    // Without message security there is nothing endpoint discovery provides (no server
+    // certificate to fetch), so dial the configured address directly. This also keeps the
+    // session on the address the operator wrote: industrial servers routinely sit behind
+    // NAT/gateways and advertise endpoint URLs the client cannot reach — following the
+    // discovery redirect would break exactly those setups. Secure endpoints still go
+    // through discovery, which supplies the server certificate.
+    let (session, event_loop) = if policy == SecurityPolicy::None
+        && mode == MessageSecurityMode::None
+    {
+        client
+            .connect_to_endpoint_directly(endpoint_desc, identity)
+            .map_err(|e| format!("connect failed: {e}"))?
+    } else {
+        client
+            .connect_to_matching_endpoint(endpoint_desc, identity)
+            .await
+            .map_err(|e| format!("connect failed: {e}"))?
+    };
 
     let handle = event_loop.spawn();
     let timeout = Duration::from_secs(conn.connect_timeout_s.max(1));
@@ -702,14 +764,15 @@ fn build_sample(id: &str, model: &OpcuaPoint, dv: &DataValue) -> Sample {
     }
 }
 
-/// Build a `bad` quality sample carrying the error reason.
+/// Build a `bad` quality sample carrying the error reason. A point we know nothing about
+/// reports as `raw`: the contract requires a `datatype` for `typed` and we have none.
 fn bad_sample(id: &str, model: Option<&OpcuaPoint>, error: &str) -> Sample {
     Sample {
         ts: OffsetDateTime::now_utc(),
         device: String::new(),
         protocol: PROTOCOL,
         point: id.to_string(),
-        mode: model.map(|m| m.mode).unwrap_or(Mode::Typed),
+        mode: model.map(|m| m.mode).unwrap_or(Mode::Raw),
         datatype: model.and_then(|m| m.datatype),
         value: None,
         raw: Vec::new(),

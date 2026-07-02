@@ -1,0 +1,34 @@
+{
+  "$comment": "Simulator seed for the Modbus conformance run. Register values line up with the points in connector.toml; holding address 1 answers every read with a Modbus exception (behavioural check B4).",
+  "holding": {
+    "3": 17001,
+    "4": 9,
+    "5": 27105,
+    "6": 16938,
+    "7": 0,
+    "8": 250,
+    "9": 480,
+    "20": 100,
+    "22": 0,
+    "23": 0,
+    "30": 0,
+    "31": 256,
+    "32": 0,
+    "33": 0,
+    "34": 16393,
+    "35": 8697,
+    "36": 61467,
+    "37": 34414,
+    "38": 0,
+    "39": 16938
+  },
+  "coils": {
+    "48": false
+  },
+  "discrete_inputs": {
+    "10": true
+  },
+  "invalid": {
+    "holding": [1]
+  }
+}

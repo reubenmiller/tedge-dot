@@ -19,6 +19,174 @@ use tracing::{debug, error, info, warn};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+/// Tracks the last published link status per device so the runtime can publish the
+/// contract-required transitions: `degraded` when a whole poll batch fails (e.g. the device
+/// dropped mid-run), back to `connected` when reads recover. A device whose initial connect
+/// failed stays `disconnected` — failing reads add no information there.
+struct LinkTracker {
+    protocol: String,
+    states: HashMap<String, LinkStatus>,
+    /// Last device descriptor seen per device, re-attached to transition reports so the
+    /// retained link message keeps carrying it.
+    infos: HashMap<String, serde_json::Value>,
+}
+
+impl LinkTracker {
+    fn new(protocol: &str) -> Self {
+        LinkTracker {
+            protocol: protocol.to_string(),
+            states: HashMap::new(),
+            infos: HashMap::new(),
+        }
+    }
+
+    /// Publish connector-produced link reports (from `connect`) and record their status.
+    async fn publish_reports(
+        &mut self,
+        client: &AsyncClient,
+        reports: &[LinkReport],
+    ) -> Result<(), BoxError> {
+        for report in reports {
+            self.states.insert(report.device.clone(), report.status);
+            if let Some(info) = &report.info {
+                self.infos.insert(report.device.clone(), info.clone());
+            }
+        }
+        publish_links(client, &self.protocol, reports).await
+    }
+
+    /// Record a device descriptor without publishing, so a later transition publish carries
+    /// it (used when a reconnect succeeded but the link waits for reads to confirm).
+    fn stash_info(&mut self, device: &str, info: Option<serde_json::Value>) {
+        if let Some(info) = info {
+            self.infos.insert(device.to_string(), info);
+        }
+    }
+
+    /// Publish a link report only when it changes the recorded status — reconnect attempts
+    /// repeat on a backoff schedule and must not re-publish the same retained status.
+    async fn publish_if_changed(&mut self, client: &AsyncClient, report: &LinkReport) {
+        if self.states.get(&report.device) == Some(&report.status) {
+            return;
+        }
+        if let Err(e) = self
+            .publish_reports(client, std::slice::from_ref(report))
+            .await
+        {
+            warn!(device = %report.device, "failed to publish link transition: {e}");
+        }
+    }
+
+    /// Record the outcome of one poll batch for `device` (`healthy` = at least one point was
+    /// readable) and publish a retained link transition when the status changed.
+    async fn note_poll(
+        &mut self,
+        client: &AsyncClient,
+        device: &str,
+        healthy: bool,
+        reason: Option<String>,
+    ) {
+        let current = self.states.get(device).copied();
+        let Some(new) = next_link_state(current, healthy) else {
+            return;
+        };
+        info!(%device, status = new.as_str(), "link status changed");
+        let report = LinkReport {
+            device: device.to_string(),
+            status: new,
+            reason,
+            info: self.infos.get(device).cloned(),
+        };
+        if let Err(e) = self.publish_reports(client, std::slice::from_ref(&report)).await {
+            warn!(%device, "failed to publish link transition: {e}");
+        }
+    }
+}
+
+/// Reconnect backoff bounds: first retry after one second, doubling to a one-minute cap.
+const RECONNECT_INITIAL: Duration = Duration::from_secs(1);
+const RECONNECT_MAX: Duration = Duration::from_secs(60);
+
+/// The delay to wait after a reconnect attempt that did not restore data flow. Pure so the
+/// schedule is unit-testable.
+fn next_backoff(current: Duration) -> Duration {
+    current.saturating_mul(2).min(RECONNECT_MAX)
+}
+
+/// One device pending transport recovery: entries are created when a whole poll batch fails,
+/// re-armed after every reconnect attempt, and removed only once reads succeed again.
+struct ReconnectEntry {
+    delay: Duration,
+    due: Instant,
+}
+
+impl ReconnectEntry {
+    fn new() -> Self {
+        ReconnectEntry {
+            delay: RECONNECT_INITIAL,
+            due: Instant::now() + RECONNECT_INITIAL,
+        }
+    }
+
+    fn re_arm(&mut self) {
+        self.delay = next_backoff(self.delay);
+        self.due = Instant::now() + self.delay;
+    }
+}
+
+/// Try to re-establish one unhealthy device. Prefers the connector's per-device
+/// [`Connector::reconnect`]; falls back to a full [`Connector::connect`] when unsupported.
+///
+/// A successful transport reconnect is deliberately NOT published as `connected`: an
+/// application-level outage keeps the transport connectable while reads still fail, and
+/// publishing `connected` here would make the retained link status flap. The next healthy
+/// poll batch publishes the `connected` transition (with the stashed device descriptor);
+/// failed attempts publish `disconnected` once via `publish_if_changed`.
+async fn attempt_reconnect(
+    connector: &mut Box<dyn Connector>,
+    client: &AsyncClient,
+    links: &mut LinkTracker,
+    device: &str,
+) {
+    debug!(%device, "attempting reconnect");
+    let reports: Vec<LinkReport> = match connector.reconnect(&device.to_string()).await {
+        Ok(report) => vec![report],
+        Err(ConnectorError::Unsupported(_)) => match connector.connect().await {
+            Ok(reports) => reports,
+            Err(e) => {
+                warn!(%device, "reconnect (full connect) failed: {e}");
+                return;
+            }
+        },
+        Err(e) => {
+            warn!(%device, "reconnect failed: {e}");
+            return;
+        }
+    };
+    for report in reports {
+        if report.status == LinkStatus::Connected {
+            links.stash_info(&report.device, report.info.clone());
+        } else {
+            links.publish_if_changed(client, &report).await;
+        }
+    }
+}
+
+/// The link state to publish after a poll batch, or `None` when nothing changed. Pure so the
+/// transition rules are unit-testable.
+fn next_link_state(current: Option<LinkStatus>, healthy: bool) -> Option<LinkStatus> {
+    if healthy {
+        (current != Some(LinkStatus::Connected)).then_some(LinkStatus::Connected)
+    } else {
+        match current {
+            // never connected: stay disconnected rather than "upgrade" to degraded
+            Some(LinkStatus::Disconnected) | None => None,
+            Some(LinkStatus::Degraded) => None,
+            Some(LinkStatus::Connected) => Some(LinkStatus::Degraded),
+        }
+    }
+}
+
 /// A single scheduled read job for one point on one device.
 struct ScheduleEntry {
     device_index: usize,
@@ -151,8 +319,9 @@ pub async fn run_until(
     info!(%protocol, %service, "connector started");
 
     // 4. Connect to devices and publish link status.
+    let mut links = LinkTracker::new(&protocol);
     match connector.connect().await {
-        Ok(reports) => publish_links(&client, &protocol, &reports).await?,
+        Ok(reports) => links.publish_reports(&client, &reports).await?,
         Err(e) => warn!("initial connect failed: {e}"),
     }
 
@@ -165,6 +334,8 @@ pub async fn run_until(
     let mut schedule = build_schedule(&config, &subscribed);
     let mut meta_index = build_meta_index(&config);
     let mut seq_counters: HashMap<(String, String), u64> = HashMap::new();
+    // Devices whose transport needs re-establishing, keyed by device name.
+    let mut reconnects: HashMap<String, ReconnectEntry> = HashMap::new();
 
     // 6. Main loop: poll due points on a tick, route commands from the MQTT event-loop task.
     let mut tick = tokio::time::interval(Duration::from_millis(200));
@@ -199,8 +370,42 @@ pub async fn run_until(
                                 publish_sample(&client, &protocol, s, &mut seq_counters, &meta_index)
                                     .await;
                             }
+                            // A batch where every point failed means the device itself is
+                            // unreachable (a single bad point keeps the link healthy).
+                            if !samples.is_empty() {
+                                let healthy =
+                                    samples.iter().any(|s| s.quality != crate::model::Quality::Bad);
+                                let reason = (!healthy)
+                                    .then(|| samples.iter().find_map(|s| s.error.clone()))
+                                    .flatten();
+                                links.note_poll(&client, &device, healthy, reason).await;
+                                if healthy {
+                                    reconnects.remove(&device);
+                                } else {
+                                    reconnects.entry(device.clone()).or_insert_with(ReconnectEntry::new);
+                                }
+                            }
                         }
-                        Err(e) => warn!(%device, "read_points failed: {e}"),
+                        Err(e) => {
+                            warn!(%device, "read_points failed: {e}");
+                            links.note_poll(&client, &device, false, Some(e.to_string())).await;
+                            reconnects.entry(device.clone()).or_insert_with(ReconnectEntry::new);
+                        }
+                    }
+                }
+                // Re-establish unhealthy devices on their backoff schedule. Entries stay
+                // until reads succeed: a transport that reconnects while the device still
+                // fails (application-level outage) keeps backing off instead of storming.
+                let now = Instant::now();
+                let due: Vec<String> = reconnects
+                    .iter()
+                    .filter(|(_, entry)| entry.due <= now)
+                    .map(|(device, _)| device.clone())
+                    .collect();
+                for device in due {
+                    attempt_reconnect(&mut connector, &client, &mut links, &device).await;
+                    if let Some(entry) = reconnects.get_mut(&device) {
+                        entry.re_arm();
                     }
                 }
             }
@@ -210,7 +415,7 @@ pub async fn run_until(
             }
             Some(p) = incoming_rx.recv() => {
                 match handle_command(
-                    &mut connector, &client, &protocol,
+                    &mut connector, &client, &protocol, &mut links,
                     &mut config, &mut config_doc, &config_path,
                     &p.topic, &p.payload,
                 ).await {
@@ -224,6 +429,8 @@ pub async fn run_until(
                         schedule = build_schedule(&config, &subscribed);
                         meta_index = build_meta_index(&config);
                         seq_counters.clear();
+                        // the management path already reconnected every device
+                        reconnects.clear();
                     }
                     Ok(false) => {}
                     Err(e) => warn!("command handling error: {e}"),
@@ -404,6 +611,7 @@ async fn handle_command(
     connector: &mut Box<dyn Connector>,
     client: &AsyncClient,
     protocol: &str,
+    links: &mut LinkTracker,
     config: &mut ConnectorConfig,
     config_doc: &mut DocumentMut,
     config_path: &Path,
@@ -436,7 +644,7 @@ async fn handle_command(
     // the connector configuration, then live-reload the protocol module.
     if is_management_verb(verb) {
         return handle_management(
-            connector, client, protocol, config, config_doc, config_path, topic, verb, &json,
+            connector, client, links, config, config_doc, config_path, topic, verb, &json,
         )
         .await;
     }
@@ -518,7 +726,7 @@ fn augment_management_caps(caps: &mut Capabilities) {
 async fn handle_management(
     connector: &mut Box<dyn Connector>,
     client: &AsyncClient,
-    protocol: &str,
+    links: &mut LinkTracker,
     config: &mut ConnectorConfig,
     config_doc: &mut DocumentMut,
     config_path: &Path,
@@ -569,7 +777,7 @@ async fn handle_management(
     // Reconnect with the new configuration and republish link status.
     let _ = connector.disconnect().await;
     match connector.connect().await {
-        Ok(reports) => publish_links(client, protocol, &reports).await?,
+        Ok(reports) => links.publish_reports(client, &reports).await?,
         Err(e) => warn!("reconnect after reconfigure failed: {e}"),
     }
 
@@ -1074,6 +1282,30 @@ protocol_address = { host = "127.0.0.1" }
         let schedule = build_schedule(&cfg, &HashSet::new());
         // connector poll_interval = "2s" flows into the resolved PointRef interval
         assert_eq!(schedule[0].point.interval, Some(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn reconnect_backoff_doubles_and_caps() {
+        assert_eq!(next_backoff(RECONNECT_INITIAL), Duration::from_secs(2));
+        assert_eq!(next_backoff(Duration::from_secs(2)), Duration::from_secs(4));
+        assert_eq!(next_backoff(Duration::from_secs(40)), RECONNECT_MAX);
+        assert_eq!(next_backoff(RECONNECT_MAX), RECONNECT_MAX);
+    }
+
+    #[test]
+    fn link_transitions_follow_poll_health() {
+        use LinkStatus::*;
+        // healthy reads (re)connect from any non-connected state
+        assert_eq!(next_link_state(Some(Connected), true), None);
+        assert_eq!(next_link_state(Some(Degraded), true), Some(Connected));
+        assert_eq!(next_link_state(Some(Disconnected), true), Some(Connected));
+        assert_eq!(next_link_state(None, true), Some(Connected));
+        // a fully-failing batch degrades a connected link, once
+        assert_eq!(next_link_state(Some(Connected), false), Some(Degraded));
+        assert_eq!(next_link_state(Some(Degraded), false), None);
+        // a device that never connected stays disconnected
+        assert_eq!(next_link_state(Some(Disconnected), false), None);
+        assert_eq!(next_link_state(None, false), None);
     }
 
     #[test]

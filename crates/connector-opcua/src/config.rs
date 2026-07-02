@@ -22,6 +22,11 @@ pub struct OpcuaConnection {
     /// Seconds to wait for a session to activate before declaring the link down.
     #[serde(default = "default_connect_timeout")]
     pub connect_timeout_s: u64,
+    /// Seconds to wait for a read/write service call. Bounds a request stuck behind a dead
+    /// transport (the client queues requests while it tries to resurrect the session), so a
+    /// dropped connection surfaces as bad samples instead of stalling the poll loop.
+    #[serde(default = "default_request_timeout")]
+    pub request_timeout_s: u64,
 }
 
 impl Default for OpcuaConnection {
@@ -32,6 +37,7 @@ impl Default for OpcuaConnection {
             security_policy: None,
             security_mode: None,
             connect_timeout_s: default_connect_timeout(),
+            request_timeout_s: default_request_timeout(),
         }
     }
 }
@@ -73,6 +79,9 @@ fn default_app_uri() -> String {
 }
 fn default_connect_timeout() -> u64 {
     15
+}
+fn default_request_timeout() -> u64 {
+    5
 }
 
 #[cfg(test)]

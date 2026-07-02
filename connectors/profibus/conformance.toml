@@ -1,0 +1,18 @@
+# Conformance manifest for the PROFIBUS-DP connector.
+#
+#   cargo run -p ot-conformance -- check --spec connectors/profibus/conformance.toml \
+#       --features profibus   # module is not compiled into the harness by default
+#
+# Runs the static layers (schema examples, golden decode vectors, manifest ↔ compiled
+# capability agreement — the last is skipped unless the harness is built with the
+# `profibus` feature). No built-in PROFIBUS simulator exists; behavioural coverage lives in
+# the Dockerised e2e suite (connectors/profibus/tests).
+
+[connector]
+protocol    = "profibus"
+modes       = ["raw", "typed"]
+datatypes   = ["bool", "int8", "uint8", "int16", "uint16", "int32", "uint32", "float32"]
+point_kinds = ["input", "output"]
+verbs       = ["write"]
+features    = ["polling", "bitfield"]
+subscribe   = false

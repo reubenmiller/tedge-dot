@@ -5,6 +5,7 @@
 //! the [Connector SDK spec](../../../doc/proposal/sdk/connector-sdk.md).
 
 pub mod config;
+pub mod conformance;
 pub mod connector;
 pub mod decode;
 pub mod model;

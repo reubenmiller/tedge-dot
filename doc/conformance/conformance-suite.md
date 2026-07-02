@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | Draft |
+| Status | Implemented — [`crates/ot-conformance`](../../crates/ot-conformance/) |
 | Applies to | every connector implementing the [OT Connector Contract](../contract/ot-connector-contract.md) |
 
 The conformance suite is what makes a community of connectors trustworthy. A connector that
@@ -50,7 +50,9 @@ This is the heart of correctness for `typed` mode. Because all connectors decode
 SDK's `decode_primitive`/`encode_primitive`, the golden vectors live **once** in the SDK and
 every connector that advertises a datatype must pass the vectors for it.
 
-Vectors are stored as data (JSON), not code, so they are language-neutral and AI-auditable:
+Vectors are stored as data (JSON), not code, so they are language-neutral and AI-auditable.
+The file lives at [`crates/sdk/conformance/vectors.json`](../../crates/sdk/conformance/vectors.json)
+and is enforced on every `cargo test` via `tedge_dot_sdk::conformance`:
 
 ```json
 {
@@ -94,9 +96,17 @@ broker, then asserts the MQTT side of the contract.
  └───────────────┘               └──────────────────┘          └──────────────────┘
 ```
 
-Reusable harness, per-protocol simulator. For Modbus the simulator is the existing
-[`connectors/modbus/sim`](../../connectors/modbus/sim/) Modbus server (or a `tokio-modbus` server),
-seeded with known register/coil contents.
+Reusable harness, per-protocol simulator. The harness brings its own test broker (a minimal
+in-process MQTT 3.1.1 broker that records every message *with the publishing client
+attached* — which makes the topic-discipline and retain-flag checks exact) and a built-in
+`tokio-modbus` TCP simulator seeded from the manifest's seed file. Nothing external is
+required: no mosquitto, no docker, no hardware. The standalone
+[`connectors/modbus/sim`](../../connectors/modbus/sim/) image remains available for
+container-based end-to-end tests.
+
+The connector under test runs in-process by default (the protocol module under the real SDK
+runtime — the identical code path the shipped binary links). An out-of-tree connector binary
+is tested instead via `[harness] command` in its manifest.
 
 ### 3.1 Required behavioural checks
 
@@ -106,10 +116,10 @@ seeded with known register/coil contents.
 | B2 | Sample publishing | For each configured point, a sample on `…/sample/<point>` validating Layer 1, with the value matching the simulator's seeded data (cross-checked via Layer 2 decode). |
 | B3 | Modes | A `typed` point yields `value`+`value_repr`; a `raw` point yields `raw` only. |
 | B4 | Quality | A simulated read failure yields a `bad` sample with `error`, not a dropped message. |
-| B5 | Link status | `status/link` transitions to `connected`; to `disconnected`/`degraded` when the simulator drops. |
+| B5 | Link status | `status/link` transitions to `connected`; to `disconnected`/`degraded` when the simulator drops — tested at both levels: an application outage (requests fail, transport up) and a transport drop (the TCP session dies). Recovery must restore `connected`, and after a transport drop the connector must re-establish the session itself (reconnect with backoff) so samples flow again. |
 | B6 | Write verb | A `cmd/write/<id>` `init` drives `executing`→`successful`; the simulator observes the written value; round-trips through a subsequent read. |
 | B7 | Access control | A write to a `read`-only point yields `failed` with a reason and no simulator write. |
-| B8 | Hot reload | Editing config (add a point) is picked up without restart; new point starts publishing. |
+| B8 | Hot reload | A config change (add a point, applied through the management `define-device` verb) is picked up without restart; the new point starts publishing. |
 | B9 | Capability honesty | The connector never emits a datatype/mode/verb it did not advertise. |
 | B10 | Topic discipline | The connector publishes only under its contract topics; never to `…/m/`, `…/e/`, `…/a/`. |
 
@@ -122,7 +132,22 @@ end-to-end driver→flow story for that connector.
 ## 5. Conformance manifest
 
 Each connector ships a `conformance.toml` declaring what it claims, so the harness selects the
-applicable vectors and behavioural checks:
+applicable vectors and behavioural checks. Every connector in this repository has one:
+
+| Connector | Manifest | Behavioural layer |
+| --- | --- | --- |
+| Modbus | [connectors/modbus/conformance.toml](../../connectors/modbus/conformance.toml) | built-in `modbus-tcp` simulator — full B1–B10 |
+| OPC UA | [connectors/opcua/conformance.toml](../../connectors/opcua/conformance.toml) | built-in `opcua` simulator (embedded `async-opcua` server) — full B1–B10, polled mode |
+| CAN bus | [connectors/canbus/conformance.toml](../../connectors/canbus/conformance.toml) | skipped (vcan is Linux-only; covered by the e2e suite) |
+| CANopen | [connectors/canopen/conformance.toml](../../connectors/canopen/conformance.toml) | skipped (vcan is Linux-only; covered by the e2e suite) |
+| PROFIBUS-DP | [connectors/profibus/conformance.toml](../../connectors/profibus/conformance.toml) | skipped (no built-in simulator yet) |
+
+Connectors without a built-in simulator still run the static layers **plus a static capability
+agreement check**: the harness builds the protocol module in-process, applies the SDK's
+management augmentation to its raw capability descriptor, and requires it to agree with the
+manifest — so capability drift is caught in CI for every connector, broker or not. A declared
+simulator `kind` the harness has no built-in implementation for (e.g. the Dockerised vcan
+stacks) skips the behavioural layer with an explanatory note instead of failing.
 
 ```toml
 [connector]
@@ -145,16 +170,25 @@ agree.
 ## 6. Running it
 
 ```sh
-# Layers 1 & 2 — fast, no simulator:
-ot-conformance check --spec ./conformance.toml --static
+# Everything (layers 1-3; no external broker, simulator or hardware needed):
+cargo run -p ot-conformance -- check --spec connectors/modbus/conformance.toml
 
-# Layer 3 — with the protocol simulator + a test broker:
-ot-conformance check --spec ./conformance.toml --behavioural
+# Layers 1 & 2 only — fast, static:
+cargo run -p ot-conformance -- check --spec connectors/modbus/conformance.toml --static
+
+# Layer 3 only — behavioural (connector ⇄ simulator ⇄ test broker):
+cargo run -p ot-conformance -- check --spec connectors/modbus/conformance.toml --behavioural
+
+# Machine-readable reports for CI / agents:
+cargo run -p ot-conformance -- check --spec connectors/modbus/conformance.toml \
+    --junit conformance-report.xml --json conformance-report.json
 ```
 
-`ot-conformance` is a small harness binary (part of the workspace). It exits non-zero on any
-failure and emits a machine-readable report (JUnit + JSON) suitable for CI and for an AI agent
-to consume and self-correct against.
+`ot-conformance` is a small harness binary (part of the workspace,
+[`crates/ot-conformance`](../../crates/ot-conformance/)). It exits non-zero on any failure and
+emits a machine-readable report (JUnit + JSON) suitable for CI and for an AI agent to consume
+and self-correct against. The full suite also runs as a workspace integration test
+(`cargo test -p ot-conformance`), so a connector PR cannot silently break conformance.
 
 ## 7. Definition of "conformant"
 

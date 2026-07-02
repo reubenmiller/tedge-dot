@@ -77,6 +77,7 @@ all-protocols demo on a real device — both use the same configs in
 |---|---|
 | [crates/sdk](crates/sdk/) | `tedge-dot-sdk` — runtime, `Connector` trait, config model, decode helpers |
 | [crates/connector-*](crates/) | one crate per protocol module |
+| [crates/ot-conformance](crates/ot-conformance/) | `ot-conformance` — the connector conformance harness (schema, decode vectors, behavioural checks) |
 | [src/](src/) | the `tedge-dot` binary (run service, `read`/`write` CLI) |
 | [flows/](flows/) | protocol-neutral thin-edge.io flows (sample→measurement, alarms, registration, commands) |
 | [operations/](operations/) | Cumulocity operation shims (legacy `c8y_*` operations → generic OT commands) |
@@ -94,6 +95,7 @@ Docker and Python for the e2e suites.
 ```sh
 just test               # unit + integration + property tests
 just lint               # clippy -D warnings
+just conformance modbus # full conformance suite (no hardware/broker needed)
 just test-flows         # offline flow tests (tedge flows test)
 just test-e2e modbus    # Dockerised MQTT e2e suite for one protocol
 just fuzz config_toml   # fuzz one SDK target (nightly + cargo-fuzz)

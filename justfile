@@ -19,6 +19,11 @@ lint:
 test-properties:
     cargo test -p tedge-dot-sdk --test properties
 
+# Run the OT connector conformance suite (layers 1-3; built-in broker + simulator, no
+# hardware). Usage: just conformance modbus [extra ot-conformance flags]
+conformance protocol="modbus" *args="":
+    cargo run -p ot-conformance -- check --spec connectors/{{protocol}}/conformance.toml {{args}}
+
 # Compile-check the Linux-only code paths (SocketCAN connectors are cfg-gated and silently
 # skipped by a macOS `cargo build`). profibus is excluded: its serial dependency has a native
 # build script that needs Linux headers — it is covered by the Docker e2e build instead.

@@ -207,6 +207,18 @@ pub trait Connector: Send {
         Err(ConnectorError::Unsupported("subscribe".into()))
     }
 
+    /// OPTIONAL: re-establish the connection to a single device whose transport dropped.
+    ///
+    /// The runtime calls this with exponential backoff while a device's reads keep failing.
+    /// Return the device's new link report (mirroring [`Connector::connect`] semantics:
+    /// `Ok` with a `Disconnected` report when the attempt failed cleanly). The default
+    /// signals `Unsupported`, which makes the runtime fall back to a full
+    /// [`Connector::connect`] — correct, but it re-establishes every device at once.
+    async fn reconnect(&mut self, device: &DeviceId) -> Result<LinkReport, ConnectorError> {
+        let _ = device;
+        Err(ConnectorError::Unsupported("reconnect".into()))
+    }
+
     /// OPTIONAL: execute a command verb (default supports nothing).
     async fn execute(
         &mut self,
