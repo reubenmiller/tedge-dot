@@ -181,7 +181,17 @@ sudo cp /usr/share/tedge-dot/demo/*.toml /etc/tedge/plugins/ot/
 
 ### 4. Start the simulators
 
-From a checkout of this repo on the device:
+The compose file pulls prebuilt simulator images from GHCR (published by the
+"Publish simulators" workflow), so no repository checkout is needed — the
+package ships a copy:
+
+```sh
+docker compose -f /usr/share/tedge-dot/demo/docker-compose.yaml up -d
+```
+
+From a checkout of this repo, `just demo-sims-up` does the same but builds
+the images from source (it passes `--build`), so local simulator changes are
+picked up. Drop `--build` to use the prebuilt images:
 
 ```sh
 just demo-sims-up

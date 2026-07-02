@@ -108,6 +108,14 @@ nfpms:
         dst: /usr/share/tedge-dot/demo/can/test.dbc
         file_info: { owner: tedge, group: tedge, mode: 0644 }
 
+      # Simulator stack: pulls the prebuilt simulator images from GHCR
+      # (published by .github/workflows/publish-simulators.yaml), so no
+      # repository checkout is needed:
+      #   docker compose -f /usr/share/tedge-dot/demo/docker-compose.yaml up -d
+      - src: demo/docker-compose.yaml
+        dst: /usr/share/tedge-dot/demo/docker-compose.yaml
+        file_info: { owner: tedge, group: tedge, mode: 0644 }
+
       # SystemD Unit File
       - src: packaging/tedge-dot.service
         dst: /lib/systemd/system/tedge-dot.service

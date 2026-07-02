@@ -25,13 +25,18 @@
 #       CONFIG_CAN, CONFIG_CAN_RAW, CONFIG_CAN_VCAN  (modprobe vcan)
 #
 # Usage:
-#   docker compose -f demo/docker-compose.yaml up -d --build
+#   docker compose -f demo/docker-compose.yaml up -d           # pull prebuilt images
+#   docker compose -f demo/docker-compose.yaml up -d --build   # build from source
 #   docker compose -f demo/docker-compose.yaml down -v
 #
 # Or via just:  just demo-sims-up  /  just demo-sims-down
 #
-# Build context for every service is the repository root (..), matching the
-# COPY paths inside each connectors/<proto>/sim/Dockerfile.
+# Each service references the prebuilt image published to GHCR by the
+# "Publish simulators" workflow (pull_policy: missing pulls it when absent),
+# so no repository checkout is needed just to run the simulators.  Override
+# the source with SIM_IMAGE_REPO / SIM_IMAGE_TAG if needed.  The build:
+# section is kept for development: build context is the repository root (..),
+# matching the COPY paths inside each connectors/<proto>/sim/Dockerfile.
 
 name: tedge-dot-simulators
 
@@ -39,6 +44,8 @@ services:
   # --- Modbus TCP simulator (pymodbus) ---------------------------------------
   # Exposes a real Modbus TCP server on host port 5020.
   modbus-sim:
+    image: ${SIM_IMAGE_REPO:-ghcr.io/reubenmiller/tedge-dot}/modbus-sim:${SIM_IMAGE_TAG:-latest}
+    pull_policy: missing
     build:
       context: ..
       dockerfile: connectors/modbus/sim/Dockerfile
@@ -58,6 +65,8 @@ services:
   # bind is not reachable through a published Docker port, so host networking is
   # the robust choice here.) The connector dials opc.tcp://127.0.0.1:4840/.
   opcua-sim:
+    image: ${SIM_IMAGE_REPO:-ghcr.io/reubenmiller/tedge-dot}/opcua-sim:${SIM_IMAGE_TAG:-latest}
+    pull_policy: missing
     build:
       context: ..
       dockerfile: connectors/opcua/sim/Dockerfile
@@ -71,6 +80,8 @@ services:
   # connector.  Creates vcan0 if it does not already exist, then broadcasts
   # ENGINE_STATUS frames at 10 Hz.
   canbus-sim:
+    image: ${SIM_IMAGE_REPO:-ghcr.io/reubenmiller/tedge-dot}/canbus-sim:${SIM_IMAGE_TAG:-latest}
+    pull_policy: missing
     build:
       context: ..
       dockerfile: connectors/canbus/sim/Dockerfile
@@ -89,6 +100,8 @@ services:
   # while this node serves CANopen SDO requests for node ID 1.  Different COB-IDs
   # so the two coexist on the same virtual bus, exactly as on real hardware.
   canopen-sim:
+    image: ${SIM_IMAGE_REPO:-ghcr.io/reubenmiller/tedge-dot}/canopen-sim:${SIM_IMAGE_TAG:-latest}
+    pull_policy: missing
     build:
       context: ..
       dockerfile: connectors/canopen/sim/Dockerfile
@@ -105,6 +118,8 @@ services:
   # Dockerfile). The host-side connector speaks serial-over-TCP to it directly:
   # port = "tcp://127.0.0.1:9200".
   profibus-sim:
+    image: ${SIM_IMAGE_REPO:-ghcr.io/reubenmiller/tedge-dot}/profibus-sim:${SIM_IMAGE_TAG:-latest}
+    pull_policy: missing
     build:
       context: ..
       dockerfile: connectors/profibus/sim/Dockerfile
