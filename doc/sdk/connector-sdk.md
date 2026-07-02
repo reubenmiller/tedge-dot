@@ -230,21 +230,33 @@ JSON shaping, or the command state machine.
 ### 4.1 CLI: direct read/write (no broker)
 
 The binary also exposes `read` and `write` subcommands that drive the **same** `Connector` code
-path the runtime uses, but connect straight to a device and act once, then exit — no broker or
+path the runtime uses, but connect straight to a device and act, then exit — no broker or
 running service required. This makes it easy to experiment with a config, verify wiring, or script
 one-off writes:
 
 ```sh
+tedge-dot read  -c modbus.toml                                     # every readable point of every device
 tedge-dot read  -c modbus.toml -d plc-1 -p boiler_temp -p setpoint
+tedge-dot read  -c modbus.toml -d 'plc-*' -p 'boiler_*' --poll     # keep polling at the configured interval
+tedge-dot read  -c modbus.toml --interval 500ms --count 10         # override the interval, stop after 10 polls
 tedge-dot write -c modbus.toml -d plc-1 -p setpoint --value 21.5   # typed; bool/number/string inferred
 tedge-dot write -c modbus.toml -d plc-1 -p status   --raw 00ff     # raw bytes, verbatim
+tedge-dot write -c modbus.toml -p 'setpoint_*' --value 0           # one value to every matching writable point
 ```
 
-`read`/`write` reuse `configure` → `connect` → `read_points`/`execute(verb="write")` →
-`disconnect`, and `--json` prints the contract sample/result envelope. The legacy invocation
+Device (`-d`) and point (`-p`) selectors accept `*`/`?` wildcards and default to every device /
+every readable point; wildcard patterns skip points whose `access` does not fit the operation,
+while explicitly named points are always attempted. `read`/`write` reuse `configure` →
+`connect` → `read_points`/`execute(verb="write")` → `disconnect`, and `--json` prints the
+contract sample/result envelopes.
+
+The `run` subcommand accepts the same `-c/--config` flag (files or directories; the positional
+form still works), `--duration 10s` to stop after a while, and `--output stdout` to print each
+sample envelope as one JSON line instead of publishing to MQTT — handy for piping into `jq` or
+capturing a trace; the envelope's `device` field identifies the source. The legacy invocation
 `tedge-dot [<config>]` still runs the service (an implicit `run` subcommand), so existing
-service units are unaffected. Because a direct CLI write opens its own transport, avoid using it
-against a serial device while the service is running (the port cannot be shared); Modbus TCP
+service units are unaffected. Because a direct CLI session opens its own transport, avoid using
+it against a serial device while the service is running (the port cannot be shared); Modbus TCP
 generally tolerates a second connection.
 
 ---

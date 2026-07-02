@@ -445,6 +445,127 @@ pub async fn run_until(
     Ok(())
 }
 
+/// Run the connector without a broker until `shutdown` resolves: every sample is printed to
+/// stdout as one JSON envelope per line (NDJSON) instead of being published over MQTT. The
+/// envelope carries the source `device`, so interleaved output from several connectors (or
+/// devices) stays identifiable.
+///
+/// This powers `tedge-dot run --output stdout` for local exploration and piping into other
+/// tools. It reuses the exact scheduling, subscription, seq and meta handling of the MQTT
+/// runtime; link transitions are logged via tracing, and the broker-borne features (health,
+/// capabilities, commands/management) are simply absent.
+pub async fn run_stdout_until(
+    mut connector: Box<dyn Connector>,
+    config: ConnectorConfig,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+) -> Result<(), BoxError> {
+    connector
+        .configure(&config)
+        .map_err(|e| format!("configure failed: {e}"))?;
+    let caps = connector.capabilities();
+
+    match connector.connect().await {
+        Ok(reports) => {
+            for report in &reports {
+                info!(device = %report.device, status = report.status.as_str(),
+                    reason = report.reason.as_deref().unwrap_or(""), "link");
+            }
+        }
+        Err(e) => warn!("initial connect failed: {e}"),
+    }
+
+    let (sample_tx, mut sample_rx) = tokio::sync::mpsc::channel::<Sample>(256);
+    let subscribed = setup_subscriptions(&mut connector, &config, caps.subscribe, &sample_tx).await;
+    let mut schedule = build_schedule(&config, &subscribed);
+    let meta_index = build_meta_index(&config);
+    let mut seq_counters: HashMap<(String, String), u64> = HashMap::new();
+    let mut reconnects: HashMap<String, ReconnectEntry> = HashMap::new();
+
+    let mut tick = tokio::time::interval(Duration::from_millis(200));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    tokio::pin!(shutdown);
+
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            _ = tick.tick() => {
+                let now = Instant::now();
+                let mut due: HashMap<usize, Vec<PointRef>> = HashMap::new();
+                for entry in schedule.iter_mut() {
+                    if entry.next_due <= now {
+                        due.entry(entry.device_index).or_default().push(entry.point.clone());
+                        entry.next_due = now + entry.interval;
+                    }
+                }
+                for (device_index, points) in due {
+                    let device = config.devices[device_index].name.clone();
+                    match connector.read_points(&device, &points).await {
+                        Ok(mut samples) => {
+                            for s in samples.iter_mut() {
+                                s.device = device.clone();
+                                print_sample(s, &mut seq_counters, &meta_index);
+                            }
+                            let healthy = samples.is_empty()
+                                || samples.iter().any(|s| s.quality != crate::model::Quality::Bad);
+                            if healthy {
+                                reconnects.remove(&device);
+                            } else {
+                                reconnects.entry(device.clone()).or_insert_with(ReconnectEntry::new);
+                            }
+                        }
+                        Err(e) => {
+                            warn!(%device, "read_points failed: {e}");
+                            reconnects.entry(device.clone()).or_insert_with(ReconnectEntry::new);
+                        }
+                    }
+                }
+                let now = Instant::now();
+                let due: Vec<String> = reconnects
+                    .iter()
+                    .filter(|(_, entry)| entry.due <= now)
+                    .map(|(device, _)| device.clone())
+                    .collect();
+                for device in due {
+                    debug!(%device, "attempting reconnect");
+                    match connector.reconnect(&device).await {
+                        Ok(_) => {}
+                        Err(ConnectorError::Unsupported(_)) => {
+                            if let Err(e) = connector.connect().await {
+                                warn!(%device, "reconnect (full connect) failed: {e}");
+                            }
+                        }
+                        Err(e) => warn!(%device, "reconnect failed: {e}"),
+                    }
+                    if let Some(entry) = reconnects.get_mut(&device) {
+                        entry.re_arm();
+                    }
+                }
+            }
+            Some(mut sample) = sample_rx.recv() => {
+                print_sample(&mut sample, &mut seq_counters, &meta_index);
+            }
+        }
+    }
+
+    let _ = connector.disconnect().await;
+    Ok(())
+}
+
+/// Stamp the per-point sequence number and print one sample envelope to stdout (one JSON
+/// object per line); the stdout counterpart of [`publish_sample`].
+fn print_sample(
+    sample: &mut Sample,
+    seq_counters: &mut HashMap<(String, String), u64>,
+    meta_index: &HashMap<(String, String), serde_json::Value>,
+) {
+    let counter = seq_counters
+        .entry((sample.device.clone(), sample.point.clone()))
+        .or_insert(0);
+    *counter += 1;
+    sample.seq = Some(*counter);
+    println!("{}", envelope_with_meta(sample, meta_index));
+}
+
 /// Build the polling schedule, skipping points that are delivered by subscription.
 fn build_schedule(
     config: &ConnectorConfig,

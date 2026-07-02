@@ -31,13 +31,23 @@ just sim modbus     # docker compose up the simulator on 127.0.0.1:5020
 # read typed values (uint16 / float32 / bool)
 cargo run -- read  -c demo/config/modbus.toml -d plc1 -p temp_u16 -p level_f32 -p coil_rw
 
-# write and read back
+# read everything: -d/-p default to '*' (all devices, all readable points)
+cargo run -- read  -c demo/config/modbus.toml
+
+# keep polling matching points (config interval; --interval/--count override)
+cargo run -- read  -c demo/config/modbus.toml -p 'temp_*' --poll
+cargo run -- read  -c demo/config/modbus.toml --interval 500ms --count 5
+
+# write and read back (a wildcard -p writes the value to every matching writable point)
 cargo run -- write -c demo/config/modbus.toml -d plc1 -p coil_rw  --value true
 cargo run -- write -c demo/config/modbus.toml -d plc1 -p temp_u16 --value 1234
 cargo run -- read  -c demo/config/modbus.toml -d plc1 -p temp_u16 --json
 
 # a point that returns a Modbus exception -> bad quality, exit code 1
 cargo run -- read  -c demo/config/modbus.toml -d plc1 -p bad_point
+
+# run the connector without a broker: sample envelopes as JSON lines on stdout
+cargo run -- run   -c demo/config/modbus.toml --output stdout --duration 10s
 
 just sim-down modbus
 ```
