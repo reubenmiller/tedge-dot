@@ -1,6 +1,7 @@
 #include "tedge_dot/runtime.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -228,8 +229,12 @@ static void on_message(struct mosquitto *mosq, void *ud,
 
 /* ---- main loop ------------------------------------------------------------ */
 
-int tdot_runtime_run(tdot_connector_t *conn, tdot_config_t *cfg,
-                     const tdot_run_opts_t *opts) {
+/* Run one connector to completion. Assumes the mosquitto library is already
+ * initialised and the SIGINT/SIGTERM handlers are installed by the caller, so
+ * it is safe to call from one of several worker threads (each owns its own
+ * connector, config and mosquitto client). */
+static int run_connector(tdot_connector_t *conn, tdot_config_t *cfg,
+                         const tdot_run_opts_t *opts) {
     rt_t rt = {.conn = conn, .cfg = cfg, .output = opts->output};
     char err[256];
 
@@ -239,7 +244,6 @@ int tdot_runtime_run(tdot_connector_t *conn, tdot_config_t *cfg,
     }
 
     if (rt.output == TDOT_OUTPUT_MQTT) {
-        mosquitto_lib_init();
         char client_id[128];
         snprintf(client_id, sizeof client_id, "%s#%d", cfg->service_name,
                  (int)getpid());
@@ -256,7 +260,6 @@ int tdot_runtime_run(tdot_connector_t *conn, tdot_config_t *cfg,
             logmsg("error", "cannot connect to MQTT broker %s:%d",
                    cfg->mqtt_host, cfg->mqtt_port);
             mosquitto_destroy(rt.mosq);
-            mosquitto_lib_cleanup();
             return -1;
         }
         char cmd_topic[256];
@@ -275,10 +278,6 @@ int tdot_runtime_run(tdot_connector_t *conn, tdot_config_t *cfg,
             publish(&rt, cap_topic, conn->capabilities_json, true);
         }
     }
-
-    struct sigaction sa = {.sa_handler = on_signal};
-    sigaction(SIGINT, &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL);
 
     /* Initial connect for all devices. */
     for (size_t i = 0; i < cfg->ndevices; i++)
@@ -345,7 +344,104 @@ int tdot_runtime_run(tdot_connector_t *conn, tdot_config_t *cfg,
         mosquitto_loop(rt.mosq, 100, 1); /* flush */
         mosquitto_disconnect(rt.mosq);
         mosquitto_destroy(rt.mosq);
-        mosquitto_lib_cleanup();
     }
     return 0;
+}
+
+static void install_signal_handlers(void) {
+    struct sigaction sa = {.sa_handler = on_signal};
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+}
+
+int tdot_runtime_run(tdot_connector_t *conn, tdot_config_t *cfg,
+                     const tdot_run_opts_t *opts) {
+    if (opts->output == TDOT_OUTPUT_MQTT)
+        mosquitto_lib_init();
+    install_signal_handlers();
+    int rc = run_connector(conn, cfg, opts);
+    if (opts->output == TDOT_OUTPUT_MQTT)
+        mosquitto_lib_cleanup();
+    return rc;
+}
+
+/* ---- multi-connector supervisor ------------------------------------------- */
+
+/* One process runs every connector config found in a directory, each in its
+ * own thread (mirrors the Rust runtime's single-service model). */
+
+typedef struct {
+    tdot_connector_t *conn;
+    tdot_config_t *cfg;
+    const tdot_run_opts_t *opts;
+    int rc;
+} worker_t;
+
+static void *worker_main(void *arg) {
+    worker_t *w = arg;
+    w->rc = run_connector(w->conn, w->cfg, w->opts);
+    return NULL;
+}
+
+int tdot_runtime_run_configs(const char *const *paths, size_t npaths,
+                             const tdot_run_opts_t *opts) {
+    if (npaths == 0) {
+        logmsg("error", "no connector configs to run");
+        return -1;
+    }
+
+    worker_t *workers = calloc(npaths, sizeof *workers);
+    pthread_t *threads = calloc(npaths, sizeof *threads);
+    size_t started = 0;
+
+    /* Load every config and build its connector up front, so a bad config is
+     * reported before anything starts publishing. */
+    for (size_t i = 0; i < npaths; i++) {
+        char err[256];
+        tdot_config_t *cfg = tdot_config_load(paths[i], err, sizeof err);
+        if (!cfg) {
+            logmsg("error", "%s", err);
+            continue;
+        }
+        tdot_connector_t *conn = tdot_connector_factory(cfg->protocol);
+        if (!conn) {
+            logmsg("error", "%s: unknown protocol '%s'", paths[i],
+                   cfg->protocol);
+            tdot_config_free(cfg);
+            continue;
+        }
+        workers[started].conn = conn;
+        workers[started].cfg = cfg;
+        workers[started].opts = opts;
+        logmsg("info", "loaded %s (%s)", paths[i], cfg->protocol);
+        started++;
+    }
+    if (started == 0) {
+        free(workers);
+        free(threads);
+        logmsg("error", "no valid connector configs");
+        return -1;
+    }
+
+    if (opts->output == TDOT_OUTPUT_MQTT)
+        mosquitto_lib_init();
+    install_signal_handlers();
+
+    for (size_t i = 0; i < started; i++)
+        pthread_create(&threads[i], NULL, worker_main, &workers[i]);
+    for (size_t i = 0; i < started; i++)
+        pthread_join(threads[i], NULL);
+
+    int rc = 0;
+    for (size_t i = 0; i < started; i++) {
+        if (workers[i].rc != 0)
+            rc = -1;
+        workers[i].conn->destroy(workers[i].conn);
+        tdot_config_free(workers[i].cfg);
+    }
+    if (opts->output == TDOT_OUTPUT_MQTT)
+        mosquitto_lib_cleanup();
+    free(workers);
+    free(threads);
+    return rc;
 }

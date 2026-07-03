@@ -38,6 +38,14 @@ double tdot_now_ms(void);
 int tdot_runtime_run(tdot_connector_t *conn, tdot_config_t *cfg,
                      const tdot_run_opts_t *opts);
 
+/* Run several connector configs concurrently in one process (one thread per
+ * config), mirroring the single-service model of the packaged systemd unit.
+ * Each config is loaded and its connector built here; invalid configs are
+ * logged and skipped. Returns 0 if all workers stopped cleanly, -1 otherwise
+ * (including when no config was valid). */
+int tdot_runtime_run_configs(const char *const *paths, size_t npaths,
+                             const tdot_run_opts_t *opts);
+
 #ifdef __cplusplus
 }
 #endif

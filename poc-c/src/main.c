@@ -5,11 +5,13 @@
  *   tedge-dot write -c <config> -d <device> -p <point> --value <v>
  *   tedge-dot run   -c <config> [--output stdout|mqtt] [--duration 10s]
  */
+#include <dirent.h>
 #include <fnmatch.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -298,16 +300,64 @@ static int cmd_write(const args_t *a) {
     return rc == 0 ? 0 : 1;
 }
 
-static int cmd_run(const args_t *a) {
-    tdot_config_t *cfg;
-    tdot_connector_t *conn;
-    if (setup(a, &cfg, &conn) != 0)
+static int cmp_str(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+/* Run every *.toml in a directory, one connector per file, in one process
+ * (the packaged systemd unit points ExecStart at /etc/tedge/plugins/ot). */
+static int run_dir(const char *dir, const tdot_run_opts_t *opts) {
+    DIR *d = opendir(dir);
+    if (!d) {
+        fprintf(stderr, "error: cannot open config directory %s\n", dir);
         return 1;
+    }
+    char **paths = NULL;
+    size_t n = 0, cap = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        const char *dot = strrchr(e->d_name, '.');
+        if (!dot || strcmp(dot, ".toml") != 0)
+            continue;
+        if (n == cap) {
+            cap = cap ? cap * 2 : 8;
+            paths = realloc(paths, cap * sizeof *paths);
+        }
+        char full[1024];
+        snprintf(full, sizeof full, "%s/%s", dir, e->d_name);
+        paths[n++] = strdup(full);
+    }
+    closedir(d);
+    if (n == 0) {
+        fprintf(stderr, "error: no *.toml configs in %s\n", dir);
+        free(paths);
+        return 1;
+    }
+    qsort(paths, n, sizeof *paths, cmp_str); /* stable, predictable order */
+
+    int rc = tdot_runtime_run_configs((const char *const *)paths, n, opts);
+    for (size_t i = 0; i < n; i++)
+        free(paths[i]);
+    free(paths);
+    return rc == 0 ? 0 : 1;
+}
+
+static int cmd_run(const args_t *a) {
     tdot_run_opts_t opts = {
         .output = strcmp(a->output, "stdout") == 0 ? TDOT_OUTPUT_STDOUT
                                                    : TDOT_OUTPUT_MQTT,
         .duration_s = a->duration_s,
     };
+
+    /* A directory argument runs every connector config it contains. */
+    struct stat st;
+    if (a->config && stat(a->config, &st) == 0 && S_ISDIR(st.st_mode))
+        return run_dir(a->config, &opts);
+
+    tdot_config_t *cfg;
+    tdot_connector_t *conn;
+    if (setup(a, &cfg, &conn) != 0)
+        return 1;
     int rc = tdot_runtime_run(conn, cfg, &opts);
     conn->destroy(conn);
     tdot_config_free(cfg);
