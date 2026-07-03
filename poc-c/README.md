@@ -1,7 +1,10 @@
 # tedge-dot C proof of concept
 
-A C11 reimplementation of the tedge-dot SDK framework plus the **Modbus**
-(libmodbus) and **OPC UA** (open62541) connectors, exploring two questions:
+A C11 reimplementation of the tedge-dot SDK framework plus all five
+connectors — **Modbus** (libmodbus), **OPC UA** (open62541), **CAN bus**
+(SocketCAN + a minimal DBC parser), **CANopen** (expedited SDO client
+directly over SocketCAN), and **PROFIBUS-DP** (a minimal built-in DP-V0
+class-1 master, TCP transport) — exploring two questions:
 
 1. how much smaller do the binaries get compared to the Rust implementation?
 2. how feasible is a path to microcontrollers?
@@ -20,8 +23,12 @@ SDK's golden vectors).
 | `sdk/src/` | config loader (tomlc99), decode/encode, envelope builder (cJSON), poll-loop runtime (mosquitto) | `crates/sdk` |
 | `connectors/modbus/` | libmodbus connector (TCP + RTU, 4 tables, typed decode, writes) | `crates/connector-modbus` |
 | `connectors/opcua/` | open62541 connector (client session, node-id points, typed reads/writes) | `crates/connector-opcua` |
+| `connectors/canbus/` | SocketCAN connector + minimal DBC parser (BO_/SG_, Intel & Motorola layouts) | `crates/connector-canbus` |
+| `connectors/canopen/` | expedited SDO client over raw SocketCAN (no CANopen library) | `crates/connector-canopen` |
+| `connectors/profibus/` | minimal DP-V0 master (Diag→Prm→Cfg→Data_Exchange, bus thread, tcp:// transport) | `crates/connector-profibus` |
 | `src/main.c` | `read` / `write` / `run` CLI | `src/main.rs` |
 | `tests/golden.c` | conformance runner for `crates/sdk/conformance/vectors.json` | `tests/golden_vectors.rs` |
+| `ci/smoke.sh` | e2e smoke: connector ⇄ simulator ⇄ broker, per protocol (used by the `c-poc` CI job) | conformance/e2e suites |
 | `third_party/tomlc99/` | vendored TOML parser (MIT) | serde/toml |
 
 The Rust `Connector` trait maps to a C vtable (`tdot_connector_t` in
@@ -33,8 +40,11 @@ the C analogue of the cargo feature flags.
 
 ## Build & run
 
-Dependencies: cmake, pkg-config, libmodbus, open62541, mosquitto (client lib),
-cJSON. On macOS: `brew install libmodbus open62541 mosquitto cjson`.
+Dependencies: cmake, pkg-config, libmodbus, mosquitto (client lib), cJSON.
+open62541 is used from the system when installed, otherwise CMake builds
+v1.5.5 from source (client-only feature set) via FetchContent. The CAN
+connectors are Linux-only (SocketCAN) and compile-gated automatically.
+On macOS: `brew install libmodbus open62541 mosquitto cjson`.
 
 ```sh
 cmake -B build -G Ninja        # MinSizeRel by default
@@ -51,7 +61,7 @@ cmake --build build
 ./build/tedge-dot-golden ../crates/sdk/conformance/vectors.json
 ```
 
-## What was verified (2026-07-02, against the demo simulators)
+## What was verified (2026-07-02/03, against the demo simulators)
 
 - **Modbus**: all six demo points read correctly (uint16 17001, scaled 17.001 °C
   with `decimal_shift = -3`, uint32 617001, float32 404.17, coil), Modbus
@@ -59,6 +69,17 @@ cmake --build build
   coil write round-trips.
 - **OPC UA**: float64/uint32/int32/bool reads, `BadNodeIdUnknown` →
   `quality: "bad"`, int32 + bool write round-trips.
+- **CAN bus** (Linux/vcan0): RPM 2500, coolant 85, brake true decoded from the
+  sim's ENGINE_STATUS broadcasts via the DBC; a write sends the encoded
+  read-modify-write frame on the bus. DBC bit-layout logic (Intel + Motorola,
+  signed, encode round-trips) covered by a self-test against `sim/test.dbc`.
+- **CANopen** (Linux/vcan0): SDO expedited uploads (uint16 1234, int16 -100,
+  uint8 1) and a download round-trip (`digital_out` 1→0→1); SDO aborts map to
+  `quality: "bad"` with the abort code.
+- **PROFIBUS-DP** (TCP): full Diag→Set_Prm→Chk_Cfg→Data_Exchange bring-up
+  against the DP-V0 slave sim; seeded inputs decode (0x0A, bit 3, 0x1234,
+  100), output-byte write lands in the slave's PI_Q, and back-to-back
+  sessions reconnect cleanly.
 - **MQTT contract**: retained health (`up`/`down` + last-will), retained
   capability descriptor, retained per-device link status, non-retained samples
   on `te/device/<dev>/ot/<protocol>/sample/<point>`, and inbound
@@ -79,19 +100,19 @@ totals on this machine:
 | | size |
 |---|---|
 | Rust `tedge-dot` release binary (aarch64-linux, 5 protocols, static) | **12 MB** |
-| C PoC binary, modbus + opcua (arm64 macOS, MinSizeRel) | **108 KB** |
+| **C PoC binary, all 5 protocols, open62541 statically linked (x86_64 Linux, MinSizeRel)** | **457 KB** |
+| C PoC binary, modbus + opcua, shared open62541 (arm64 macOS) | 108 KB |
 | C PoC binary, modbus only | 91 KB |
 | + libmodbus.dylib | 75 KB |
-| + libopen62541.dylib | 1.7 MB |
 | + libmosquitto.dylib | 160 KB |
 | + libcjson.dylib | 88 KB |
-| **C total (binary + all four libs)** | **≈ 2.1 MB** |
 
-So roughly **6× smaller** all-in, and the app code itself is ~100 KB. On a
-distro where libmodbus/mosquitto are already installed (most gateways running
-thin-edge.io have libmosquitto), the marginal install is the binary plus
-open62541. open62541 can also be compiled with reduced feature sets
-(`UA_ENABLE_*=OFF`, amalgamated single-file build) down to a few hundred KB.
+The headline number: **all five protocols in 457 KB** (open62541 built
+client-only and statically linked; libmodbus/mosquitto/cJSON still dynamic,
+~320 KB more if counted) — about **25× smaller** than the Rust binary. The
+canbus/canopen/profibus connectors add ~40 KB total because their protocol
+logic (DBC parsing, SDO framing, DP-V0 master) is implemented directly rather
+than pulled in as libraries.
 
 ## Microcontroller path
 
@@ -107,6 +128,10 @@ What this PoC shows about the MCU question:
 - **The Modbus connector would swap libmodbus for a bare-metal Modbus layer**
   on MCUs (libmodbus assumes POSIX sockets/termios). Modbus framing is simple
   enough that this is a small, well-bounded port.
+- **CANopen and PROFIBUS already have zero library dependencies** — the SDO
+  client and the DP-V0 master are plain C over a socket/byte stream, so on an
+  MCU only the transport (CAN driver / UART) needs swapping. The DBC parser
+  is libc-only.
 - **The runtime (poll loop, backoff, scheduler) is a single thread with no
   dynamic task machinery** — it maps naturally onto an RTOS task. The MQTT
   output would use an embedded client (e.g. coreMQTT) behind the same
@@ -116,8 +141,17 @@ What this PoC shows about the MCU question:
 
 - **Typed mode only** — `mode = "raw"` points are not implemented (raw hex is
   still echoed in every envelope).
-- **Polling only** — no OPC UA monitored-item push subscriptions
-  (`subscribe = false` fallback path is what runs).
+- **Polling only** — no OPC UA monitored-item push subscriptions, and the
+  push-based canbus connector is rendered as drain-into-cache polling
+  (`read_point` waits up to ~1.2 s for the first broadcast of a frame).
+- **CANopen is expedited-SDO only** (values ≤ 4 bytes; segmented transfers
+  report a bad sample), and **PROFIBUS is tcp:// transport only** (no serial
+  PHY, no FDL token timing — fine for the sim, not yet for a multi-master
+  RS-485 bus).
+- **No management verbs / hot reload** — the runtime does not implement
+  `set-config` / `define-device` / `remove-device`, so the full Rust
+  conformance suite's B8/B9 checks would fail by design; the `c-poc` CI job
+  runs golden vectors + a live simulator smoke instead.
 - **No OPC UA security** — `security_policy = "None"` only (open62541
   supports Basic256Sha256 etc.; wiring it up is config + cert plumbing).
 - **Bitfield extraction** exists in the SDK (`tdot_bitfield_extract`, golden

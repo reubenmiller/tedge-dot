@@ -60,6 +60,15 @@ tdot_connector_t *tdot_connector_modbus_new(void);
 #ifdef TDOT_FEATURE_OPCUA
 tdot_connector_t *tdot_connector_opcua_new(void);
 #endif
+#ifdef TDOT_FEATURE_CANBUS
+tdot_connector_t *tdot_connector_canbus_new(void);
+#endif
+#ifdef TDOT_FEATURE_CANOPEN
+tdot_connector_t *tdot_connector_canopen_new(void);
+#endif
+#ifdef TDOT_FEATURE_PROFIBUS
+tdot_connector_t *tdot_connector_profibus_new(void);
+#endif
 
 /* Returns NULL when the protocol is unknown or compiled out. */
 tdot_connector_t *tdot_connector_factory(const char *protocol);
