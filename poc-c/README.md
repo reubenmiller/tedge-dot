@@ -15,6 +15,41 @@ implementation: same TOML config files (the untouched configs in
 sample/command envelopes, same decode semantics (validated against the Rust
 SDK's golden vectors).
 
+## Packaging & releases
+
+`.github/workflows/release-c.yaml` builds, tests and packages the C build as a
+**drop-in replacement** for the Rust `tedge-dot` package: same `/usr/bin/tedge-dot`
+binary, same `tedge-dot.service`, same `/etc/tedge/plugins/ot/` config layout,
+so the C package (`tedge-dot-c`) *conflicts* with the Rust one — install one or
+the other. It additionally ships the **PROFIBUS** connector, which the Rust
+package omits.
+
+- Trigger it manually (**workflow_dispatch**) for a snapshot: `.deb` / `.rpm` /
+  `.apk` + tarballs for `amd64` and `arm64`, uploaded as run artifacts.
+- Push a **`c-v*`** tag (e.g. `c-v0.1.0`) for a GitHub pre-release. (The Rust
+  release workflow ignores `c-v*` tags.)
+
+Packaging is done with **nfpm** rather than goreleaser: goreleaser's headline
+feature is cross-compiling Go/Rust with zig, but the C build links *system*
+shared libraries (`libmodbus`, `libmosquitto`, `libcjson`) — which zig can't
+cross-link without target-arch copies of each — so it is built **natively** on
+`ubuntu-24.04` and `ubuntu-24.04-arm` runners instead. `open62541` is built
+from source (client-only) and statically linked, so it is not a runtime
+dependency; the runtime deps are `libmodbus5`, `libmosquitto1`, `libcjson1`
+(Debian/Ubuntu names; the nfpm config maps rpm/apk names too).
+
+Local packaging (needs `nfpm`, and the config expects `poc-c/build/tedge-dot`):
+
+```sh
+cmake -B poc-c/build -S poc-c -G Ninja && cmake --build poc-c/build
+ARCH=$(dpkg --print-architecture) VERSION=0.1.0 \
+  nfpm pkg -f poc-c/packaging/nfpm.yaml -p deb -t dist/
+```
+
+The packaged systemd unit runs `tedge-dot run /etc/tedge/plugins/ot` — a
+**directory**, so one process runs every connector config it contains (one
+worker thread per file), matching the Rust single-service model.
+
 ## Layout
 
 | Path | Contents | Rust counterpart |

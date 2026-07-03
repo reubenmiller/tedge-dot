@@ -1,0 +1,128 @@
+# nfpm configuration for the C proof-of-concept build of tedge-dot.
+# Docs: https://nfpm.goreleaser.com
+#
+# Unlike the Rust build (packaged by goreleaser, which cross-compiles with
+# zig), the C build links system shared libraries and is therefore built
+# natively per architecture; this file is run once per arch by
+# .github/workflows/release-c.yaml with ARCH and VERSION set in the env.
+#
+# The package is a drop-in replacement for the Rust `tedge-dot` package: same
+# binary path, same systemd unit, same config layout — so it conflicts with it
+# and only one can be installed at a time. It additionally ships the PROFIBUS
+# connector, which the Rust package omits.
+
+name: tedge-dot-c
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+version_schema: semver
+section: default
+priority: extra
+maintainer: thin-edge.io <info@thin-edge.io>
+description: |
+  thin-edge.io OT protocol connectors (C proof of concept).
+  Modbus, OPC UA, CAN bus, CANopen and PROFIBUS-DP in one small native binary.
+homepage: https://github.com/thin-edge/tedge-dot
+license: Apache-2.0
+
+# Drop-in for the Rust package: same files, so the two cannot coexist.
+provides:
+  - tedge-dot
+conflicts:
+  - tedge-dot
+replaces:
+  - tedge-dot
+
+# The connectors dynamically link these; open62541 is statically linked, so it
+# is not a runtime dependency. Package names are Debian/Ubuntu; the rpm/apk
+# overrides use each ecosystem's names (best effort — adjust per distro).
+depends:
+  - libmodbus5
+  - libmosquitto1
+  - libcjson1
+overrides:
+  rpm:
+    depends:
+      - libmodbus
+      - mosquitto
+      - libcjson
+  apk:
+    depends:
+      - libmodbus
+      - mosquitto-libs
+      - cjson
+
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
+  preremove: packaging/scripts/preremove.sh
+  postremove: packaging/scripts/postremove.sh
+
+contents:
+  # The single native binary (also a standalone read/write CLI).
+  - src: poc-c/build/tedge-dot
+    dst: /usr/bin/tedge-dot
+    file_info: { owner: root, group: root, mode: 0755 }
+
+  # The service (running as tedge) persists management-command config changes
+  # back into this directory, so it must be writable by tedge.
+  - dst: /etc/tedge/plugins/ot
+    type: dir
+    file_info: { owner: tedge, group: tedge, mode: 0755 }
+
+  # Default connector configs (no devices configured): the service starts and
+  # stays active on a fresh install. Add [[device]] sections (or copy a demo
+  # config from /usr/share/tedge-dot/demo/) and restart the service.
+  - src: packaging/config/modbus.toml
+    dst: /etc/tedge/plugins/ot/modbus.toml
+    type: config|noreplace
+    file_info: { owner: tedge, group: tedge, mode: 0644 }
+  - src: packaging/config/opcua.toml
+    dst: /etc/tedge/plugins/ot/opcua.toml
+    type: config|noreplace
+    file_info: { owner: tedge, group: tedge, mode: 0644 }
+  - src: packaging/config/canbus.toml
+    dst: /etc/tedge/plugins/ot/canbus.toml
+    type: config|noreplace
+    file_info: { owner: tedge, group: tedge, mode: 0644 }
+  - src: packaging/config/canopen.toml
+    dst: /etc/tedge/plugins/ot/canopen.toml
+    type: config|noreplace
+    file_info: { owner: tedge, group: tedge, mode: 0644 }
+  # PROFIBUS default is C-only (see poc-c/packaging/config/profibus.toml).
+  - src: poc-c/packaging/config/profibus.toml
+    dst: /etc/tedge/plugins/ot/profibus.toml
+    type: config|noreplace
+    file_info: { owner: tedge, group: tedge, mode: 0644 }
+
+  # Demo connector configs (one per OT protocol), paired with the simulators
+  # in demo/docker-compose.yaml. Copy to /etc/tedge/plugins/ot/ to run them.
+  - src: demo/config/modbus.toml
+    dst: /usr/share/tedge-dot/demo/modbus.toml
+    file_info: { owner: tedge, group: tedge, mode: 0644 }
+  - src: demo/config/opcua.toml
+    dst: /usr/share/tedge-dot/demo/opcua.toml
+    file_info: { owner: tedge, group: tedge, mode: 0644 }
+  - src: demo/config/canbus.toml
+    dst: /usr/share/tedge-dot/demo/canbus.toml
+    file_info: { owner: tedge, group: tedge, mode: 0644 }
+  - src: demo/config/canopen.toml
+    dst: /usr/share/tedge-dot/demo/canopen.toml
+    file_info: { owner: tedge, group: tedge, mode: 0644 }
+  - src: demo/config/profibus.toml
+    dst: /usr/share/tedge-dot/demo/profibus.toml
+    file_info: { owner: tedge, group: tedge, mode: 0644 }
+
+  # DBC database describing the CAN signals the canbus simulator emits.
+  - src: connectors/canbus/sim/test.dbc
+    dst: /usr/share/tedge-dot/demo/can/test.dbc
+    file_info: { owner: tedge, group: tedge, mode: 0644 }
+
+  # Simulator stack (pulls prebuilt images from GHCR).
+  - src: demo/docker-compose.yaml
+    dst: /usr/share/tedge-dot/demo/docker-compose.yaml
+    file_info: { owner: tedge, group: tedge, mode: 0644 }
+
+  # systemd unit: one process runs every config in /etc/tedge/plugins/ot.
+  - src: packaging/tedge-dot.service
+    dst: /lib/systemd/system/tedge-dot.service
+    file_info: { owner: root, group: root, mode: 0644 }
