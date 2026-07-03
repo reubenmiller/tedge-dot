@@ -1,0 +1,141 @@
+name: Release (C PoC)
+
+# Build, test and release the C proof-of-concept build (poc-c/). Kept separate
+# from the Rust release (release.yaml) because the C build links system shared
+# libraries and so is built natively per architecture rather than
+# cross-compiled with zig.
+#
+#   * push a tag matching c-v*  -> GitHub pre-release with deb/rpm/apk + tarballs
+#     (release.yaml ignores c-v* tags, so a C tag does not trigger the Rust
+#     release);
+#   * run manually (workflow_dispatch) -> snapshot: same artifacts, uploaded to
+#     the run, no GitHub release.
+
+on:
+  push:
+    tags: ["c-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & package (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build deps + nfpm
+        run: |
+          sudo apt-get update
+          # python3 is needed by open62541's from-source build (code generation).
+          sudo apt-get install -y cmake ninja-build pkg-config gcc git python3 \
+            libmodbus-dev libmosquitto-dev libcjson-dev
+          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' \
+            | sudo tee /etc/apt/sources.list.d/goreleaser.list
+          sudo apt-get update
+          sudo apt-get install -y nfpm
+
+      - name: Build (MinSizeRel, all five protocols)
+        run: |
+          cmake -B poc-c/build -S poc-c -G Ninja
+          cmake --build poc-c/build
+
+      - name: Test (golden decode vectors, shared with the Rust SDK)
+        run: ctest --test-dir poc-c/build --output-on-failure
+
+      - name: Compute version
+        id: ver
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            v="${{ github.ref_name }}"; v="${v#c-v}"; v="${v#v}"
+          else
+            v="0.0.0-dev.$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Packaging version $v"
+
+      - name: Package (deb / rpm / apk + tarball)
+        env:
+          ARCH: ${{ matrix.arch }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          mkdir -p dist
+          for f in deb rpm apk; do
+            nfpm pkg -f poc-c/packaging/nfpm.yaml -p "$f" -t dist/
+          done
+          staging="tedge-dot-c_${VERSION}_linux_${ARCH}"
+          mkdir -p "pkgroot/$staging"
+          cp poc-c/build/tedge-dot "pkgroot/$staging/"
+          cp poc-c/README.md "pkgroot/$staging/"
+          cp -r poc-c/packaging/config "pkgroot/$staging/config-defaults"
+          tar -czf "dist/${staging}.tar.gz" -C pkgroot "$staging"
+          ls -l dist
+
+      - name: Package smoke (inspect, install, run)
+        run: |
+          deb=$(ls dist/*.deb)
+          echo "== control metadata =="
+          dpkg-deb -I "$deb" | grep -E 'Package:|Version:|Architecture:|Depends:|Conflicts:|Provides:'
+          # A real thin-edge host already has the tedge user; create it so the
+          # package's tedge-owned config files and service user resolve cleanly.
+          sudo groupadd --system tedge 2>/dev/null || true
+          sudo useradd --system --gid tedge --no-create-home --shell /usr/sbin/nologin tedge 2>/dev/null || true
+          sudo apt-get install -y "./$deb"
+          echo "== packaged binary runs =="
+          command -v tedge-dot
+          tedge-dot run /nonexistent 2>&1 | head -1 || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: GitHub pre-release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: packages-*
+          merge-multiple: true
+          path: dist
+      - name: Create pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ls -l dist
+          gh release create "${{ github.ref_name }}" dist/* \
+            --repo "${{ github.repository }}" \
+            --title "tedge-dot C PoC ${{ github.ref_name }}" \
+            --prerelease \
+            --notes "$(cat <<'NOTES'
+          Experimental **C proof-of-concept** build of tedge-dot — all five OT
+          connectors (Modbus, OPC UA, CAN bus, CANopen and **PROFIBUS-DP**,
+          which the Rust package omits) in one small native binary.
+
+          Packages are a **drop-in replacement** for the Rust `tedge-dot`
+          package (same binary path, systemd unit and config layout), so they
+          conflict with it — install one or the other. Built natively for
+          `amd64` and `arm64`.
+
+          Runtime dependencies (Debian/Ubuntu): `libmodbus5`, `libmosquitto1`,
+          `libcjson1` (open62541 is statically linked). See `poc-c/README.md`
+          for scope and caveats.
+          NOTES
+          )"

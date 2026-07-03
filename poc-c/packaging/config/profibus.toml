@@ -1,0 +1,39 @@
+# Default PROFIBUS-DP connector configuration installed by the tedge-dot-c
+# package. (The C build includes PROFIBUS; the Rust package does not, because
+# its serial dependency does not cross-compile.)
+#
+# No devices are configured out of the box, so the service starts and stays
+# active on a fresh install. Add `[[device]]` sections and restart the service:
+#
+#   sudo systemctl restart tedge-dot
+
+[connector]
+protocol      = "profibus"
+service_name  = "tedge-dot-profibus"
+poll_interval = "500ms"
+log_level     = "info"
+
+[mqtt]
+host = "127.0.0.1"
+port = 1883
+
+# Shared bus parameters. The PoC connector speaks serial-over-TCP only
+# (port = "tcp://host:port"); point it at a serial-to-TCP device server or the
+# demo simulator.
+[connection]
+port           = "tcp://127.0.0.1:9200"
+baudrate       = 19200
+master_address = 2
+slot_bits      = 300
+
+# Add peripherals below, for example:
+#
+# [[device]]
+# name             = "remote_io"
+# protocol_address = { station_address = 7, ident_number = 0, input_bytes = 8, output_bytes = 4 }
+#
+#   [[device.point]]
+#   id       = "di_byte0"
+#   datatype = "uint8"
+#   access   = "read"
+#   address  = { direction = "input", byte_offset = 0 }

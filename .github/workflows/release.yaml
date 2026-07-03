@@ -2,7 +2,9 @@ name: Release
 
 on:
   push:
-    tags: ["*"]
+    # All tags except the C proof-of-concept release tags (c-v*), which are
+    # handled by release-c.yaml.
+    tags: ["*", "!c-v*"]
   # Manual runs build a snapshot (no GitHub release, no publish) so the
   # pipeline can be tested before tagging.
   workflow_dispatch:

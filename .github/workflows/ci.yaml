@@ -57,6 +57,46 @@ jobs:
             cargo +nightly fuzz run "$t" -- -max_total_time=30
           done
 
+  c-poc:
+    name: C PoC (${{ matrix.protocol }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        protocol: [modbus, opcua, canbus, canopen, profibus]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install C toolchain + libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build pkg-config \
+            libmodbus-dev libmosquitto-dev libcjson-dev \
+            mosquitto mosquitto-clients jq
+          # open62541 is built from source by CMake (FetchContent) when no
+          # distro package is found, so it is deliberately not installed here.
+      - name: Load vcan kernel module (SocketCAN suites)
+        if: matrix.protocol == 'canbus' || matrix.protocol == 'canopen'
+        run: |
+          sudo apt-get install -y linux-modules-extra-$(uname -r)
+          sudo modprobe vcan
+      - name: Build
+        run: |
+          cmake -B poc-c/build -S poc-c -G Ninja
+          cmake --build poc-c/build
+      - name: Golden decode vectors (shared with the Rust SDK)
+        run: ctest --test-dir poc-c/build --output-on-failure
+      - name: Start MQTT broker
+        run: |
+          sudo systemctl start mosquitto || mosquitto -d -p 1883
+          timeout 10 sh -c 'until nc -z 127.0.0.1 1883; do sleep 0.5; done'
+      - name: Start protocol simulator
+        run: docker compose -f connectors/${{ matrix.protocol }}/docker-compose.yaml up -d --build --wait simulator
+      - name: Smoke test against simulator + broker
+        run: ./poc-c/ci/smoke.sh ${{ matrix.protocol }}
+      - name: Connector log + simulator log on failure
+        if: failure()
+        run: docker compose -f connectors/${{ matrix.protocol }}/docker-compose.yaml logs simulator || true
+
   conformance:
     name: Conformance (${{ matrix.protocol }})
     runs-on: ubuntu-latest

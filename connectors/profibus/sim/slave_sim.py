@@ -22,6 +22,7 @@ import argparse
 import logging
 import os
 import select
+import socket
 import struct
 import sys
 import time
@@ -68,7 +69,96 @@ def fcs(data: bytes) -> int:
 
 # ── Frame parsing ─────────────────────────────────────────────────────────────
 
-def read_frame(port: serial.Serial, timeout_s: float = 0.5) -> bytes | None:
+class TcpSerial:
+    """Serial-over-TCP server transport with the small subset of the pyserial
+    API this simulator uses (fileno/read/write/close).
+
+    Serves one client at a time; a disconnect simply waits for the next
+    connection. This replaces the socat pty/TCP bridge chain, whose
+    listener wedged after the first client disconnected (each session after
+    the first hung until the container restarted).
+    """
+
+    def __init__(self, port: int):
+        self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.srv.bind(("0.0.0.0", port))
+        self.srv.listen(1)
+        self.conn: socket.socket | None = None
+
+    def fileno(self) -> int:
+        # select()s on the client when connected, the listener otherwise
+        return self.conn.fileno() if self.conn else self.srv.fileno()
+
+    def poll_accept(self):
+        """Switch to a newly arrived client, dropping the current one.
+
+        Docker's userland proxy does not always forward the client's FIN, so
+        a disconnect can be invisible; without this, the dead connection
+        would be served forever and new clients would hang in the backlog.
+        Called from the main loop between frames.
+        """
+        ready, _, _ = select.select([self.srv], [], [], 0)
+        if not ready:
+            return
+        conn, peer = self.srv.accept()
+        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        if self.conn:
+            log.info("new tcp client — dropping the previous connection")
+            self._drop()
+        self.conn = conn
+        log.info("tcp client connected: %s:%d", *peer)
+
+    def _drop(self):
+        if self.conn:
+            try:
+                self.conn.close()
+            except OSError:
+                pass
+            self.conn = None
+            log.info("tcp client disconnected — waiting for the next one")
+
+    def read(self, n: int) -> bytes:
+        if self.conn is None:
+            self.conn, peer = self.srv.accept()
+            self.conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            log.info("tcp client connected: %s:%d", *peer)
+            return b""
+        # pyserial's read(n) returns up to n bytes within the timeout; frames
+        # may arrive fragmented, so accumulate until n bytes or the deadline.
+        buf = bytearray()
+        deadline = time.monotonic() + 0.2
+        while len(buf) < n:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            ready, _, _ = select.select([self.conn], [], [], left)
+            if not ready:
+                break
+            try:
+                chunk = self.conn.recv(n - len(buf))
+            except OSError:
+                chunk = b""
+            if not chunk:
+                self._drop()
+                break
+            buf.extend(chunk)
+        return bytes(buf)
+
+    def write(self, data: bytes):
+        if self.conn is None:
+            return
+        try:
+            self.conn.sendall(data)
+        except OSError:
+            self._drop()
+
+    def close(self):
+        self._drop()
+        self.srv.close()
+
+
+def read_frame(port, timeout_s: float = 0.5) -> bytes | None:
     """Read one complete PROFIBUS frame from the serial port.
     Returns the raw bytes (start delimiter through ED) or None on timeout."""
     deadline = time.monotonic() + timeout_s
@@ -312,19 +402,24 @@ def run(port_path: str, address: int, baudrate: int, input_bytes: int, output_by
 
     slave = DPSlave(address, ident_number=0, input_bytes=input_bytes, output_bytes=output_bytes)
 
-    port = serial.Serial(
-        port=port_path,
-        baudrate=baudrate,
-        bytesize=serial.EIGHTBITS,
-        parity=serial.PARITY_EVEN,
-        stopbits=serial.STOPBITS_ONE,
-        timeout=0.1,
-    )
-
-    log.info("serial port %s opened — slave ready", port_path)
+    if port_path.startswith("tcp-listen://"):
+        port = TcpSerial(int(port_path.removeprefix("tcp-listen://")))
+        log.info("listening on %s — slave ready", port_path)
+    else:
+        port = serial.Serial(
+            port=port_path,
+            baudrate=baudrate,
+            bytesize=serial.EIGHTBITS,
+            parity=serial.PARITY_EVEN,
+            stopbits=serial.STOPBITS_ONE,
+            timeout=0.1,
+        )
+        log.info("serial port %s opened — slave ready", port_path)
 
     try:
         while True:
+            if isinstance(port, TcpSerial):
+                port.poll_accept()
             frame = read_frame(port)
             if frame is None:
                 continue
