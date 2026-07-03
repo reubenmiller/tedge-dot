@@ -20,10 +20,14 @@ services:
       context: ../..
       dockerfile: connectors/profibus/sim/Dockerfile
     restart: unless-stopped
+    ports:
+      # The slave's serial-over-TCP line, for clients running on the host
+      # (e.g. the C PoC smoke test); in-compose clients use simulator:9200.
+      - "9200:9200"
     healthcheck:
-      # The slave holds its pty end for its whole lifetime. (Probing TCP :9200
-      # would steal the single-connection socat listener from the connector.)
-      test: ["CMD", "test", "-e", "/tmp/profibus/ttySlave"]
+      # Check the TCP listener exists without connecting to it (a connect
+      # probe would preempt the connector's single active session).
+      test: ["CMD", "grep", "-q", ":23F0", "/proc/net/tcp"]
       interval: 3s
       timeout: 2s
       retries: 10
