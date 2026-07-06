@@ -1,0 +1,13 @@
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_:
+
+BO_ 2364539904 EEC1: 8 Vector__XXX
+ SG_ EngineSpeed : 24|16@1+ (0.125,0) [0|8031.875] "rpm" Vector__XXX
+
+BO_ 2566843904 ET1: 8 Vector__XXX
+ SG_ EngineCoolantTemperature : 0|8@1+ (1,-40) [-40|210] "degC" Vector__XXX

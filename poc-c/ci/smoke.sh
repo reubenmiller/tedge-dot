@@ -47,6 +47,11 @@ canopen)
     point=analog_in expect=1234 device=plc1
     write_point=digital_out write_value=1 write_device=plc1
     ;;
+j1939)
+    # EEC1 EngineSpeed raw 8000 → ×0.125 transform = 1000 rpm. Read-only.
+    point=engine_speed expect=1000 device=engine
+    sed -i.bak "s|/usr/share/tedge-dot/demo/j1939.dbc|$repo/connectors/j1939/sim/j1939.dbc|" "$config"
+    ;;
 profibus)
     point=ai0_raw expect=4660 device=remote_io
     write_point=do_byte0 write_value=5 write_device=remote_io

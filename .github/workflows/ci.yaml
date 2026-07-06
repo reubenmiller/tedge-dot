@@ -63,7 +63,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        protocol: [modbus, opcua, canbus, canopen, profibus]
+        protocol: [modbus, opcua, canbus, canopen, j1939, profibus]
     steps:
       - uses: actions/checkout@v4
       - name: Install C toolchain + libraries
@@ -75,7 +75,7 @@ jobs:
           # open62541 is built from source by CMake (FetchContent) when no
           # distro package is found, so it is deliberately not installed here.
       - name: Load vcan kernel module (SocketCAN suites)
-        if: matrix.protocol == 'canbus' || matrix.protocol == 'canopen'
+        if: matrix.protocol == 'canbus' || matrix.protocol == 'canopen' || matrix.protocol == 'j1939'
         run: |
           sudo apt-get install -y linux-modules-extra-$(uname -r)
           sudo modprobe vcan

@@ -1,0 +1,29 @@
+# Conformance manifest for the J1939 connector.
+#
+# NOTE: j1939 is a C-PoC-only connector (poc-c/connectors/j1939) — there is no
+# Rust protocol module for it. This manifest exists because every connectors/*/
+# directory must ship one (ot-conformance tests/all_manifests.rs), and it
+# documents the connector's contract. It is NOT wired into the Rust `conformance`
+# or `e2e` CI matrices (those build Rust modules); the C PoC is covered by the
+# `c-poc` CI job: shared golden decode vectors (ctest) for Layer 2, and the vcan
+# simulator + poc-c/ci/smoke.sh for behaviour. The declared simulator kind has no
+# built-in harness implementation, so the Rust behavioural layer would skip it
+# anyway (like canbus/canopen — vcan is Linux-only).
+
+[connector]
+protocol    = "j1939"
+modes       = ["typed"]
+datatypes   = ["bool", "int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64", "float32", "float64"]
+point_kinds = ["spn"]
+verbs       = []
+# Phase 1 renders J1939 broadcasts through the poll runtime (drain-and-cache).
+features    = ["polling"]
+subscribe   = false
+
+[simulator]
+# Linux virtual CAN (vcan0) broadcasting J1939 PGNs — served by the Dockerised
+# e2e stack, not built into the Rust harness.
+kind  = "j1939-vcan"
+image = "connectors/j1939/sim"
+# The J1939 DBC is the seed: it defines PGN/SPN layout & expected decode values.
+seed  = "sim/j1939.dbc"

@@ -15,9 +15,11 @@ option(TDOT_PROFIBUS "Build the PROFIBUS-DP connector (built-in DP master)" ON)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   option(TDOT_CANBUS "Build the CAN bus connector (SocketCAN + DBC)" ON)
   option(TDOT_CANOPEN "Build the CANopen connector (SDO over SocketCAN)" ON)
+  option(TDOT_J1939 "Build the J1939 connector (Open-SAE-J1939, MIT)" ON)
 else()
   set(TDOT_CANBUS OFF)
   set(TDOT_CANOPEN OFF)
+  set(TDOT_J1939 OFF)
 endif()
 
 find_package(PkgConfig REQUIRED)
@@ -82,6 +84,36 @@ endif()
 if(TDOT_CANOPEN)
   target_sources(tedge_dot_sdk PRIVATE connectors/canopen/connector_canopen.c)
   target_compile_definitions(tedge_dot_sdk PUBLIC TDOT_FEATURE_CANOPEN)
+endif()
+
+if(TDOT_J1939)
+  # Vendor Open-SAE-J1939 (MIT) via FetchContent, download-only: SOURCE_SUBDIR
+  # points at a non-existent dir so the library's own CMake is not run — we
+  # compile its Src/*.c straight into the SDK with the SocketCAN platform
+  # selected (non-selected backends are #ifdef'd out by the platform macro).
+  include(FetchContent)
+  FetchContent_Declare(open_sae_j1939
+    GIT_REPOSITORY https://github.com/DanielMartensson/Open-SAE-J1939.git
+    GIT_TAG 315a9556692c2c58fe6909749811bb380698ef36 # pinned (2026-06-25)
+    SOURCE_SUBDIR _download_only_)
+  FetchContent_MakeAvailable(open_sae_j1939)
+  file(GLOB_RECURSE J1939_LIB_SRCS ${open_sae_j1939_SOURCE_DIR}/Src/*.c)
+  # Exclude the library's example entry point (has its own main(), guarded out
+  # under SOCKETCAN but excluded for cleanliness).
+  list(FILTER J1939_LIB_SRCS EXCLUDE REGEX "/Main\\.c$")
+
+  target_sources(tedge_dot_sdk PRIVATE
+                 connectors/j1939/connector_j1939.c ${J1939_LIB_SRCS})
+  # Reuse the canbus DBC parser for SPN bit layout (add it once if canbus is off).
+  if(NOT TDOT_CANBUS)
+    target_sources(tedge_dot_sdk PRIVATE connectors/canbus/dbc.c)
+  endif()
+  target_include_directories(tedge_dot_sdk PRIVATE
+                             ${open_sae_j1939_SOURCE_DIR}/Src
+                             connectors/canbus)
+  target_compile_definitions(tedge_dot_sdk PUBLIC
+                             TDOT_FEATURE_J1939
+                             OPENSAE_J1939_TARGET_PLATFORM=SOCKETCAN)
 endif()
 
 if(TDOT_PROFIBUS)

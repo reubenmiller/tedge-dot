@@ -66,6 +66,9 @@ tdot_connector_t *tdot_connector_canbus_new(void);
 #ifdef TDOT_FEATURE_CANOPEN
 tdot_connector_t *tdot_connector_canopen_new(void);
 #endif
+#ifdef TDOT_FEATURE_J1939
+tdot_connector_t *tdot_connector_j1939_new(void);
+#endif
 #ifdef TDOT_FEATURE_PROFIBUS
 tdot_connector_t *tdot_connector_profibus_new(void);
 #endif

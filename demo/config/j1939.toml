@@ -1,0 +1,43 @@
+# Demo J1939 connector config — reads standard engine PGNs off a J1939 bus.
+#
+# Ships with the tedge-dot package in /usr/share/tedge-dot/demo/. Copy it to
+# /etc/tedge/plugins/ot/ and restart tedge-dot.service. Publishes to the
+# thin-edge.io broker on 127.0.0.1:1883.
+#
+# PHASE 1 (single-frame broadcast PGNs, read-only). The engine ECU is source
+# address 0x00 by J1939 convention. Points key on `pgn` (routing) + `signal_name`
+# (the SPN's bit layout, resolved from the J1939 DBC). SPN resolution/offset is
+# expressed as a per-point [transform], mirroring the canbus connector.
+
+[connector]
+protocol      = "j1939"
+service_name  = "tedge-dot-j1939"
+poll_interval = "1s"
+log_level     = "info"
+
+[mqtt]
+host = "127.0.0.1"
+port = 1883
+
+[connection]
+interface = "vcan0"
+dbc_file  = "/usr/share/tedge-dot/demo/j1939.dbc"
+
+[[device]]
+name             = "engine"
+protocol_address = { source_address = 0x00 }
+default_mode     = "typed"
+
+  [[device.point]]
+  id       = "engine_speed"
+  datatype = "uint16"
+  access   = "read"
+  address  = { pgn = 61444, signal_name = "EngineSpeed" }  # EEC1 / SPN 190
+  transform = { multiplier = 0.125 }                        # 0.125 rpm/bit
+
+  [[device.point]]
+  id       = "coolant_temp"
+  datatype = "uint8"
+  access   = "read"
+  address  = { pgn = 65262, signal_name = "EngineCoolantTemperature" }  # ET1 / SPN 110
+  transform = { offset = -40.0 }                                        # 1 °C/bit, -40 offset

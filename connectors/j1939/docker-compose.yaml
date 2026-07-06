@@ -1,0 +1,40 @@
+# End-to-end harness for the J1939 connector.
+#
+# Unlike the Rust connectors, j1939 exists only as a C PoC connector
+# (poc-c/connectors/j1939), so there is NO `connector` service here: the C
+# binary (poc-c/build/tedge-dot) is built by CMake and driven by
+# poc-c/ci/smoke.sh against the simulator + a host MQTT broker (the `c-poc` CI
+# job). This file provides the simulator (and a broker for local use).
+#
+#   broker     - lightweight MQTT broker (local exploration only; the c-poc job
+#                runs its own broker on 127.0.0.1:1883)
+#   simulator  - broadcasts periodic J1939 frames on vcan0 (virtual CAN)
+#
+# !! REQUIREMENTS !! Linux host with CAN + vcan in the kernel (CONFIG_CAN[_VCAN]),
+# and Docker with --privileged. Docker Desktop's macOS VM lacks vcan (see
+# connectors/canbus/docker-compose.yaml for the colima workaround).
+
+services:
+  broker:
+    image: eclipse-mosquitto:2
+    volumes:
+      - ../_shared/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    ports:
+      # Host port 13884 avoids clashing with other connector e2e stacks.
+      - "13884:1883"
+
+  simulator:
+    build:
+      context: ../..
+      dockerfile: connectors/j1939/sim/Dockerfile
+    # Share the host network namespace so vcan0 is visible to the connector.
+    network_mode: host
+    # privileged is required to load the vcan kernel module via modprobe.
+    privileged: true
+    # Health check: vcan0 is up and the simulator process is running.
+    healthcheck:
+      test: ["CMD", "ip", "link", "show", "vcan0"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
