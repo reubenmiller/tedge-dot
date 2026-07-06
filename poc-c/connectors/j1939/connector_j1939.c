@@ -42,11 +42,21 @@
 #define J_MAX_PGN_BYTES 256  /* cache slot capacity: single-frame + multi-packet (TP) */
 #define J_CACHE_MAX 32       /* distinct (SA,PGN) frame-cache slots */
 #define J_IFNAME_MAX 32
+#define J_PGN_DM1 65226u     /* active diagnostic trouble codes (0x00FECA) */
+#define J_PGN_DM2 65227u     /* previously active DTCs (0x00FECB) */
 
-/* Per-point resolved SPN layout (pt->proto, flat, freed by config_free). */
+typedef enum {
+    JP_SPN = 0,       /* an SPN signal decoded from a PGN payload */
+    JP_DIAG_DTCS,     /* DM1/DM2 active DTC list, as a string */
+    JP_DIAG_COUNT,    /* DM1/DM2 active DTC count, as a number */
+} jp_kind_t;
+
+/* Per-point resolved address (pt->proto, flat, freed by config_free). */
 typedef struct {
+    jp_kind_t kind;
     uint8_t sa;         /* owning device's source address */
     uint32_t pgn;
+    /* SPN signal layout (kind == JP_SPN): */
     uint32_t start_bit; /* LSB position (Intel) / MSB position (Motorola) */
     uint32_t bit_len;
     bool little_endian;
@@ -84,8 +94,9 @@ static const char CAPABILITIES[] =
     "{\"protocol\":\"j1939\",\"version\":\"0.1.0-poc\","
     "\"modes\":[\"typed\"],"
     "\"datatypes\":[\"bool\",\"int8\",\"uint8\",\"int16\",\"uint16\","
-    "\"int32\",\"uint32\",\"int64\",\"uint64\",\"float32\",\"float64\"],"
-    "\"point_kinds\":[\"spn\"],"
+    "\"int32\",\"uint32\",\"int64\",\"uint64\",\"float32\",\"float64\","
+    "\"string\"],"
+    "\"point_kinds\":[\"spn\",\"dm1\",\"dm2\"],"
     "\"command_verbs\":[],"
     "\"features\":[\"polling\"],\"subscribe\":false}";
 
@@ -248,19 +259,54 @@ static int configure(tdot_connector_t *self, tdot_config_t *cfg, char *err,
         for (size_t j = 0; j < dev->npoints; j++) {
             tdot_point_t *pt = &dev->points[j];
             d = toml_int_in(pt->address, "pgn");
-            toml_datum_t sn = toml_string_in(pt->address, "signal_name");
-            if (!d.ok || !sn.ok) {
-                snprintf(err, errlen,
-                         "point %s/%s: address requires pgn + signal_name",
+            if (!d.ok) {
+                snprintf(err, errlen, "point %s/%s: address requires pgn",
                          dev->name, pt->id);
-                if (sn.ok)
-                    free(sn.u.s);
                 dbc_free(&dbc);
                 return -1;
             }
             uint32_t pgn = (uint32_t)d.u.i;
+            toml_datum_t sn = toml_string_in(pt->address, "signal_name");
 
-            /* Find the DBC message whose 29-bit id encodes this PGN. */
+            jp_point_t *jp = calloc(1, sizeof *jp);
+            pt->proto = jp;
+            jp->sa = jd->sa;
+            jp->pgn = pgn;
+
+            /* Diagnostics point: DM1/DM2 with no signal_name. The library decodes
+             * the DTC list into its struct; the point reports the DTC list (string)
+             * or the active count. Optional field = "dtcs" (default) | "count". */
+            if ((pgn == J_PGN_DM1 || pgn == J_PGN_DM2) && !sn.ok) {
+                jp->kind = JP_DIAG_DTCS;
+                toml_datum_t fld = toml_string_in(pt->address, "field");
+                if (fld.ok) {
+                    if (strcmp(fld.u.s, "count") == 0)
+                        jp->kind = JP_DIAG_COUNT;
+                    else if (strcmp(fld.u.s, "dtcs") != 0) {
+                        snprintf(err, errlen,
+                                 "point %s/%s: field must be \"dtcs\" or \"count\"",
+                                 dev->name, pt->id);
+                        free(fld.u.s);
+                        dbc_free(&dbc);
+                        return -1;
+                    }
+                    free(fld.u.s);
+                }
+                char addr[96];
+                snprintf(addr, sizeof addr, "{\"sa\":%u,\"pgn\":%u,\"diag\":\"%s\"}",
+                         jd->sa, pgn, jp->kind == JP_DIAG_COUNT ? "count" : "dtcs");
+                pt->addr_json = strdup(addr);
+                continue;
+            }
+
+            /* SPN signal point: bit layout resolved from the DBC by signal_name. */
+            if (!sn.ok) {
+                snprintf(err, errlen,
+                         "point %s/%s: address requires pgn + signal_name",
+                         dev->name, pt->id);
+                dbc_free(&dbc);
+                return -1;
+            }
             const dbc_message_t *msg = NULL;
             for (size_t k = 0; k < dbc.n; k++) {
                 if (pgn_of(dbc.messages[k].can_id) == pgn) {
@@ -286,10 +332,7 @@ static int configure(tdot_connector_t *self, tdot_config_t *cfg, char *err,
                 return -1;
             }
 
-            jp_point_t *jp = calloc(1, sizeof *jp);
-            pt->proto = jp;
-            jp->sa = jd->sa;
-            jp->pgn = pgn;
+            jp->kind = JP_SPN;
             jp->start_bit = sig->start_bit;
             jp->bit_len = sig->bit_len;
             jp->little_endian = sig->little_endian;
@@ -361,6 +404,52 @@ static int read_point(tdot_connector_t *self, tdot_device_t *dev,
     if (!jd->connected || !st->bus_up) {
         tdot_sample_bad(out, "device not connected");
         return -1;
+    }
+
+    /* Diagnostics point (DM1/DM2): the library decodes DTCs into its struct as
+     * frames arrive (single-frame or via the TP path); pump, then read the
+     * struct. "No active faults" is a valid good sample, so we never wait/bad. */
+    if (jp->kind != JP_SPN) {
+        j_pump(st);
+        const struct DM *dm = &st->j1939.from_other_ecu_dm;
+        const struct DM1 *codes = (jp->pgn == J_PGN_DM2) ? &dm->dm2 : &dm->dm1;
+        uint8_t active = (jp->pgn == J_PGN_DM2) ? dm->errors_dm2_active
+                                                : dm->errors_dm1_active;
+        if (active > MAX_DM_FIELD)
+            active = MAX_DM_FIELD;
+        out->raw_len = 0;
+
+        if (jp->kind == JP_DIAG_COUNT) {
+            unsigned n = 0;
+            for (uint8_t i = 0; i < active; i++)
+                if (codes->from_ecu_address[i] == jp->sa)
+                    n++;
+            out->value.kind = TDOT_VAL_NUM;
+            out->value.num = (double)n;
+            return 0;
+        }
+
+        /* JP_DIAG_DTCS: compact "SPN<n>/FMI<n>/OC<n>[,...]" list for this SA, or
+         * "none". Truncates if it overflows the sample string. */
+        out->value.kind = TDOT_VAL_STR;
+        char *p = out->value.str;
+        size_t rem = sizeof out->value.str;
+        int first = 1;
+        for (uint8_t i = 0; i < active && rem > 1; i++) {
+            if (codes->from_ecu_address[i] != jp->sa)
+                continue;
+            int w = snprintf(p, rem, "%sSPN%u/FMI%u/OC%u", first ? "" : ",",
+                             (unsigned)codes->SPN[i], (unsigned)codes->FMI[i],
+                             (unsigned)codes->occurrence_count[i]);
+            if (w < 0 || (size_t)w >= rem)
+                break; /* truncated */
+            p += w;
+            rem -= (size_t)w;
+            first = 0;
+        }
+        if (first)
+            snprintf(out->value.str, sizeof out->value.str, "none");
+        return 0;
     }
 
     j_pump(st);

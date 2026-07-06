@@ -41,3 +41,17 @@ default_mode     = "typed"
   access   = "read"
   address  = { pgn = 65262, signal_name = "EngineCoolantTemperature" }  # ET1 / SPN 110
   transform = { offset = -40.0 }                                        # 1 °C/bit, -40 offset
+
+  # DM1 active diagnostic trouble codes (PGN 65226). No signal_name => diagnostics
+  # point. The library decodes the DTC list; we surface it two ways.
+  [[device.point]]
+  id       = "active_faults"
+  datatype = "string"
+  access   = "read"
+  address  = { pgn = 65226 }                    # field defaults to "dtcs": "SPNn/FMIn/OCn,..." or "none"
+
+  [[device.point]]
+  id       = "active_fault_count"
+  datatype = "uint8"
+  access   = "read"
+  address  = { pgn = 65226, field = "count" }

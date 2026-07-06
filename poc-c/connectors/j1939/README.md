@@ -63,9 +63,16 @@ rpm). Phase 1 = passive read of single-frame broadcast PGNs, no library patch, r
 auto-applied TP.DT patch, and the connector decodes SPNs at any byte offset in payloads up
 to `J_MAX_PGN_BYTES` (256). Validated on the Pi (BAM PGN 65280).
 
-**Phase 2b/2c (next):** on-request PGNs (needs a configured source address to send Request
-PGN 59904 + address claiming) and DM1/DM2 diagnostics (the library already decodes these
-into its struct — surfacing DTCs as tedge samples/events is the remaining work).
+**Phase 2c (done):** DM1/DM2 diagnostics. A point with `address = { pgn = 65226 }` (DM1) or
+`65227` (DM2) and no `signal_name` is a diagnostics point; the library decodes the DTC list
+(single-frame or via the TP path) and the connector surfaces it as either a `dtcs` string
+(`"SPN<n>/FMI<n>/OC<n>,…"` or `"none"`, filtered to the device's SA) or, with
+`field = "count"`, the active DTC count. Validated on the Pi (injected SPN100/FMI1/OC2 →
+`dtcs=[SPN100/FMI1/OC2]`).
+
+**Phase 2b (next):** on-request PGNs — send Request PGN 59904 for on-request-only data.
+Needs a configured source address + address claiming (the library's send path is wired) and
+a responding simulator for the e2e test.
 
 **Build note:** build with compiler extensions on (CMake default, `gnu11`). The vendored
 library's SocketCAN backend relies on `_DEFAULT_SOURCE` (uses `usleep`, `struct timeval`,
