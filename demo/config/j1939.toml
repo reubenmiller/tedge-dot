@@ -20,8 +20,9 @@ host = "127.0.0.1"
 port = 1883
 
 [connection]
-interface = "vcan0"
-dbc_file  = "/usr/share/tedge-dot/demo/j1939.dbc"
+interface      = "vcan0"
+dbc_file       = "/usr/share/tedge-dot/demo/j1939.dbc"
+source_address = 0xF9   # our node's address, used when sending Request PGNs
 
 [[device]]
 name             = "engine"
@@ -55,3 +56,13 @@ default_mode     = "typed"
   datatype = "uint8"
   access   = "read"
   address  = { pgn = 65226, field = "count" }
+
+  # On-request PGN: engine hours are sent only when requested. `request = true`
+  # makes the connector send Request PGN 59904 each poll; the response is decoded
+  # like any other SPN. (Simulator responds to the request.)
+  [[device.point]]
+  id       = "engine_hours"
+  datatype = "uint32"
+  access   = "read"
+  address  = { pgn = 65253, signal_name = "EngineHours", request = true }  # SPN 247
+  transform = { multiplier = 0.05 }                                        # 0.05 h/bit

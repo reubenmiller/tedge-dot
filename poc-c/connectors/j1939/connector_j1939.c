@@ -56,6 +56,7 @@ typedef struct {
     jp_kind_t kind;
     uint8_t sa;         /* owning device's source address */
     uint32_t pgn;
+    bool request;       /* send Request PGN 59904 each poll (on-request PGNs) */
     /* SPN signal layout (kind == JP_SPN): */
     uint32_t start_bit; /* LSB position (Intel) / MSB position (Motorola) */
     uint32_t bit_len;
@@ -83,6 +84,7 @@ typedef struct {
  * device to connect and closed when the last connected device disconnects. */
 typedef struct {
     char interface[J_IFNAME_MAX];
+    uint8_t our_sa;              /* our node's source address (for Request PGNs) */
     bool bus_up;
     int nconnected;
     J1939 j1939;                 /* library ECU/session/address-claim state */
@@ -234,6 +236,21 @@ static int configure(tdot_connector_t *self, tdot_config_t *cfg, char *err,
     }
     free(d.u.s);
 
+    /* Our node's source address, used when sending Request PGNs. Defaults to the
+     * common service-tool address 0xF9 (0x00 would collide with the engine). */
+    st->our_sa = 0xF9;
+    d = toml_int_in(cfg->connection, "source_address");
+    if (d.ok) {
+        if (d.u.i < 0 || d.u.i > 0xFF) {
+            snprintf(err, errlen,
+                     "[connection] source_address %ld out of range (0-255)",
+                     (long)d.u.i);
+            dbc_free(&dbc);
+            return -1;
+        }
+        st->our_sa = (uint8_t)d.u.i;
+    }
+
     for (size_t i = 0; i < cfg->ndevices; i++) {
         tdot_device_t *dev = &cfg->devices[i];
         jd_device_t *jd = calloc(1, sizeof *jd);
@@ -337,6 +354,8 @@ static int configure(tdot_connector_t *self, tdot_config_t *cfg, char *err,
             jp->bit_len = sig->bit_len;
             jp->little_endian = sig->little_endian;
             jp->is_signed = sig->is_signed;
+            toml_datum_t rq = toml_bool_in(pt->address, "request");
+            jp->request = rq.ok && rq.u.b; /* on-request PGN vs passive broadcast */
 
             char addr[96];
             snprintf(addr, sizeof addr,
@@ -384,9 +403,10 @@ static int connect_device(tdot_connector_t *self, tdot_device_t *dev,
             return -1;
         }
         /* No CAN callbacks to register: the SOCKETCAN platform reads/writes the
-         * socket directly. Passive read (Phase 1): rely on library defaults for
-         * our own SA/NAME; address claiming + Request PGNs are Phase 2. */
+         * socket directly. Startup_ECU also announces our address claim; we then
+         * set our own SA so Request PGNs (Phase 2b) are sent from a valid node. */
         Open_SAE_J1939_Startup_ECU(&st->j1939);
+        st->j1939.information_this_ECU.this_ECU_address = st->our_sa;
         g_active = st;
         st->bus_up = true;
     }
@@ -451,6 +471,12 @@ static int read_point(tdot_connector_t *self, tdot_device_t *dev,
             snprintf(out->value.str, sizeof out->value.str, "none");
         return 0;
     }
+
+    /* On-request PGN: ask the ECU for it; the response arrives as a normal frame
+     * captured below (single-frame or, for large PGNs, reassembled via the TP
+     * path). Broadcast/periodic PGNs skip this. */
+    if (jp->request)
+        SAE_J1939_Send_Request(&st->j1939, jp->sa, jp->pgn);
 
     j_pump(st);
     j_frame_t *f = cache_find(st, jp->sa, jp->pgn);

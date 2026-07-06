@@ -11,3 +11,6 @@ BO_ 2364539904 EEC1: 8 Vector__XXX
 
 BO_ 2566843904 ET1: 8 Vector__XXX
  SG_ EngineCoolantTemperature : 0|8@1+ (1,-40) [-40|210] "degC" Vector__XXX
+
+BO_ 2566841600 ENGINE_HOURS: 8 Vector__XXX
+ SG_ EngineHours : 0|32@1+ (0.05,0) [0|210554060] "h" Vector__XXX

@@ -70,9 +70,16 @@ to `J_MAX_PGN_BYTES` (256). Validated on the Pi (BAM PGN 65280).
 `field = "count"`, the active DTC count. Validated on the Pi (injected SPN100/FMI1/OC2 →
 `dtcs=[SPN100/FMI1/OC2]`).
 
-**Phase 2b (next):** on-request PGNs — send Request PGN 59904 for on-request-only data.
-Needs a configured source address + address claiming (the library's send path is wired) and
-a responding simulator for the e2e test.
+**Phase 2b (done):** on-request PGNs. A point with `request = true` makes the connector send
+Request PGN 59904 for its PGN each poll; the response is captured and decoded like any other
+SPN. Our node's source address comes from `[connection] source_address` (default `0xF9`, set
+on the library after `Startup_ECU`). Validated on the Pi with a responder: requested engine
+hours (PGN 65253) → `raw 24690 ×0.05 = 1234.5 h`.
+
+This completes the planned J1939 roadmap (single-frame + multi-packet telemetry, DM1/DM2
+diagnostics, on-request PGNs). Remaining hardening (not PoC-blocking): full address claiming
+against real ECUs, per-SA DM storage for multi-ECU buses, DTC lists longer than the sample
+string.
 
 **Build note:** build with compiler extensions on (CMake default, `gnu11`). The vendored
 library's SocketCAN backend relies on `_DEFAULT_SOURCE` (uses `usleep`, `struct timeval`,
