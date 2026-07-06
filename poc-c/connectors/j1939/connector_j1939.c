@@ -84,7 +84,9 @@ typedef struct {
  * device to connect and closed when the last connected device disconnects. */
 typedef struct {
     char interface[J_IFNAME_MAX];
-    uint8_t our_sa;              /* our node's source address (for Request PGNs) */
+    uint8_t our_sa;              /* our node's source address (claimed, for requests) */
+    uint16_t name_mfg;           /* our J1939 NAME manufacturer code (address-claim id) */
+    uint8_t name_function;       /* our J1939 NAME function */
     bool bus_up;
     int nconnected;
     J1939 j1939;                 /* library ECU/session/address-claim state */
@@ -250,6 +252,13 @@ static int configure(tdot_connector_t *self, tdot_config_t *cfg, char *err,
         }
         st->our_sa = (uint8_t)d.u.i;
     }
+    /* Optional J1939 NAME fields for our address claim (defaults 0). */
+    d = toml_int_in(cfg->connection, "name_manufacturer_code");
+    if (d.ok && d.u.i >= 0 && d.u.i <= 2047)
+        st->name_mfg = (uint16_t)d.u.i;
+    d = toml_int_in(cfg->connection, "name_function");
+    if (d.ok && d.u.i >= 0 && d.u.i <= 255)
+        st->name_function = (uint8_t)d.u.i;
 
     for (size_t i = 0; i < cfg->ndevices; i++) {
         tdot_device_t *dev = &cfg->devices[i];
@@ -313,6 +322,13 @@ static int configure(tdot_connector_t *self, tdot_config_t *cfg, char *err,
                 snprintf(addr, sizeof addr, "{\"sa\":%u,\"pgn\":%u,\"diag\":\"%s\"}",
                          jd->sa, pgn, jp->kind == JP_DIAG_COUNT ? "count" : "dtcs");
                 pt->addr_json = strdup(addr);
+                /* DM1/DM2 frames land in the per-(SA,PGN) cache like any PGN, so
+                 * diagnostics are stored per source address (multi-ECU safe). */
+                if (!cache_find(st, jd->sa, pgn) && st->ncache < J_CACHE_MAX) {
+                    st->cache[st->ncache].sa = jd->sa;
+                    st->cache[st->ncache].pgn = pgn;
+                    st->ncache++;
+                }
                 continue;
             }
 
@@ -406,7 +422,16 @@ static int connect_device(tdot_connector_t *self, tdot_device_t *dev,
          * socket directly. Startup_ECU also announces our address claim; we then
          * set our own SA so Request PGNs (Phase 2b) are sent from a valid node. */
         Open_SAE_J1939_Startup_ECU(&st->j1939);
+        /* Claim our SA with a NAME (arbitrary-address-capable, so a conflicting
+         * higher-priority ECU can make us move). Startup_ECU already announced a
+         * claim with the loaded identity; re-announce with ours. Full J1939-81
+         * contention/back-off is driven by the library's Listen path and is only
+         * exercised against real ECUs. */
         st->j1939.information_this_ECU.this_ECU_address = st->our_sa;
+        st->j1939.information_this_ECU.this_name.arbitrary_address_capable = 1;
+        st->j1939.information_this_ECU.this_name.manufacturer_code = st->name_mfg;
+        st->j1939.information_this_ECU.this_name.function = st->name_function;
+        SAE_J1939_Response_Request_Address_Claimed(&st->j1939);
         g_active = st;
         st->bus_up = true;
     }
@@ -426,49 +451,48 @@ static int read_point(tdot_connector_t *self, tdot_device_t *dev,
         return -1;
     }
 
-    /* Diagnostics point (DM1/DM2): the library decodes DTCs into its struct as
-     * frames arrive (single-frame or via the TP path); pump, then read the
-     * struct. "No active faults" is a valid good sample, so we never wait/bad. */
+    /* Diagnostics point (DM1/DM2): decode DTCs from this SA's cached payload
+     * (the library also decodes DM into one shared struct, but the cache is
+     * per-(SA,PGN) so this is multi-ECU safe). Payload = [lamp0, lamp1, then
+     * 4 bytes per DTC]. "No active faults" is a valid good sample (never bad). */
     if (jp->kind != JP_SPN) {
         j_pump(st);
-        const struct DM *dm = &st->j1939.from_other_ecu_dm;
-        const struct DM1 *codes = (jp->pgn == J_PGN_DM2) ? &dm->dm2 : &dm->dm1;
-        uint8_t active = (jp->pgn == J_PGN_DM2) ? dm->errors_dm2_active
-                                                : dm->errors_dm1_active;
-        if (active > MAX_DM_FIELD)
-            active = MAX_DM_FIELD;
+        j_frame_t *f = cache_find(st, jp->sa, jp->pgn);
         out->raw_len = 0;
 
-        if (jp->kind == JP_DIAG_COUNT) {
-            unsigned n = 0;
-            for (uint8_t i = 0; i < active; i++)
-                if (codes->from_ecu_address[i] == jp->sa)
-                    n++;
-            out->value.kind = TDOT_VAL_NUM;
-            out->value.num = (double)n;
-            return 0;
-        }
-
-        /* JP_DIAG_DTCS: compact "SPN<n>/FMI<n>/OC<n>[,...]" list for this SA, or
-         * "none". Truncates if it overflows the sample string. */
-        out->value.kind = TDOT_VAL_STR;
         char *p = out->value.str;
         size_t rem = sizeof out->value.str;
         int first = 1;
-        for (uint8_t i = 0; i < active && rem > 1; i++) {
-            if (codes->from_ecu_address[i] != jp->sa)
-                continue;
-            int w = snprintf(p, rem, "%sSPN%u/FMI%u/OC%u", first ? "" : ",",
-                             (unsigned)codes->SPN[i], (unsigned)codes->FMI[i],
-                             (unsigned)codes->occurrence_count[i]);
-            if (w < 0 || (size_t)w >= rem)
-                break; /* truncated */
-            p += w;
-            rem -= (size_t)w;
-            first = 0;
+        unsigned count = 0;
+        unsigned ndtc = (f && f->seen && f->len >= 2) ? (f->len - 2u) / 4u : 0u;
+        for (unsigned i = 0; i < ndtc; i++) {
+            const uint8_t *b = &f->data[2 + i * 4];
+            uint32_t spn = ((uint32_t)(b[2] & 0xE0) << 11) |
+                           ((uint32_t)b[1] << 8) | b[0];
+            uint8_t fmi = b[2] & 0x1F;
+            uint8_t oc = b[3] & 0x7F;
+            if (spn == 0 && fmi == 0)
+                continue; /* no-fault filler / all-clear marker */
+            count++;
+            if (jp->kind == JP_DIAG_DTCS && rem > 1) {
+                int w = snprintf(p, rem, "%sSPN%u/FMI%u/OC%u", first ? "" : ",",
+                                 (unsigned)spn, (unsigned)fmi, (unsigned)oc);
+                if (w > 0 && (size_t)w < rem) {
+                    p += w;
+                    rem -= (size_t)w;
+                    first = 0;
+                }
+            }
         }
-        if (first)
-            snprintf(out->value.str, sizeof out->value.str, "none");
+
+        if (jp->kind == JP_DIAG_COUNT) {
+            out->value.kind = TDOT_VAL_NUM;
+            out->value.num = (double)count;
+        } else {
+            out->value.kind = TDOT_VAL_STR;
+            if (first)
+                snprintf(out->value.str, sizeof out->value.str, "none");
+        }
         return 0;
     }
 

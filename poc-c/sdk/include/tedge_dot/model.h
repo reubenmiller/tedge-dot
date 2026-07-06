@@ -62,7 +62,9 @@ typedef struct {
     tdot_value_kind_t kind;
     bool b;
     double num;
-    char str[64]; /* used for out-of-safe-range 64-bit ints and short strings */
+    /* Out-of-safe-range 64-bit ints and short strings. 256 B so J1939 DM1/DM2
+     * diagnostic-code lists (up to MAX_DM_FIELD DTCs) fit without truncation. */
+    char str[256];
 } tdot_value_t;
 
 /* ---- per-point linear transform ------------------------------------------ */

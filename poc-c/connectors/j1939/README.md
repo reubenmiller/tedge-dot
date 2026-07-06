@@ -77,9 +77,19 @@ on the library after `Startup_ECU`). Validated on the Pi with a responder: reque
 hours (PGN 65253) → `raw 24690 ×0.05 = 1234.5 h`.
 
 This completes the planned J1939 roadmap (single-frame + multi-packet telemetry, DM1/DM2
-diagnostics, on-request PGNs). Remaining hardening (not PoC-blocking): full address claiming
-against real ECUs, per-SA DM storage for multi-ECU buses, DTC lists longer than the sample
-string.
+diagnostics, on-request PGNs).
+
+**Hardening (done):**
+- **Address claiming** — on connect the connector announces a J1939-81 address claim for its
+  `source_address` with a NAME (`arbitrary_address_capable = 1`; optional
+  `[connection] name_manufacturer_code` / `name_function`), rather than silently using the
+  address. Full contention/back-off against competing ECUs is driven by the library and is
+  only exercisable against real hardware.
+- **Per-SA diagnostics** — DM1/DM2 are decoded from the per-`(SA,PGN)` cache, so faults are
+  attributed to the correct ECU on a multi-ECU bus (validated on the Pi: SA 0x00 and 0x03
+  report their own DTCs). Removed the reliance on the library's single shared DM struct.
+- **Long DTC lists** — the sample value string is 256 B, fitting up to `MAX_DM_FIELD` DTCs
+  (validated: a 5-DTC multi-packet DM1 renders in full, previously truncated at 64 B).
 
 **Build note:** build with compiler extensions on (CMake default, `gnu11`). The vendored
 library's SocketCAN backend relies on `_DEFAULT_SOURCE` (uses `usleep`, `struct timeval`,
