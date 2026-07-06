@@ -38,7 +38,8 @@
 #include "Open_SAE_J1939/Open_SAE_J1939.h"
 #include "Hardware/SocketCAN.h"
 
-#define J_PAYLOAD_LEN 8      /* single-frame window (Phase 1) */
+#define J_PAYLOAD_LEN 8      /* single-frame payload length */
+#define J_MAX_PGN_BYTES 256  /* cache slot capacity: single-frame + multi-packet (TP) */
 #define J_CACHE_MAX 32       /* distinct (SA,PGN) frame-cache slots */
 #define J_IFNAME_MAX 32
 
@@ -58,12 +59,13 @@ typedef struct {
     bool connected;
 } jd_device_t;
 
-/* One captured PGN payload, keyed by (SA, PGN). */
+/* One captured PGN payload, keyed by (SA, PGN). Holds single-frame (≤8 B) and
+ * reassembled multi-packet (TP) payloads up to J_MAX_PGN_BYTES. */
 typedef struct {
     uint8_t sa;
     uint32_t pgn;
-    uint8_t data[J_PAYLOAD_LEN];
-    uint8_t len;
+    uint8_t data[J_MAX_PGN_BYTES];
+    uint16_t len;
     bool seen;
 } j_frame_t;
 
@@ -100,34 +102,41 @@ static uint32_t pgn_of(uint32_t can_id) {
 }
 static uint8_t sa_of(uint32_t can_id) { return (uint8_t)(can_id & 0xFF); }
 
-/* ---- SPN bit extraction (same math as connectors/canbus) ----------------- */
+/* ---- SPN bit extraction (same math as connectors/canbus, but length-aware so
+ * SPNs at any byte offset in a multi-packet payload decode) ----------------- */
 
-static uint64_t bit_mask(uint32_t bit_len) {
-    return bit_len >= 64 ? UINT64_MAX : (1ull << bit_len) - 1;
-}
-static uint64_t extract_intel(const uint8_t *b, uint32_t start_bit,
+/* Intel: start_bit is the LSB position; bits numbered 0.. little-endian across
+ * the payload. Bits beyond `len` read as 0. bit_len ≤ 64. */
+static uint64_t extract_intel(const uint8_t *b, size_t len, uint32_t start_bit,
                               uint32_t bit_len) {
-    uint64_t raw = 0;
-    for (size_t i = 0; i < J_PAYLOAD_LEN; i++)
-        raw |= (uint64_t)b[i] << (i * 8);
-    return (raw >> start_bit) & bit_mask(bit_len);
+    uint64_t v = 0;
+    for (uint32_t i = 0; i < bit_len; i++) {
+        uint32_t bit = start_bit + i;
+        size_t byte = bit >> 3;
+        uint64_t bitval = (byte < len) ? ((b[byte] >> (bit & 7)) & 1u) : 0u;
+        v |= bitval << i;
+    }
+    return v;
 }
-static uint64_t extract_motorola(const uint8_t *b, uint32_t start_bit,
-                                 uint32_t bit_len) {
+/* Motorola: start_bit is the MSB position in Vector numbering, descending. */
+static uint64_t extract_motorola(const uint8_t *b, size_t len,
+                                 uint32_t start_bit, uint32_t bit_len) {
     uint64_t result = 0;
     int bit = (int)start_bit;
     for (uint32_t i = 0; i < bit_len; i++, bit--) {
-        int byte_idx = bit / 8;
-        uint8_t v = (byte_idx >= 0 && byte_idx < J_PAYLOAD_LEN)
+        size_t byte_idx = (size_t)(bit / 8);
+        uint8_t v = (bit >= 0 && byte_idx < len)
                         ? (b[byte_idx] >> (bit % 8)) & 1
                         : 0;
         result = (result << 1) | v;
     }
     return result;
 }
-static uint64_t extract_signal(const jp_point_t *p, const uint8_t *bytes) {
-    return p->little_endian ? extract_intel(bytes, p->start_bit, p->bit_len)
-                            : extract_motorola(bytes, p->start_bit, p->bit_len);
+static uint64_t extract_signal(const jp_point_t *p, const uint8_t *bytes,
+                               size_t len) {
+    return p->little_endian
+               ? extract_intel(bytes, len, p->start_bit, p->bit_len)
+               : extract_motorola(bytes, len, p->start_bit, p->bit_len);
 }
 static int64_t sign_extend(uint64_t value, uint32_t bit_len) {
     if (bit_len == 0 || bit_len >= 64)
@@ -159,7 +168,7 @@ void on_raw_pgn(uint8_t sa, uint32_t pgn, const uint8_t *data, uint32_t len) {
         f->sa = sa;
         f->pgn = pgn;
     }
-    uint8_t n = len > J_PAYLOAD_LEN ? J_PAYLOAD_LEN : (uint8_t)len;
+    uint16_t n = len > J_MAX_PGN_BYTES ? J_MAX_PGN_BYTES : (uint16_t)len;
     memcpy(f->data, data, n);
     f->len = n;
     f->seen = true;
@@ -368,7 +377,7 @@ static int read_point(tdot_connector_t *self, tdot_device_t *dev,
         return 0; /* transport is fine, just no traffic */
     }
 
-    size_t raw_len = f->len > J_PAYLOAD_LEN ? J_PAYLOAD_LEN : f->len;
+    size_t raw_len = f->len > TDOT_RAW_MAX ? TDOT_RAW_MAX : f->len;
     memcpy(out->raw, f->data, raw_len);
     out->raw_len = raw_len;
     out->raw_group = 1;
@@ -381,7 +390,7 @@ static int read_point(tdot_connector_t *self, tdot_device_t *dev,
     /* SPN resolution/offset is a property of the point (transform), not applied
      * here — matching canbus, so raw SPN values are consistent across
      * connectors. */
-    uint64_t bits = extract_signal(jp, f->data);
+    uint64_t bits = extract_signal(jp, f->data, f->len);
     if (jp->is_signed) {
         int64_t sv = sign_extend(bits, jp->bit_len);
         if (sv > TDOT_JS_SAFE_MAX || sv < -TDOT_JS_SAFE_MAX) {

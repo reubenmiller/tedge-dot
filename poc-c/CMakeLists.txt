@@ -92,10 +92,16 @@ if(TDOT_J1939)
   # compile its Src/*.c straight into the SDK with the SocketCAN platform
   # selected (non-selected backends are #ifdef'd out by the platform macro).
   include(FetchContent)
+  find_program(PYTHON3_EXECUTABLE NAMES python3 python REQUIRED)
+  # PATCH_COMMAND runs once at populate, cwd = the fetched source root ('.').
+  # The patcher adds a weak on_raw_pgn() capture for reassembled multi-packet
+  # PGNs (Phase 2); it is newline-agnostic and idempotent.
   FetchContent_Declare(open_sae_j1939
     GIT_REPOSITORY https://github.com/DanielMartensson/Open-SAE-J1939.git
     GIT_TAG 315a9556692c2c58fe6909749811bb380698ef36 # pinned (2026-06-25)
-    SOURCE_SUBDIR _download_only_)
+    SOURCE_SUBDIR _download_only_
+    PATCH_COMMAND ${PYTHON3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/connectors/j1939/patches/apply_tp_capture.py .)
   FetchContent_MakeAvailable(open_sae_j1939)
   file(GLOB_RECURSE J1939_LIB_SRCS ${open_sae_j1939_SOURCE_DIR}/Src/*.c)
   # Exclude the library's example entry point (has its own main(), guarded out

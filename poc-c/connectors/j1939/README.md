@@ -20,11 +20,12 @@ application-layer structs?
   register, no library patch needed.** EEC1 (PGN 61444) → decoded **1000.0 rpm** on the Pi.
   - ⚠️ Gotcha proven wrong the hard way: `RX_MSG_UNKNOWN` is *also* Listen's idle/default
     return, so it is **not** the "a frame arrived" signal. Use `rx != RX_MSG_NONE`.
-- **Multi-packet PGNs (>8 bytes, Transport Protocol): NOT exposed.**
-  `Transport_Protocol_Data_Transfer.c` reassembles into
-  `j1939->from_other_ecu_tp_dt.data[]`, then `switch (PGN)` routes to predefined
-  handlers with **no `default:` case**, then `memset`s the buffer. A ~one-line patch is
-  required (see [The patch](#the-patch)).
+- **Multi-packet PGNs (>8 bytes, Transport Protocol): exposed via a small patch (Phase 2). ✅**
+  `Transport_Protocol_Data_Transfer.c` reassembles into `j1939->from_other_ecu_tp_dt.data[]`,
+  then `switch (PGN)` routes to predefined handlers with **no `default:` case**, then
+  `memset`s the buffer. The patch adds a generic `on_raw_pgn` capture right after
+  reassembly (see [The patch](#the-patch)). Verified on the Pi: a BAM message (PGN 65280,
+  12 bytes) surfaces its full reassembled payload.
 
 ## Platform
 
@@ -58,9 +59,13 @@ Open-SAE-J1939 via `FetchContent`. Demo config: [`demo/config/j1939.toml`](../..
 **Status:** compiles + links (Docker `debian:bookworm`, x86_64) and the capture path is
 **validated on real hardware** (rpi4 aarch64 / Debian trixie / real `vcan`: EEC1 → 1000.0
 rpm). Phase 1 = passive read of single-frame broadcast PGNs, no library patch, read-only.
-Still to do: pin the `FetchContent` `GIT_TAG`; wire j1939 into the e2e vcan suite +
-a `conformance.toml`. Phase 2+ (multi-packet PGNs via the TP.DT patch, on-request PGNs,
-DM1/DM2) follow.
+**Phase 2 (done):** multi-packet (Transport Protocol) PGNs are captured via the
+auto-applied TP.DT patch, and the connector decodes SPNs at any byte offset in payloads up
+to `J_MAX_PGN_BYTES` (256). Validated on the Pi (BAM PGN 65280).
+
+**Phase 2b/2c (next):** on-request PGNs (needs a configured source address to send Request
+PGN 59904 + address claiming) and DM1/DM2 diagnostics (the library already decodes these
+into its struct — surfacing DTCs as tedge samples/events is the remaining work).
 
 **Build note:** build with compiler extensions on (CMake default, `gnu11`). The vendored
 library's SocketCAN backend relies on `_DEFAULT_SOURCE` (uses `usleep`, `struct timeval`,
@@ -101,27 +106,24 @@ docker run --rm -it --cap-add=NET_ADMIN j1939-step0
 BAM TP.CM byte layout: `20`=BAM control, `0C 00`=total size 12 (LE), `02`=2 packets,
 `FF`=reserved, `00 FF 00`=PGN 65280 (LE). TP.DT frames are `<seq>` + 7 payload bytes.
 
-## The patch
+## The patch (multi-packet capture)
 
-Only needed to capture **multi-packet** PGNs (Phase 2+). In the vendored
-`Src/SAE_J1939/SAE_J1939-21_Transport_Layer/Transport_Protocol_Data_Transfer.c`, at the
-reassembly-complete `switch (PGN)`, add a default that forwards the reassembled buffer
-to the same sink the harness uses, **before** the `memset`:
+To capture **multi-packet** PGNs, the reassembled payload must be surfaced before the
+library's built-in `switch (PGN)` consumes/clears it. This is automated:
+[`patches/apply_tp_capture.py`](patches/apply_tp_capture.py) inserts a weak `on_raw_pgn`
+call right after reassembly in
+`Src/SAE_J1939/SAE_J1939-21_Transport_Layer/Transport_Protocol_Data_Transfer.c`, and CMake
+runs it as the `FetchContent` `PATCH_COMMAND` (see [poc-c/CMakeLists.txt](../../CMakeLists.txt)).
+The patcher is newline-agnostic (upstream is CRLF) and idempotent.
 
 ```c
-switch (PGN) {
-    /* ... existing predefined cases ... */
-    default:
-        /* Generic capture for config/DBC-driven arbitrary PGNs */
-        on_raw_pgn(SA, PGN, complete_data,
-                   j1939->from_other_ecu_tp_cm.total_message_size);
-        break;
-}
+/* inserted right after complete_data[] is built, before the built-in switch */
+if (on_raw_pgn)
+    on_raw_pgn(SA, PGN, complete_data, total_message_size);
 ```
 
-`on_raw_pgn` is defined (non-static) in `harness.c` so the patched lib links against it.
-In the real connector this becomes the connector's PGN-cache sink. Keep the patch as a
-tracked diff in the vendored subtree so upstream bumps stay re-applicable.
+`on_raw_pgn` is a **weak** extern: it resolves to the connector's PGN-cache sink (or the
+harness's) when linked, and is a skipped no-op if the library is built standalone.
 
 ## Decision gate
 
