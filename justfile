@@ -208,7 +208,7 @@ c-verify arch="arm64":
         -v "$PWD/poc-c/dist/{{arch}}:/out" \
         -v "$PWD:/src:ro" \
         -v "$PWD/poc-c/cross/verify.sh:/verify.sh:ro" \
-        debian:bullseye-slim /verify.sh
+        public.ecr.aws/docker/library/debian:bullseye-slim /verify.sh
 
 # Package one cross-built architecture as deb/rpm/apk into poc-c/dist/packages/.
 # Usage: just c-package arm64 0.1.0

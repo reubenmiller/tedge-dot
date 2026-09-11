@@ -2,7 +2,8 @@
 # Smoke-check a cross-built binary on a deliberately OLD distro, to prove both
 # that the cross build works and that the glibc floor zig pinned is real.
 #
-# Runs inside a debian:bullseye-slim container (glibc 2.31) for the target
+# Runs inside a debian:bullseye-slim container (glibc 2.31, pulled from the
+# ECR Public mirror rather than Docker Hub) for the target
 # architecture; a native build on ubuntu-24.04 (glibc 2.39) could not run here
 # at all. Packages come from archive.debian.org: bullseye is out of security
 # support, so deb.debian.org no longer carries it and its Release files have

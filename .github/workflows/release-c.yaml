@@ -90,7 +90,7 @@ jobs:
               -v "$PWD/poc-c/dist/$arch:/out" \
               -v "$PWD:/src:ro" \
               -v "$PWD/poc-c/cross/verify.sh:/verify.sh:ro" \
-              debian:bullseye-slim /verify.sh
+              public.ecr.aws/docker/library/debian:bullseye-slim /verify.sh
           done
 
       - name: Package (deb / rpm / apk + tarball)

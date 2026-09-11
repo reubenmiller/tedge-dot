@@ -8,7 +8,12 @@
 #
 # open62541 is not packaged by Debian, so it is still built from source by
 # CMake (FetchContent) — cross-compiled with the same zig toolchain.
-FROM debian:bookworm-slim
+#
+# Base image comes from the AWS ECR Public mirror of the Docker Official
+# Images rather than Docker Hub, whose anonymous pull quota is shared across
+# GitHub-hosted runners. Override BASE_REGISTRY to go back to docker.io/library.
+ARG BASE_REGISTRY=public.ecr.aws/docker/library
+FROM ${BASE_REGISTRY}/debian:bookworm-slim
 
 # Debian architectures whose libraries we want to link against. Adding the
 # image's own native architecture is harmless.
