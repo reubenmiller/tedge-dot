@@ -1,6 +1,8 @@
 # RFC 0006: Contract 0.2 — a slimmer envelope, a device manifest, and typed signal metadata
 
-Status: proposed — **for review, one decision per section**. Nothing here is implemented.
+Status: proposed — **decisions recorded 2026-09-13** (see the checklists): every section
+accepted, §6 withdrawn (the protocol level stays), §5.1 option A, §8 accepted with the
+`--format` change of §8.1. Nothing here is implemented.
 
 Revision 2 folds in an independent review of revision 1 against the code. It adds §4 (writes in
 engineering units — a pre-existing defect that `range` would have compounded), corrects claims in
@@ -150,7 +152,7 @@ type; so should the contract.
 
 **Feedback**
 
-- [ ] accepted
+- [x] accepted
 - [ ] accepted with changes
 - [ ] rejected
 
@@ -312,8 +314,20 @@ is cleared at the same moments — a change from contract §3.3, which leaves it
 that nothing retained describes a device that is gone:
 
 ```text
-te/device/<device>/ot/manifest        (retained)
+te/device/<device>/ot/<protocol>/manifest        (retained)
 ```
+
+> **Topic-scheme rule.** thin-edge treats `te/<a>/<b>/<c>/<d>` — exactly four segments, no
+> channel — as an entity's *registration* topic: the c8y mapper subscribes to `te/+/+/+/+` and
+> parses every message there as a registration (`Channel::EntityMetadata`). Revision 2 put the
+> manifest on `te/device/<d>/ot/manifest`, which is that shape; the mapper would have parsed
+> the manifest as a registration of an entity called `device/<d>/ot/manifest`, rejected it for
+> its missing `@type`, and logged the error on every replay. With §6 withdrawn the manifest sits
+> under the connector's entity-ish prefix as a channel of its own, which no mapper filter
+> matches. The rule for every tedge-dot topic, present and future: **never exactly four
+> segments after `te/`, and never a channel the mapper subscribes to** (`m`, `e`, `a`, `twin`,
+> `cmd`, `status/health`) unless the message is meant for it — the thin-edge command topics of
+> §7 are the intended case.
 
 ```json
 {
@@ -411,7 +425,7 @@ artefact a future MCP server or agent would read (§10).
 
 **Feedback**
 
-- [ ] accepted
+- [x] accepted
 - [ ] accepted with changes
 - [ ] rejected
 
@@ -511,7 +525,7 @@ whose set-temperature took different units from its get-temperature would fail t
 
 In particular: round an inexact integer write to nearest, or refuse it?
 
-- [ ] accepted
+- [x] accepted
 - [ ] accepted with changes
 - [ ] rejected
 
@@ -632,7 +646,7 @@ Either way `publish` is the same typed table in the same place; the decision is 
 
 **Feedback (5.1)**
 
-- [ ] A: the runtime applies `publish`
+- [x] A: the runtime applies `publish`
 - [ ] B: the flows apply `publish`
 
 Notes:
@@ -670,7 +684,7 @@ here: a limit is a property of the signal, not flow logic, and belongs next to t
 
 In particular: enforce `range` in the driver, or keep the driver limit-free and leave it to the cloud form?
 
-- [ ] accepted
+- [x] accepted
 - [ ] accepted with changes
 - [ ] rejected
 
@@ -701,7 +715,7 @@ least once since the mapper started.
 ### Proposed
 
 ```text
-te/device/plc1/ot/manifest                     (§3)
+te/device/plc1/ot/manifest                     (§3 — see its topic-scheme rule: this shape is a registration topic)
 te/device/plc1/ot/sample/temp_scaled
 te/device/plc1/ot/status/link
 te/device/plc1///cmd/ot_write/<id>              (§7 — the thin-edge command topic)
@@ -758,11 +772,13 @@ also credited to this section, are removed by §7 with or without it.
 
 **Feedback**
 
-- [ ] withdraw this section (keep the protocol level)
+- [x] withdraw this section (keep the protocol level)
 - [ ] drop the level; one device on two protocols becomes unsupported
 - [ ] drop the level from samples only; key the retained messages by protocol
 
 Notes:
+
+Though this assumes that any of the topic changes don't accidentally register a child device or service on the thin-edge.io topic structure as defined in https://thin-edge.github.io/thin-edge.io/references/mqtt-api/#topic-scheme
 
 ---
 
@@ -904,7 +920,7 @@ the connector see a thin-edge topic.
 
 In particular: is "the connector never speaks a thin-edge topic" a principle worth two flows?
 
-- [ ] accepted
+- [x] accepted
 - [ ] accepted with changes
 - [ ] rejected
 
@@ -949,38 +965,44 @@ tedge-dot manifest -c modbus.toml -d plc1
                             "parameter": { "sets": ["modbus_demo_sim_control_parameters", "modbus_demo_sim_commissioning_parameters"] } } } }
 ```
 
-A separate, single-implementation renderer turns manifests into DTM definitions:
+### 8.1 Output formats (accepted with changes)
+
+The reviewer asked for the Cumulocity rendering to stay reachable from the CLI, as one output
+format among possible future ones rather than the default. So instead of a separate script:
 
 ```sh
-tedge-dot manifest | tedge-dot-c8y-dtm > definitions.jsonl     # one definition per line, as today
+tedge-dot manifest                          # --format json (default): the manifest of §3
+tedge-dot manifest --format c8y-dtm         # DTM property definitions, one per line, as `describe --compact` today
 ```
 
-`tedge-dot-c8y-dtm` lives under [operations/](../../operations/) next to the other Cumulocity
-glue, is written once (a ~100-line script in the language the shims already use), and is
-tested against manifests, not against configurations.
+The renderer is implemented **over the manifest**, not over the configuration, and lives in the
+binary crate ([impl/rust/src/](../../impl/rust/src/)) as a `formats` module, not in the SDK — so
+the SDK stays cloud-free, a new format is a new function that takes a manifest, and the parity
+check compares both formats between the two binaries once the C port lands (§9). Rendering a
+set that several configurations share *once* is the renderer's job, as it is `describe`'s
+today.
 
 `manifest` carries over everything `describe` *checks* today, not only what it prints: the warning
 for a device without a `type` (its sets collide, RFC 0005), the refusal of a parameter id outside
 `[A-Za-z0-9_]`, and the forced set name of `--set` — which becomes a configuration key
 (`[connector] parameter_set`), because the flow that publishes the twin must agree on it, and
-today's `default_set` flow parameter is a second copy of that decision. Rendering a set that
-several configurations share *once* — today `describe`'s job across a directory — becomes the
-renderer's: it de-duplicates by identifier across the manifests it is given.
+today's `default_set` flow parameter is a second copy of that decision.
 
 ### Why
 
 The DTM rendering is the largest single piece of code in either SDK and the only piece that
-knows a cloud vendor's schema. Moving it out shrinks both SDKs, removes a cloud dependency from
-the "cloud-agnostic driver", and turns the parity test into the simpler statement *both
-implementations publish byte-identical manifests*. The manifest is also the artefact that any
+knows a cloud vendor's schema. Moving it out of the SDK and behind `--format` shrinks both SDKs,
+removes a cloud dependency from the "cloud-agnostic driver", and turns the parity test into the
+simpler statement *both implementations publish byte-identical manifests, and render them
+identically*. The manifest is also the artefact that any
 other cloud, an MCP server, or a commissioning tool would consume — MHS's reference file is
 model-agnostic for the same reason.
 
 ### Breaks
 
 - `tedge-dot describe` and its flags (`--set`, `--device`, `--compact`) are removed; the
-  README's registration snippet pipes `manifest` through the renderer instead.
-- `impl/c/ci/describe-parity.sh` compares manifests.
+  README's registration snippet uses `manifest --format c8y-dtm` instead.
+- `impl/c/ci/describe-parity.sh` compares manifests in both formats.
 - `just c-describe-parity` → `just c-manifest-parity`.
 - `ot-parameter-state` loses its `default_set` parameter; the set names arrive resolved in the
   manifest.
@@ -988,10 +1010,12 @@ model-agnostic for the same reason.
 **Feedback**
 
 - [ ] accepted
-- [ ] accepted with changes
+- [x] accepted with changes
 - [ ] rejected
 
 Notes:
+
+* There should be an option for users to specify the output format to printing the manifest in a Cumulocity DTM format. It doesn't need to be the default at least. We should assume there might be other output formats in the future, so something like `--format c8y-dtm` or something
 
 ---
 
@@ -1049,7 +1073,7 @@ contract version, or C is explicitly at the previous version — never a mix tha
 
 **Feedback**
 
-- [ ] accepted
+- [x] accepted
 - [ ] accepted with changes
 - [ ] rejected
 
@@ -1087,14 +1111,14 @@ command model (§7) has the topic.
 
 MHS's three access paths are MCP, a CLI, and code. tedge-dot has the CLI and, through flows,
 code. With §3 and §7 in place, an MCP server for a thin-edge device is a thin, generic
-adapter: every `ot/manifest` is a *resource*, `ot_write` is a *tool* whose argument schema is
+adapter: every `ot/<protocol>/manifest` is a *resource*, `ot_write` is a *tool* whose argument schema is
 generated from `datatype` + `range`, and samples are a subscription. It would need nothing
 from the connector that 0.2 does not already publish — which is the test of whether 0.2 is the
 right shape.
 
 **Feedback**
 
-- [ ] these are the right reservations
+- [x] these are the right reservations
 - [ ] something is missing or wrong (see notes)
 
 Notes:
@@ -1107,12 +1131,12 @@ Notes:
 | --- | --- | --- | --- | --- | --- |
 | 1 | `mode` → `datatype = "bytes"` | `mode`, `default_mode` rejected | `mode`, `value_repr`, `raw` write field gone | none | both |
 | 2 | slim sample | `sample_debug`, `sample_echo` added | sample loses 9 fields | read manifest instead of sample echoes; custom flows join | both |
-| 3 | device manifest | — | new retained `ot/manifest`; capability `point_labels` and link `info` gone; link status cleared with the manifest | `ot-measurement`, `ot-parameter-state`, `ot-registration` | both |
+| 3 | device manifest | — | new retained `ot/<protocol>/manifest`; capability `point_labels` and link `info` gone; link status cleared with the manifest | `ot-measurement`, `ot-parameter-state`, `ot-registration` | both |
 | 4 | writes in engineering units | a writable point's transform must be invertible | `value` in write requests and results is the scaled value | none | both (inversion in the runtime) |
 | 5 | typed metadata + `range`; 5.1 `publish` in the runtime | `range`, `publish`, `measurement`, `parameter` are point fields, merged key by key; legacy `meta.*` warned | writes outside `range` fail; with 5.1 A the sample stream is policy-filtered | `ot-measurement`, `ot-parameter-state` read typed fields | both |
 | 6 | no protocol level (optional; recommended withdrawn) | device names unique per broker, if accepted | every `ot/<protocol>/` topic, if accepted | every subscription, if accepted | both |
 | 7 | thin-edge commands | `command_aliases` added; shims name their service | `ot/cmd/<verb>` topics gone; commands on `///cmd/ot_<verb>` | `ot-command-forward` + `ot-command-result` → `ot-parameter-update` | both |
-| 8 | `describe` → `manifest` | `parameter_set` replaces `--set` and the flow's `default_set` | — | `ot-parameter-state` loses `default_set` | DTM code leaves both SDKs; one renderer script |
+| 8 | `describe` → `manifest --format json\|c8y-dtm` | `parameter_set` replaces `--set` and the flow's `default_set` | — | `ot-parameter-state` loses `default_set` | DTM code moves from the SDKs to the binaries' `formats` module, over the manifest |
 | 9 | C freeze | — | — | — | C stays at 0.1 until the port |
 
 Suggested sequencing, if everything is accepted: **3 → 2 → 4 → 5 → 1 → 7 → 6 → 8**, with 9 in
@@ -1142,7 +1166,7 @@ complete list; everything not in it is a rename, a relocation or a fix.
 | One device served by two connectors | §6 | **only if §6 is accepted** | withdraw §6 (recommended) |
 | Topic-level filtering by protocol | §6 | only if §6 is accepted | filter on `sample.protocol` |
 | The `ot/<protocol>/cmd/<verb>` topics as a command path outside thin-edge | §7 | yes | the thin-edge topic is the path; the CLI remains for a stopped service |
-| `describe` and its `--set`/`--device`/`--compact` flags | §8 | yes | `manifest` + renderer; `parameter_set` |
+| `describe` and its `--set`/`--device`/`--compact` flags | §8 | yes | `manifest --format c8y-dtm`; `parameter_set` |
 | A `tedge-dot-c` release during the transition | §9 | yes | the last 0.1 release; a one-pass port after ratification |
 | Writing wire units to a transformed point | §4 | yes — it was a defect | `bytes` writes stay verbatim |
 | OPC UA raw mode | §1 | **no** — kept as `bytes` | — |
