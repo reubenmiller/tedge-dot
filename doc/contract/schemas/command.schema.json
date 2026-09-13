@@ -26,7 +26,7 @@
         "boolean",
         "string"
       ],
-      "description": "Logical value for a typed write."
+      "description": "Logical value for a typed write, in ENGINEERING units — the same units a sample's 'value' carries (§4.2). The runtime inverts the point's linear transform before the module encodes it, and echoes the engineering value back in the result."
     },
     "value_repr": {
       "enum": [

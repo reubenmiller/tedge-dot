@@ -218,8 +218,39 @@ pub fn resolve(text: &str, base_dir: &Path) -> Result<ConnectorConfig, String> {
     let mut doc: Value = toml::from_str(text).map_err(|e| format!("failed to parse config: {e}"))?;
     check_document(&doc)?;
     expand(&mut doc, base_dir)?;
-    doc.try_into()
-        .map_err(|e: toml::de::Error| format!("failed to parse config: {e}"))
+    let config: ConnectorConfig = doc
+        .try_into()
+        .map_err(|e: toml::de::Error| format!("failed to parse config: {e}"))?;
+    check_writable_transforms(&config)?;
+    Ok(config)
+}
+
+/// Refuse a writable point whose `transform` cannot be inverted (contract §4.2).
+///
+/// A write carries the value in engineering units and the runtime inverts the transform to get
+/// the wire value. With `multiplier = 0` every wire value scales to the same reading, so there
+/// is no value a write could mean — and silently writing something would be worse than
+/// refusing the configuration that asked for it.
+fn check_writable_transforms(config: &ConnectorConfig) -> Result<(), String> {
+    for device in &config.devices {
+        for point in &device.points {
+            let Some(transform) = point.transform else {
+                continue;
+            };
+            if transform.is_invertible() {
+                continue;
+            }
+            if !crate::connector::Access::parse(point.access.as_deref()).can_write() {
+                continue;
+            }
+            return Err(format!(
+                "device '{}': point '{}' is writable but its transform cannot be inverted \
+                 (multiplier = 0), so a write has no wire value to encode",
+                device.name, point.id
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Expand every device's `points_from` references in place, leaving a document whose devices
@@ -1173,6 +1204,40 @@ points_from = ["not-installed"]
         )
         .unwrap_err();
         assert!(err.contains("defined more than once"), "{err}");
+    }
+
+    /// A writable point whose transform cannot be inverted is refused at load (§4.2): a write
+    /// carries engineering units, so with `multiplier = 0` there is no wire value it could
+    /// mean. A read-only point may declare one — nothing ever has to go back through it.
+    #[test]
+    fn a_writable_point_needs_an_invertible_transform() {
+        let dir = Dir::new("invertible-transform");
+        let config = |access: &str| {
+            format!(
+                r#"
+[connector]
+protocol = "modbus"
+
+[[device]]
+name = "plc-1"
+protocol_address = {{ host = "127.0.0.1" }}
+
+  [[device.point]]
+  id = "flat"
+  datatype = "uint16"
+  access = "{access}"
+  address = {{ table = "holding", address = 3, count = 1 }}
+  transform = {{ multiplier = 0.0, offset = 4.0 }}
+"#
+            )
+        };
+        let err = resolve(&config("read_write"), dir.path()).unwrap_err();
+        assert!(
+            err.contains("point 'flat' is writable but its transform cannot be inverted"),
+            "{err}"
+        );
+        // Read-only: legal, because nothing is ever written back through it.
+        resolve(&config("read"), dir.path()).unwrap();
     }
 
     /// A key the contract does not define is refused (§3.3), naming the table and — when one is

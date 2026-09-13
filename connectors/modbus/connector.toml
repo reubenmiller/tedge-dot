@@ -76,6 +76,18 @@ points_from      = ["plc-sim", "./points.d/modbus/plc-sim-extra.toml"]
   address  = { table = "holding", address = 3, count = 1 }
   meta     = { measurement = false }
 
+  # Writable AND scaled: a write carries engineering units and the runtime inverts the
+  # transform before the module encodes the register (§4.2). Register 3 holds 17001, so this
+  # reads 17.001; writing 20 must leave 20000 in the register, and the next read must say 20 —
+  # the round trip the 0.1 connector broke by encoding the request value verbatim.
+  [[device.point]]
+  id        = "temp_scaled"
+  datatype  = "uint16"
+  access    = "read_write"
+  address   = { table = "holding", address = 3, count = 1 }
+  transform = { decimal_shift = -3 }
+  unit      = "kV"
+
 # Switched off (§3.3): a disabled device is not loaded at all — never connected, polled or
 # advertised — and nothing else about it is read, so the point library it names need not be
 # installed. This one does not exist: remove `enabled = false` and the config no longer loads.

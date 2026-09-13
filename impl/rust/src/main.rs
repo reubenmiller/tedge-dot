@@ -1089,15 +1089,40 @@ async fn cmd_write(args: WriteArgs) -> Result<(), String> {
                 }
             } else {
                 let (value, repr) = parse_cli_value(args.value.as_deref().unwrap_or_default());
+                // `--value` is in engineering units, exactly like the service's write request
+                // (contract §4.2): the CLI and the service drive one code path, so they must
+                // also agree on what the number means.
+                let wire = match runtime::wire_value(point, &value) {
+                    Ok(wire) => wire,
+                    Err(reason) => {
+                        failures += 1;
+                        eprintln!(
+                            "error: write to {}/{} failed: {reason}",
+                            target.device.name, point.id
+                        );
+                        continue;
+                    }
+                };
                 CommandRequest {
                     point: point.id.clone(),
-                    value: Some(value),
+                    value: Some(wire),
                     value_repr: Some(repr.to_string()),
                     raw: None,
                 }
             };
+            let requested = args
+                .raw
+                .is_none()
+                .then(|| parse_cli_value(args.value.as_deref().unwrap_or_default()).0);
             match connector.execute(&target.device.name, "write", &request).await {
-                Ok(result) => print_write_result(&target.device.name, &result, args.json),
+                // Report the engineering value the operator typed, not the wire value the
+                // module encoded.
+                Ok(mut result) => {
+                    if let Some(requested) = requested {
+                        result.value = Some(requested);
+                    }
+                    print_write_result(&target.device.name, &result, args.json)
+                }
                 Err(e) => {
                     failures += 1;
                     eprintln!(

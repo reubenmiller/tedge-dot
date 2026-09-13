@@ -10,8 +10,8 @@ engineering units — a pre-existing defect that `range` would have compounded),
 §11.1, the complete list of what 0.2 knowingly gives up.
 
 Landing on `develop`, in the RFC's order: §9 (C freeze) · §3 (device manifest) ·
-**§2 (slim sample envelope)** · §4 · §5 · §1 · §7 · §8. Bold marks the section landing with
-this commit; the sections before it are already on `develop`.
+§2 (slim sample envelope) · **§4 (writes in engineering units)** · §5 · §1 · §7 · §8. Bold
+marks the section landing with this commit; the sections before it are already on `develop`.
 
 | Field | Value |
 | --- | --- |

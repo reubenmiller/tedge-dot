@@ -67,6 +67,19 @@ default_mode     = "typed"
   access   = "read_write"
   address  = { node_id = "ns=2;s=Running" }
 
+  # The SAME node as `setpoint`, seen through a transform: a write carries engineering units
+  # and the runtime inverts the transform before the module builds the variant (§4.2). Writing
+  # 12.345 here must leave 12345 on the node, which `setpoint` then reads back unscaled — the
+  # round trip the 0.1 connector broke by encoding the request value verbatim.
+  [[device.point]]
+  id        = "setpoint_scaled"
+  subscribe = false
+  datatype  = "int32"
+  access    = "read_write"
+  address   = { node_id = "ns=2;s=Setpoint" }
+  transform = { decimal_shift = -3 }
+  unit      = "kV"
+
   # Reading this node returns a Bad status -> quality "bad".
   [[device.point]]
   id       = "bad_point"

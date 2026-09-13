@@ -93,6 +93,18 @@ default_mode     = "typed"
   access   = "read_write"
   address  = { table = "holding", address = 22, count = 2 }
 
+  # Writable AND transformed: the round trip §4.2 exists for. A write carries engineering
+  # units, so the runtime must invert `decimal_shift = -3` before the module encodes the
+  # register — write 12.345 and the register holds 12345, not 12. Without a point that is both
+  # writable and scaled, the 0.1 defect (writes encoded verbatim) passed every suite.
+  [[device.point]]
+  id        = "setpoint_scaled"
+  datatype  = "uint16"
+  access    = "read_write"
+  address   = { table = "holding", address = 24, count = 1 }
+  transform = { decimal_shift = -3 }
+  unit      = "kV"
+
   # writable coil (B6 boolean round-trip).
   [[device.point]]
   id       = "coil_rw"
