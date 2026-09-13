@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod conformance;
+pub mod commands;
 pub mod connector;
 pub mod decode;
 pub mod descriptor;

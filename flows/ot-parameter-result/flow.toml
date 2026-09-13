@@ -1,0 +1,9 @@
+# ot-parameter-result: the bridged write-batch's transitions -> its cloud `parameter_update`.
+#
+# The other half of ot-parameter-update (RFC 0006 §7). It answers only the batches that bridge
+# raised — those carrying the `ot--` id prefix — so a batch issued anywhere else passes it by:
+# the connector already answers that one on the topic it arrived on.
+input.mqtt.topics = ["te/+/+/+/+/cmd/ot_write_batch/+"]
+
+[[steps]]
+script = "main.js"

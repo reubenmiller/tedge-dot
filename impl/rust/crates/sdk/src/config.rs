@@ -47,6 +47,16 @@ pub struct ConnectorSection {
     /// that inspects the wire, above all the conformance suite.
     #[serde(default)]
     pub sample_debug: bool,
+    /// Extra thin-edge command types this connector answers, each mapping to one it already
+    /// implements: `command_aliases = { ot_write_coil = "ot_write" }` (§6.6).
+    ///
+    /// The alias exists for the Cumulocity mapper, not for the protocol: two operation
+    /// templates cannot share one `workflow.operation` — the mapper picks the first and warns
+    /// — so `c8y_SetCoil` needs a command type of its own for as long as it is a separate
+    /// operation. Keeping that in configuration is what stops a cloud workaround from being
+    /// baked into a protocol-neutral runtime.
+    #[serde(default)]
+    pub command_aliases: std::collections::BTreeMap<String, String>,
     /// Directories searched for the point libraries devices name in `points_from`
     /// ([`crate::library`]). Unset means the built-in path: the site directory
     /// `/etc/tedge/plugins/ot/points.d` first, then the packaged

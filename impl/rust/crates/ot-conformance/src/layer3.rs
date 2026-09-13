@@ -62,11 +62,10 @@ impl Point {
         )
     }
 
-    fn cmd_topic(&self, protocol: &str, verb: &str, id: &str) -> String {
-        format!(
-            "te/device/{}/ot/{}/cmd/{verb}/{id}",
-            self.device, protocol
-        )
+    /// The thin-edge command topic a request for this point arrives on (§6, RFC 0006 §7).
+    /// `command_type` is the thin-edge type (`ot_write`, ...), not the contract verb.
+    fn cmd_topic(&self, command_type: &str, id: &str) -> String {
+        format!("te/device/{}///cmd/{command_type}/{id}", self.device)
     }
 }
 
@@ -191,10 +190,7 @@ const OWNERSHIP_SETTLE: Duration = Duration::from_secs(3);
 /// does not define is left unanswered. Every instance of a protocol on a broker receives it, and a
 /// `failed` from one that does not own the device would overwrite the owner's retained result.
 async fn check_b11_unowned_device_ignored(ctx: &Ctx<'_>, layer: &mut Layer) {
-    let topic = format!(
-        "te/device/conf-b11-not-configured/ot/{}/cmd/write/conf-b11",
-        ctx.protocol
-    );
+    let topic = "te/device/conf-b11-not-configured///cmd/ot_write/conf-b11".to_string();
     let mark = ctx.broker.mark();
     let request = serde_json::json!({ "status": "init", "point": "any", "value": 1 });
     ctx.broker.publish(&topic, request.to_string().as_bytes(), true);
@@ -1002,7 +998,7 @@ async fn check_b6_write_roundtrip(ctx: &Ctx<'_>, layer: &mut Layer) {
             layer.skip(&id, &name, "no probe value for the datatype".into());
             continue;
         };
-        let topic = point.cmd_topic(&ctx.protocol, "write", &format!("conf-{}", point.id));
+        let topic = point.cmd_topic("ot_write", &format!("conf-{}", point.id));
         let mark = ctx.broker.mark();
         ctx.broker.publish(
             &topic,
@@ -1119,7 +1115,7 @@ async fn check_b7_access_control(ctx: &Ctx<'_>, layer: &mut Layer) {
         return;
     };
 
-    let topic = point.cmd_topic(&ctx.protocol, "write", "conf-denied");
+    let topic = point.cmd_topic("ot_write", "conf-denied");
     let mark = ctx.broker.mark();
     let before = ctx.sim.write_count(&point.spec()).unwrap_or(0);
     ctx.broker.publish(
@@ -1192,7 +1188,7 @@ async fn check_b7_range(ctx: &Ctx<'_>, layer: &mut Layer) {
             return;
         }
     };
-    let topic = point.cmd_topic(&ctx.protocol, "write", "conf-range");
+    let topic = point.cmd_topic("ot_write", "conf-range");
     let mark = ctx.broker.mark();
     let before = ctx.sim.write_count(&point.spec()).unwrap_or(0);
     ctx.broker.publish(
@@ -1268,7 +1264,7 @@ async fn check_b8_hot_reload(ctx: &Ctx<'_>, layer: &mut Layer, config_path: &std
         let device_name = device["name"].as_str().unwrap_or_default().to_string();
         // Management verbs are addressed to the connector service (contract §6.3).
         let topic = format!(
-            "te/device/main/service/{}/ot/cmd/define-device/conf-b8",
+            "te/device/main/service/{}/cmd/ot_define_device/conf-b8",
             ctx.service
         );
         let mark = ctx.broker.mark();
@@ -1492,8 +1488,11 @@ fn check_b10_topic_discipline(ctx: &Ctx<'_>, layer: &mut Layer, from: usize) {
         format!("te/device/+/ot/{}/manifest", ctx.protocol),
         format!("te/device/+/ot/{}/status/link", ctx.protocol),
         format!("te/device/+/ot/{}/sample/+", ctx.protocol),
-        format!("te/device/+/ot/{}/cmd/+/+", ctx.protocol),
-        format!("te/device/main/service/{}/ot/cmd/+/+", ctx.service),
+        // The thin-edge command topics the runtime now answers on (§6.6), and the retained
+        // capability markers it publishes beside them.
+        "te/device/+///cmd/+/+".to_string(),
+        "te/device/+///cmd/+".to_string(),
+        format!("te/device/main/service/{}/cmd/+/+", ctx.service),
     ];
     let mut violations: Vec<String> = ctx
         .broker
@@ -1620,8 +1619,8 @@ fn validate_captured_traffic(ctx: &Ctx<'_>, from: usize) -> Layer {
             "command transitions",
             Kind::Command,
             Box::new({
-                let device = format!("te/device/+/ot/{}/cmd/+/+", ctx.protocol);
-                let service = format!("te/device/main/service/{}/ot/cmd/+/+", ctx.service);
+                let device = "te/device/+///cmd/+/+".to_string();
+                let service = format!("te/device/main/service/{}/cmd/+/+", ctx.service);
                 move |t: &str| topic_matches(&device, t) || topic_matches(&service, t)
             }),
         ),

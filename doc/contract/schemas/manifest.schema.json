@@ -35,6 +35,15 @@
       "type": "object",
       "description": "The connector's device descriptor (transport/address details) from its connect report, when seen."
     },
+    "commands": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "The thin-edge command types this device answers (§6.6), e.g. [\"ot_write\", \"ot_write_batch\"] — including any configured aliases. The connector publishes a retained capability marker on te/device/<device>///cmd/<type> for each of them, and the registration flow advertises these instead of a hard-coded list."
+    },
     "points": {
       "type": "object",
       "description": "Every configured point, keyed by point id.",
@@ -83,8 +92,12 @@
             "additionalProperties": false,
             "description": "Engineering-unit bounds (§5.3): what the cloud form renders as minimum/maximum AND what the connector enforces on write, so the two cannot disagree.",
             "properties": {
-              "min": { "type": "number" },
-              "max": { "type": "number" }
+              "min": {
+                "type": "number"
+              },
+              "max": {
+                "type": "number"
+              }
             }
           },
           "publish": {
@@ -92,22 +105,36 @@
             "additionalProperties": false,
             "description": "The per-signal publish policy the connector runtime has ALREADY applied to this point's sample stream (§5.4). Published so a consumer can tell 'nothing changed' from 'nothing was read'.",
             "properties": {
-              "on_change": { "type": "boolean" },
-              "deadband": { "type": "number" },
-              "min_interval": { "type": "string" },
-              "debounce": { "type": "string" }
+              "on_change": {
+                "type": "boolean"
+              },
+              "deadband": {
+                "type": "number"
+              },
+              "min_interval": {
+                "type": "string"
+              },
+              "debounce": {
+                "type": "string"
+              }
             }
           },
           "measurement": {
             "description": "Where the signal lands as a measurement (§5.5): false to keep it out of the measurements, or a table naming its group and series.",
             "oneOf": [
-              { "const": false },
+              {
+                "const": false
+              },
               {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                  "group": { "type": "string" },
-                  "series": { "type": "string" }
+                  "group": {
+                    "type": "string"
+                  },
+                  "series": {
+                    "type": "string"
+                  }
                 }
               }
             ]
@@ -182,7 +209,11 @@
             ]
           }
         }
-      }
+      },
+      "commands": [
+        "ot_write",
+        "ot_write_batch"
+      ]
     }
   ]
 }

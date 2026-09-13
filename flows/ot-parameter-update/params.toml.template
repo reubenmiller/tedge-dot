@@ -1,0 +1,4 @@
+# This flow takes no parameters: the command types it bridges are fixed, and the connector that
+# answers the batch is chosen by ownership (contract §6.5 — the instance that has every point),
+# not by a protocol named here. The 0.1 `protocol` fallback of ot-command-forward is gone with
+# the connector-side command topics.

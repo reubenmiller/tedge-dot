@@ -8,9 +8,9 @@ input.mqtt.topics = ["te/+/+/ot/+/status/link", "te/+/+/ot/+/manifest"]
 # whose device config names a `type` (contract §3.1) reports it on the link status, and that
 # wins over this — it says what the device *is* rather than which protocol reaches it.
 device_type = "${params.device_type}"
-# Comma-separated generic OT command capabilities to advertise on each device (so the cloud mapper
-# routes the matching operations). `ot_write` backs c8y_SetRegister; `ot_write_coil` backs c8y_SetCoil;
-# `parameter_update` backs c8y_ParameterUpdate (device parameters).
+# Extra command capabilities to advertise on each device, beyond the ones the device manifest
+# lists (the connector already answers those). `parameter_update` is the one that belongs here:
+# no connector answers it — ot-parameter-update bridges it to an ot_write_batch.
 command_capabilities = "${params.command_capabilities}"
 # Optional digital-twin fragment name. When set, the connector's device descriptor (the device
 # manifest's `info`) is published to te/device/<device>///twin/<twin_fragment>. Empty = no twin.

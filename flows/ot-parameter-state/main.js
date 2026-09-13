@@ -3,8 +3,8 @@
 // Direction: OT protocol format -> thin-edge.io data model.
 //   in:  te/device/<device>/ot/<protocol>/manifest                 (retained: what the points are)
 //        te/device/<device>/ot/<protocol>/sample/<point>           (reads of parameter points)
-//        te/device/<device>/ot/<protocol>/cmd/write/<id>           (single write results)
-//        te/device/<device>/ot/<protocol>/cmd/write-batch/<id>     (batch write results)
+//        te/device/<device>///cmd/ot_write/<id>                    (single write results)
+//        te/device/<device>///cmd/ot_write_batch/<id>              (batch write results)
 //   out: te/device/<device>///twin/<set>                           (retained: { <point>: value })
 //
 // A *parameter* is a point the device manifest (contract §8.2) lists with a `parameter.sets`
@@ -29,9 +29,10 @@
 //
 // Shared state (context.mapper):
 //   "ot-manifest:<device>"                -> the device manifest (also kept by ot-measurement)
-//   "ot-protocol:<device>"                -> protocol segment seen for the device
-//                                            (read by ot-command-forward)
 //   "ot-parameter-values:<device>:<set>"  -> { <point>: value }
+//
+// The `ot-protocol:<device>` entry is gone with ot-command-forward (RFC 0006 §7): nothing needs
+// the protocol to ADDRESS a device any more, so nothing has to learn it from a sample first.
 
 const decoder = new TextDecoder();
 
@@ -79,13 +80,13 @@ function setsOf(context, device, point) {
   return usable.length ? usable : false;
 }
 
-// The points a write/write-batch result names: the `results` of a terminal transition, or the
-// single `point` of a `write`.
-function successfulWrites(verb, payload) {
+// The points an ot_write / ot_write_batch result names: the `results` of a terminal
+// transition, or the single `point` of an ot_write.
+function successfulWrites(commandType, payload) {
   const updates = {};
-  if (verb === "write" && typeof payload.point === "string" && payload.value !== undefined) {
+  if (commandType === "ot_write" && typeof payload.point === "string" && payload.value !== undefined) {
     updates[payload.point] = payload.value;
-  } else if (verb === "write-batch") {
+  } else if (commandType === "ot_write_batch") {
     for (const r of payload.results ?? []) {
       if (r?.status === "successful" && typeof r.point === "string" && r.value !== undefined) {
         updates[r.point] = r.value;
@@ -120,11 +121,12 @@ function applyValues(context, device, updates) {
 }
 
 export function onMessage(message, context) {
+  // Topic shapes: te/device/<device>/ot/<protocol>/manifest
+  //               te/device/<device>/ot/<protocol>/sample/<point>
+  //               te/device/<device>///cmd/<command type>/<id>
   const parts = message.topic.split("/");
   const device = parts[2];
-  const protocol = parts[4];
   const kind = parts[5];
-  context.mapper.set(`ot-protocol:${device}`, protocol);
 
   if (kind === "manifest") {
     rememberManifest(context, device, message.payload);

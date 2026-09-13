@@ -8,6 +8,8 @@
 
 [exec.workflow]
 operation = "ot_set_config"
+# See c8y_ModbusConfiguration: a gateway operation, claimed by the service it names (§6.6).
+input.service = "tedge-dot-modbus"
 input.target = "connection"
 input.config.serial.baudrate = "${.payload.c8y_SerialConfiguration.baudRate}"
 input.config.serial.stopbits = "${.payload.c8y_SerialConfiguration.stopBits}"

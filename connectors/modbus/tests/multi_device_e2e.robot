@@ -72,7 +72,7 @@ Describe Merges The Parameter Set The Instances Share
     Should Contain    ${stderr}    plc-10
 
 A Write Is Handled Only By The Instance Owning The Device
-    ${topic}=    Set Variable    te/device/plc-3/ot/${PROTOCOL}/cmd/write/w-1
+    ${topic}=    Set Variable    te/device/plc-3///cmd/ot_write/w-1
     Publish Message    ${topic}    {"status":"init","point":"temp_u16","value":3003}    retain=True
     Command Should Be Handled Once    ${topic}    executing    successful
     Point Should Read    plc-3    temp_u16    3003
@@ -82,7 +82,7 @@ A Write Is Handled Only By The Instance Owning The Device
 A Write Batch Is Handled Only By The Instance Owning The Device
     [Documentation]    The shape of the reported failure: a parameter update (one write-batch) for
     ...                one device of many, completed as failed by the instances that do not own it.
-    ${topic}=    Set Variable    te/device/plc-7/ot/${PROTOCOL}/cmd/write-batch/b-1
+    ${topic}=    Set Variable    te/device/plc-7///cmd/ot_write_batch/b-1
     Publish Message    ${topic}    {"status":"init","writes":[{"point":"temp_u16","value":7007}]}    retain=True
     Command Should Be Handled Once    ${topic}    executing    successful
     ${result}=    Get Message    ${topic}
@@ -93,7 +93,7 @@ A Write Batch Is Handled Only By The Instance Owning The Device
 A Command For A Device No Instance Owns Is Left Unanswered
     [Documentation]    An instance cannot tell a device that nobody owns from one that another
     ...                process on the same broker owns, so none of them answers for it (§6).
-    ${topic}=    Set Variable    te/device/plc-99/ot/${PROTOCOL}/cmd/write/w-2
+    ${topic}=    Set Variable    te/device/plc-99///cmd/ot_write/w-2
     Publish Message    ${topic}    {"status":"init","point":"temp_u16","value":1}    retain=True
     Sleep    ${SETTLE}
     ${transitions}=    Connector Transitions On    ${topic}
@@ -103,32 +103,42 @@ A Management Command Is Applied Only By The Service It Addresses
     [Documentation]    A management command changes ONE configuration file, so it is addressed to
     ...                that instance's service (§6.3) — not to a device topic every instance hears.
     ${device}=    New Device    plc-11    port=503
-    ${topic}=    Set Variable    te/device/main/service/tedge-dot-2/ot/cmd/define-device/m-1
+    ${topic}=    Set Variable    te/device/main/service/tedge-dot-2/cmd/ot_define_device/m-1
     Publish Message    ${topic}    {"status":"init","device":${device}}    retain=True
     Command Should Be Handled Once    ${topic}    executing    successful
     Configs Defining Device Should Be    plc-11    ${CONFIG_DIR}/plc-2.toml
     # plc-11 is wired to simulated device 2.
     Point Should Read    plc-11    device_id    2
     # Command ownership follows the reload: the new device's commands reach its new owner alone.
-    ${write}=    Set Variable    te/device/plc-11/ot/${PROTOCOL}/cmd/write/w-3
+    ${write}=    Set Variable    te/device/plc-11///cmd/ot_write/w-3
     Publish Message    ${write}    {"status":"init","point":"temp_u16","value":1111}    retain=True
     Command Should Be Handled Once    ${write}    executing    successful
 
-A Management Verb On A Device Topic Is Refused By The Owner Alone
-    [Documentation]    A management verb published on a device topic is not applied by anyone:
-    ...                the instance owning the device refuses it and names the service topic, and
-    ...                no other instance answers.
-    ${device}=    New Device    plc-12    port=502
-    ${topic}=    Set Variable    te/device/plc-1/ot/${PROTOCOL}/cmd/define-device/m-2
+A Management Verb On A Device Topic Is Claimed By The Service It Names
+    [Documentation]    A Cloud Fieldbus operation belongs to the GATEWAY, so the c8y mapper
+    ...                publishes it on the gateway's command topic — never on a connector's
+    ...                service topic. The claim is therefore the payload's `service` (§6.6): the
+    ...                instance it names acts, and every other instance leaves it alone.
+    ${device}=    New Device    plc-12    port=506
+    ${topic}=    Set Variable    te/device/main///cmd/ot_define_device/m-2
+    Publish Message    ${topic}    {"status":"init","service":"tedge-dot-5","device":${device}}    retain=True
+    Command Should Be Handled Once    ${topic}    executing    successful
+    Configs Defining Device Should Be    plc-12    ${CONFIG_DIR}/plc-5.toml
+
+A Management Verb Naming No Service Is Nobody's
+    [Documentation]    ...and a request that names no service stays at `init`, like a command for
+    ...                an unowned device (§6.5). Answering it would mean every instance on the
+    ...                broker racing to reconfigure itself from one message.
+    ${device}=    New Device    plc-14    port=502
+    ${topic}=    Set Variable    te/device/main///cmd/ot_define_device/m-4
     Publish Message    ${topic}    {"status":"init","device":${device}}    retain=True
-    Command Should Be Handled Once    ${topic}    failed
-    ${result}=    Get Message    ${topic}
-    ${reason}=    Get Json Field    ${result}    reason
-    Should Contain    ${reason}    te/device/main/service/
-    Configs Defining Device Should Be    plc-12
+    Sleep    3s
+    ${transitions}=    Connector Transitions On    ${topic}
+    Should Be Empty    ${transitions}    a request naming no service is nobody's to answer
+    Configs Defining Device Should Be    plc-14
 
 A Device Is Removed Only By The Service It Is Addressed To
-    ${topic}=    Set Variable    te/device/main/service/tedge-dot-2/ot/cmd/remove-device/m-3
+    ${topic}=    Set Variable    te/device/main/service/tedge-dot-2/cmd/ot_remove_device/m-3
     Publish Message    ${topic}    {"status":"init","device":"plc-11"}    retain=True
     Command Should Be Handled Once    ${topic}    executing    successful
     Configs Defining Device Should Be    plc-11
@@ -142,7 +152,7 @@ A Device Is Switched Off And On Again With Set-Config
     ...                off in place: the reload stops polling it and its commands go unanswered, as
     ...                for a removed device — but its definition stays in the file, and switching it
     ...                back on brings the same device back.
-    ${service}=    Set Variable    te/device/main/service/tedge-dot-8/ot/cmd/set-config
+    ${service}=    Set Variable    te/device/main/service/tedge-dot-8/cmd/ot_set_config
     Publish Message    ${service}/e-1
     ...    {"status":"init","target":"device:plc-8","config":{"enabled":false}}    retain=True
     Command Should Be Handled Once    ${service}/e-1    executing    successful
@@ -155,7 +165,7 @@ A Device Is Switched Off And On Again With Set-Config
     Retained Message Should Be Cleared    te/device/plc-8/ot/${PROTOCOL}/status/link
     Clear Messages
     No Messages On Topic    te/device/plc-8/ot/${PROTOCOL}/sample/#    timeout=5
-    ${write}=    Set Variable    te/device/plc-8/ot/${PROTOCOL}/cmd/write/e-2
+    ${write}=    Set Variable    te/device/plc-8///cmd/ot_write/e-2
     Publish Message    ${write}    {"status":"init","point":"temp_u16","value":8008}    retain=True
     Sleep    ${SETTLE}
     ${transitions}=    Connector Transitions On    ${write}
@@ -175,7 +185,7 @@ A Device Polls At Its Own Interval
     ...                builders). Keys are checked by name (§3.3), so
     ...                the misspelling `polling_interval` is refused, naming the key it resembles,
     ...                instead of being accepted and silently ignored.
-    ${service}=    Set Variable    te/device/main/service/tedge-dot-9/ot/cmd/set-config
+    ${service}=    Set Variable    te/device/main/service/tedge-dot-9/cmd/ot_set_config
     Publish Message    ${service}/p-1
     ...    {"status":"init","target":"device:plc-9","config":{"polling_interval":"4s"}}    retain=True
     Command Should Be Handled Once    ${service}/p-1    executing    failed
@@ -199,19 +209,18 @@ A Device Polls At Its Own Interval
     Should Be True    ${fast_count} >= 9
     ...    plc-10 was sampled ${fast_count} times in 12s at the connector's 1s interval
 
-Flows Route A Management Command To The Service It Names
-    [Documentation]    (flows) A thin-edge `ot_define_device` naming a `service` is bridged to that
-    ...                instance's service topic, applied there alone, and its result completes the
-    ...                thin-edge command on the device it was issued for.
-    [Tags]    flows
+A Management Command Needs No Flow Any More
+    [Documentation]    The `ot_define_device` above was answered by the connector on the topic it
+    ...                arrived on — no flow, no second hop, no `ot--` id (RFC 0006 §7). This
+    ...                pins that: nothing was ever published on the service topic the 0.1 bridge
+    ...                would have re-addressed it to.
     ${device}=    New Device    plc-13    port=506
-    Publish Message    te/device/main///cmd/ot_define_device/f-1
-    ...    {"status":"init","service":"tedge-dot-5","device":${device}}    retain=True
-    Wait For Message Containing    te/device/main///cmd/ot_define_device/f-1    "status":"successful"
-    ...    timeout=${FLOWS_TIMEOUT}
-    Command Should Be Handled Once
-    ...    te/device/main/service/tedge-dot-5/ot/cmd/define-device/ot--f-1    executing    successful
+    ${topic}=    Set Variable    te/device/main///cmd/ot_define_device/f-1
+    Publish Message    ${topic}    {"status":"init","service":"tedge-dot-5","device":${device}}    retain=True
+    Command Should Be Handled Once    ${topic}    executing    successful
     Configs Defining Device Should Be    plc-13    ${CONFIG_DIR}/plc-5.toml
+    No Messages On Topic
+    ...    te/device/main/service/tedge-dot-5/cmd/ot_define_device/ot--f-1    timeout=3
 
 
 *** Keywords ***

@@ -54,10 +54,11 @@ up naturally. `<device>` is the thin-edge entity id segment for the device
 | Device manifest | connector → broker | `te/device/<device>/ot/<protocol>/manifest` | yes |
 | Device link status | connector → broker | `te/device/<device>/ot/<protocol>/status/link` | yes |
 | Capability descriptor | connector → broker | `te/device/main/service/<service>/ot/capabilities` | yes |
-| Command request | requester → broker | `te/device/<device>/ot/<protocol>/cmd/<verb>/<id>` | yes |
-| Command result | connector → broker | `te/device/<device>/ot/<protocol>/cmd/<verb>/<id>` | yes |
-| Management command request | requester → broker | `te/device/main/service/<service>/ot/cmd/<verb>/<id>` | yes |
-| Management command result | connector → broker | `te/device/main/service/<service>/ot/cmd/<verb>/<id>` | yes |
+| Command request | requester → broker | `te/device/<device>///cmd/<command type>/<id>` | yes |
+| Command result | connector → broker | `te/device/<device>///cmd/<command type>/<id>` | yes |
+| Command capability marker | connector → broker | `te/device/<device>///cmd/<command type>` | yes |
+| Management command request | requester → broker | `te/device/main/service/<service>/cmd/<command type>/<id>` | yes |
+| Management command result | connector → broker | `te/device/main/service/<service>/cmd/<command type>/<id>` | yes |
 
 Notes:
 
@@ -685,9 +686,35 @@ counterpart of `parameter = false`: a parameter whose value belongs on its twin 
 ## 6. Command protocol
 
 Commands let external actors (cloud operations, other flows, operators) act on a connector —
-primarily **writing** points. Commands use a request/result state machine on
-`te/device/<device>/ot/<protocol>/cmd/<verb>/<id>` (retained). JSON Schema:
-[schemas/command.schema.json](schemas/command.schema.json).
+primarily **writing** points. Commands use a request/result state machine on the **thin-edge
+command topics**, which the connector subscribes to and drives itself:
+
+```text
+te/device/<device>///cmd/<command type>/<id>              a device command
+te/device/main/service/<service>/cmd/<command type>/<id>  addressed to one instance
+```
+
+JSON Schema: [schemas/command.schema.json](schemas/command.schema.json).
+
+Each contract **verb** has one thin-edge **command type**:
+
+| Verb | Command type |
+| --- | --- |
+| `write` | `ot_write` |
+| `write-batch` | `ot_write_batch` |
+| `set-config` | `ot_set_config` |
+| `define-device` | `ot_define_device` |
+| `remove-device` | `ot_remove_device` |
+
+`ot_write` is not a cloud concept and not a thin-edge core concept: it is a command type *this
+project defines*, whose payload is the contract's own write request and whose state machine is
+the contract's own. A connector answering it directly is not cloud coupling — it is what every
+other thin-edge plugin does, and it removes the pair of flows that used to move a message
+between two topics meaning the same thing. Every hop was a place a retained message could be
+left behind, an id prefix forgotten, or a correlation field dropped.
+
+Fields the connector does not know (`c8y-mapper`, `origin`, …) are carried into every
+transition unchanged, and the result is published on the topic the request arrived on.
 
 ### 6.1 State machine
 
@@ -750,21 +777,26 @@ for free without any extra code.
 
 A connector that uses the SDK runtime MUST advertise these verbs (and the `management` feature)
 in its capability descriptor (§7). All three follow the same `init → executing →
-successful/failed` state machine as `write`, but on the connector's **service** command topic:
+successful/failed` state machine as `write`, and arrive on either of two topics:
 
 ```text
-te/device/main/service/<service>/ot/cmd/<verb>/<id>
+te/device/main/service/<service>/cmd/<command type>/<id>   addressed to one instance
+te/device/<device>///cmd/<command type>/<id>               claimed by payload.service
 ```
 
-A management command changes one connector instance's configuration file, so it is addressed to
-that instance by its `service_name` rather than to a device topic that every instance of the
-protocol receives (§6.5); the affected device is named in the payload. A connector:
+A management command changes **one** instance's configuration file, so exactly one instance may
+answer it. The service topic names that instance outright. The device topic exists because a
+cloud operation that reconfigures a gateway *is an operation on the gateway*: the c8y mapper
+publishes it on the entity it belongs to, never on a connector's service topic. There the claim
+is the payload's `service` field. A connector:
 
-- MUST act on management verbs only on its own service command topic;
-- MUST reject (`failed`, naming the service topic in `reason`) a management verb received on the
-  topic of a device it owns, and any other verb received on its service command topic;
-- MUST echo the request's `origin` (§6.4) into every transition, so a bridge can complete the
-  command on the entity it was issued for, which the service topic does not name.
+- MUST act on a management verb on its own service command topic;
+- MUST act on one on a device topic **only** when the payload's `service` names it, and MUST
+  publish nothing otherwise — a request naming no service is nobody's and stays at `init`, like
+  a command for an unowned device (§6.5). Answering it would mean every instance on the broker
+  racing to reconfigure itself from one message;
+- MUST reject (`failed`) a point-I/O verb received on its service command topic;
+- MUST echo the request's `origin` (§6.4) into every transition.
 
 After a successful management command the runtime persists the updated configuration to disk and
 live-reloads the connector (re-validate, reconnect, reschedule) — no service restart is required.
@@ -891,23 +923,53 @@ long as it keeps these semantics.
 
 Several connector instances may share a broker — one process running a directory of
 configurations starts one instance per file, and further processes may run alongside it — and
-every instance of a protocol subscribes to the device command topics of the whole protocol
-(`te/device/+/ot/<protocol>/cmd/+/+`). Each command must still be acted on by exactly one of them.
-The command topic is retained and holds one message, so a second responder's transitions
-overwrite the first's: a fast `failed` ("unknown device") from an instance that does not own the
-device would replace the real result of the instance that does.
+every instance subscribes to the device command topics of every device
+(`te/device/+///cmd/+/+`). Each command must still be acted on by exactly one of them. The
+command topic is retained and holds one message, so a second responder's transitions overwrite
+the first's: a fast `failed` ("unknown device") from an instance that does not own the device
+would replace the real result of the instance that does.
 
 - A connector MUST act on a device command only when `<device>` is a device its current
-  configuration defines, and MUST NOT publish anything for a command addressed to any other
-  device — not even `failed`, since it cannot know whether another instance owns that device. A
-  command for a device no connector owns therefore stays at `init`; a requester needs its own
-  timeout for that case.
+  configuration defines **and** the request's point — every point, for a `write-batch` — is one
+  of that device's. The point half matters because the command topic does not name a protocol:
+  a device served by two connectors is answered by the one that has the point.
+- A connector MUST NOT publish anything for a command it does not own — not even `failed`, since
+  it cannot know whether another instance does. Such a command stays at `init`; a requester
+  needs its own timeout for that case.
 - Ownership follows the live configuration: a device added or removed by a management verb
   (§6.3) is answered, or no longer answered, as soon as the change is applied.
 - Management commands are addressed to one instance by its service name (§6.3).
 - A device MUST be defined by at most one instance per protocol on a broker, and every instance
   MUST have a unique `service_name`. An SDK runtime starting a directory of configurations warns
   about both.
+
+### 6.6 Command types, aliases and capability markers
+
+**Capability markers.** For every command type a device answers, the connector publishes a
+retained empty object on
+
+```text
+te/device/<device>///cmd/<command type>
+```
+
+which is how thin-edge (and a cloud mapper above it) learns the device accepts it. The markers
+are published with the device's manifest and cleared with it, so nothing advertises a command
+for a device that is gone. The manifest's `commands` (§8.2) lists the same set.
+
+**Aliases.** `[connector] command_aliases` adds further command types for a verb the connector
+already implements:
+
+```toml
+[connector]
+command_aliases = { ot_write_coil = "ot_write" }    # packaged default
+```
+
+The runtime subscribes to, answers and advertises an alias exactly as the command it stands for.
+The reason it exists is the Cumulocity mapper, not the protocol: two operation templates cannot
+share one `workflow.operation` — the mapper warns and picks the first — so `c8y_SetCoil` needs a
+command type of its own for as long as it is a separate operation. Keeping that in configuration
+is what stops a cloud workaround from being baked into a protocol-neutral runtime; delete the
+alias when the operation goes.
 
 #### Other verbs
 

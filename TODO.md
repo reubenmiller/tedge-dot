@@ -8,7 +8,12 @@
       `datatype` → §7 thin-edge commands → §8 `manifest --format`. §6 was withdrawn.
 * [ ] Port `impl/c/` to contract 0.2 in one pass once it is ratified and shipped in Rust
       (RFC 0006 §9, option A), then re-enable the `c`, `e2e-c` and `packaging-parity` CI jobs
-      and resume `just c-describe-parity` (→ `c-manifest-parity`).
+      and resume `just c-describe-parity` (→ `c-manifest-parity`). That pass must also pick up
+      the shared flows §7 renamed underneath the freeze: `impl/c/packaging/nfpm.yaml` still
+      installs `flows/ot-command-forward/` and `flows/ot-command-result/`, which no longer
+      exist — they are now `ot-parameter-update/` and `ot-parameter-result/`. The frozen file
+      was left alone deliberately; its packaging job is gated off, so nothing builds it in the
+      meantime.
 
 * [ ] Ship profibus in the `tedge-dot-rs` package: the `profibus` cargo feature is excluded
       from the goreleaser builds because its serial dependency (`serialport` via `profirust`)

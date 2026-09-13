@@ -24,7 +24,7 @@ ${PROTOCOL}             canbus
 ${SERVICE}              tedge-dot
 
 ${SAMPLE_PREFIX}        te/device/${DEVICE}/ot/${PROTOCOL}/sample
-${CMD_PREFIX}           te/device/${DEVICE}/ot/${PROTOCOL}/cmd/write
+${CMD_PREFIX}           te/device/${DEVICE}///cmd/ot_write
 ${LINK_TOPIC}           te/device/${DEVICE}/ot/${PROTOCOL}/status/link
 ${CAPS_TOPIC}           te/device/main/service/${SERVICE}/ot/capabilities
 ${HEALTH_TOPIC}         te/device/main/service/${SERVICE}/status/health

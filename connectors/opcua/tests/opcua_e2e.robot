@@ -21,12 +21,12 @@ ${PROTOCOL}             opcua
 ${SERVICE}              tedge-dot
 
 ${SAMPLE_PREFIX}        te/device/${DEVICE}/ot/${PROTOCOL}/sample
-${CMD_PREFIX}           te/device/${DEVICE}/ot/${PROTOCOL}/cmd/write
+${CMD_PREFIX}           te/device/${DEVICE}///cmd/ot_write
 ${LINK_TOPIC}           te/device/${DEVICE}/ot/${PROTOCOL}/status/link
 ${MANIFEST_TOPIC}       te/device/${DEVICE}/ot/${PROTOCOL}/manifest
 ${CAPS_TOPIC}           te/device/main/service/${SERVICE}/ot/capabilities
 ${HEALTH_TOPIC}         te/device/main/service/${SERVICE}/status/health
-${BATCH_PREFIX}         te/device/${DEVICE}/ot/${PROTOCOL}/cmd/write-batch
+${BATCH_PREFIX}         te/device/${DEVICE}///cmd/ot_write_batch
 ${PARAM_CMD_PREFIX}     te/device/${DEVICE}///cmd/parameter_update
 # The device type declared on [[device]] (§3.1) qualifies the parameter set names (§5.2).
 ${DEVICE_TYPE}          opcua-sim
@@ -293,13 +293,16 @@ Write Batch Writes Several Points In One Command
     Should Be Equal    ${value}    ${True}
 
 Write Batch Stops At The First Failure And Reports What Was Applied
-    [Documentation]    A batch with an unknown point fails, but the result lists the write that
-    ...                succeeded before it so the requester knows the device state.
+    [Documentation]    A batch whose second entry fails at the DEVICE fails, but the result lists
+    ...                the write that succeeded before it so the requester knows the device
+    ...                state, and the entry after it was never attempted. `temperature` is
+    ...                read-only, so the module refuses it — a failure only the device can
+    ...                report, unlike the ones the runtime catches up front.
     Publish Message    ${BATCH_PREFIX}/batch-2
-    ...    {"status":"init","writes":[{"point":"setpoint","value":17001},{"point":"no_such_point","value":1},{"point":"running","value":false}]}    retain=True
+    ...    {"status":"init","writes":[{"point":"setpoint","value":17001},{"point":"temperature","value":1},{"point":"running","value":false}]}    retain=True
     ${result}=    Wait For Message Containing    ${BATCH_PREFIX}/batch-2    "status":"failed"    timeout=${SAMPLE_TIMEOUT}
     ${reason}=    Get Json Field    ${result}    reason
-    Should Contain    ${reason}    no_such_point
+    Should Contain    ${reason}    temperature
     ${results}=    Get Json Field    ${result}    results
     Length Should Be    ${results}    2
     Should Be Equal    ${results}[0][status]    successful
@@ -377,13 +380,34 @@ Parameter Update Command Writes The Points And Completes
     ${value}=    Get Json Field    ${payload}    value
     Should Be Equal As Numbers    ${value}    1234
 
-Parameter Update With An Unknown Key Fails With The Connector Reason
+Parameter Update With A Stale Key Fails With The Connector Reason And Applies Nothing
+    [Documentation]    (flows) A parameter set that has drifted from the configuration — a key
+    ...                that is no longer a point — fails the whole operation, naming the key,
+    ...                with nothing written (§6.4): the set is never half-applied, and the
+    ...                operator sees a reason rather than an operation that hangs.
     [Tags]    flows
     Publish Message    ${PARAM_CMD_PREFIX}/c8y-mapper-2
-    ...    {"status":"init","operation":{"c8y_ParameterUpdate":{},"c8y_ParameterUpdate_${PARAM_SET}":{},"${PARAM_SET}":{"bogus":1}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}    retain=True
+    ...    {"status":"init","operation":{"c8y_ParameterUpdate":{},"c8y_ParameterUpdate_${PARAM_SET}":{},"${PARAM_SET}":{"setpoint":31337,"bogus":1}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}    retain=True
     ${result}=    Wait For Message Containing    ${PARAM_CMD_PREFIX}/c8y-mapper-2    "status":"failed"    timeout=${FLOWS_TIMEOUT}
     ${reason}=    Get Json Field    ${result}    reason
     Should Contain    ${reason}    bogus
+    # ...and the key that WAS valid was not written: the batch never started.
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/setpoint    timeout=${SAMPLE_TIMEOUT}
+    ${value}=    Get Json Field    ${payload}    value
+    Should Not Be Equal As Numbers    ${value}    31337
+
+Write Batch With An Unknown Point Applies Nothing
+    [Documentation]    A point the device does not define is caught before the first write, so
+    ...                the batch fails with NOTHING applied (§6.4). The owner still answers it:
+    ...                ownership needs one of the request's points to be its own, and a request
+    ...                whose points are all typos would otherwise hang at `init` for ever.
+    Publish Message    ${BATCH_PREFIX}/batch-4
+    ...    {"status":"init","writes":[{"point":"setpoint","value":31337},{"point":"no_such_point","value":1}]}    retain=True
+    ${result}=    Wait For Message Containing    ${BATCH_PREFIX}/batch-4    "status":"failed"    timeout=${SAMPLE_TIMEOUT}
+    ${reason}=    Get Json Field    ${result}    reason
+    Should Contain    ${reason}    no_such_point
+    ${results}=    Get Json Field    ${result}    results
+    Should Be Empty    ${results}    the batch never started
 
 Generic Write Command Is Bridged By The Flows
     [Documentation]    (flows) The pre-existing ot_write bridge (c8y_SetRegister path) still works
