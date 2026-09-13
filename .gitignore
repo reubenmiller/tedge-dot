@@ -9,6 +9,8 @@ output/
 dist/
 .intentionally-empty-file.o
 target/
+# Cargo target directories under another name (CARGO_TARGET_DIR=…/target-<something>)
+target-*/
 .DS_Store
 connectors/*/.venv/
 connectors/*/output/
