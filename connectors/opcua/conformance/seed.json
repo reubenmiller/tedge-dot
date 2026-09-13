@@ -12,6 +12,7 @@
     { "identifier": "Setpoint", "datatype": "uint16", "value": 100, "writable": true },
     { "identifier": "TargetTemp", "datatype": "float64", "value": 0.0, "writable": true },
     { "identifier": "Enable", "datatype": "bool", "value": false, "writable": true },
-    { "identifier": "Recipe", "datatype": "string", "value": "initial", "writable": true }
+    { "identifier": "Recipe", "datatype": "string", "value": "initial", "writable": true },
+    { "identifier": "SetpointScaled", "datatype": "uint16", "value": 500, "writable": true }
   ]
 }

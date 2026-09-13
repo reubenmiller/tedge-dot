@@ -427,6 +427,32 @@ Rules:
 - The math is owned by the SDK so every connector scales identically. Connectors invoke the SDK
   helper rather than re-implementing it.
 
+**A write is in the same units as a read.** The scaled value *is* the value of the point, so a
+`write` request's `value`, a `write-batch` entry's `value` and the `tedge-dot write --value`
+CLI all carry **engineering units** — what a sample reports and what an operator edits on the
+twin. The runtime inverts the transform before the module's `execute`:
+
+```
+wire = (value − offset) × divisor ÷ (multiplier × 10^decimal_shift)
+```
+
+so the round trip closes: writing `20` to a point with `decimal_shift = -3` leaves `20000` in
+the register, and the next read says `20`. A module keeps receiving exactly what it received
+before — the wire value — and needs no change.
+
+- The inversion happens in the runtime, once, for every protocol.
+- For an integer datatype the inverted value is **rounded to nearest** (an operator editing a
+  °C twin must not be refused for a value the register cannot express exactly).
+- A value the datatype could not hold after inversion **fails the write** rather than wrapping
+  on the wire: `value 70 does not fit uint16 after transform`.
+- `bool`, `string` and `bytes` values are untouched, as the transform never applied to them,
+  and a point whose transform is the identity is unaffected in every respect.
+- A **writable** point whose transform cannot be inverted (`multiplier = 0`, which maps every
+  wire value to `offset`) is refused at configuration time: there is no wire value such a write
+  could mean. A read-only point may declare one.
+- The result message echoes the **engineering** value the requester sent, not the wire value
+  the module encoded, so an optimistic twin update stays in the units the twin displays.
+
 ## 5. The sample envelope
 
 Every successful or failed read produces exactly one **sample** message on

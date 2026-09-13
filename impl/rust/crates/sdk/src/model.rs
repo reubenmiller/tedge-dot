@@ -53,6 +53,44 @@ impl DataType {
             DataType::String | DataType::Bytes => return None,
         })
     }
+
+    /// True for the integer datatypes — the ones whose wire value must be a whole number, so a
+    /// write inverted through a transform is rounded to nearest before encoding (§4.2).
+    pub fn is_integer(self) -> bool {
+        matches!(
+            self,
+            DataType::Int8
+                | DataType::Uint8
+                | DataType::Int16
+                | DataType::Uint16
+                | DataType::Int32
+                | DataType::Uint32
+                | DataType::Int64
+                | DataType::Uint64
+        )
+    }
+
+    /// The inclusive range of wire values this datatype can hold, for the numeric datatypes.
+    /// `None` for `bool`, `string` and `bytes`, which a transform never touches.
+    ///
+    /// The 64-bit bounds are the exact integer limits; they are not representable in `f64`, so
+    /// a value near them may round to the bound. That is deliberate: the check exists to catch
+    /// a write that is wrong by orders of magnitude, not to police the last bit of an i64.
+    pub fn value_range(self) -> Option<(f64, f64)> {
+        Some(match self {
+            DataType::Int8 => (i8::MIN as f64, i8::MAX as f64),
+            DataType::Uint8 => (u8::MIN as f64, u8::MAX as f64),
+            DataType::Int16 => (i16::MIN as f64, i16::MAX as f64),
+            DataType::Uint16 => (u16::MIN as f64, u16::MAX as f64),
+            DataType::Int32 => (i32::MIN as f64, i32::MAX as f64),
+            DataType::Uint32 => (u32::MIN as f64, u32::MAX as f64),
+            DataType::Int64 => (i64::MIN as f64, i64::MAX as f64),
+            DataType::Uint64 => (u64::MIN as f64, u64::MAX as f64),
+            DataType::Float32 => (-(f32::MAX as f64), f32::MAX as f64),
+            DataType::Float64 => (f64::MIN, f64::MAX),
+            DataType::Bool | DataType::String | DataType::Bytes => return None,
+        })
+    }
 }
 
 /// A decoded value. `Number` covers all integer and float types within the JS safe range;
@@ -106,6 +144,39 @@ impl Transform {
                 Value::Number((n * self.multiplier * 10f64.powi(self.decimal_shift)) / divisor + self.offset)
             }
             other => other,
+        }
+    }
+
+    /// True when [`Transform::invert`] can undo this transform — that is, when `multiplier` is
+    /// not zero. A `multiplier` of `0` maps every value to the same `offset`, so there is no
+    /// wire value a write could mean; a writable point declaring one is refused at load (§4.2).
+    pub fn is_invertible(&self) -> bool {
+        self.multiplier != 0.0
+    }
+
+    /// Undo the linear transform: given a value in engineering units — what a sample's `value`
+    /// carries, and therefore what a write request carries (§4.2) — return the wire value a
+    /// module must encode.
+    ///
+    /// ```text
+    /// wire = (value − offset) × divisor ÷ (multiplier × 10^decimal_shift)
+    /// ```
+    ///
+    /// Booleans and strings pass through, exactly as [`Transform::apply`] leaves them. Returns
+    /// `None` when the transform is not invertible, which the loader has already refused for a
+    /// writable point.
+    pub fn invert(&self, value: Value) -> Option<Value> {
+        match value {
+            Value::Number(n) => {
+                if !self.is_invertible() {
+                    return None;
+                }
+                let divisor = if self.divisor == 0.0 { 1.0 } else { self.divisor };
+                Some(Value::Number(
+                    (n - self.offset) * divisor / (self.multiplier * 10f64.powi(self.decimal_shift)),
+                ))
+            }
+            other => Some(other),
         }
     }
 }
@@ -357,6 +428,86 @@ mod tests {
         for gone in ["ts_ms", "value_repr", "unit", "type", "access", "meta"] {
             assert!(env.get(gone).is_none(), "{gone} is the manifest's, debug or not");
         }
+    }
+
+    /// §4.2: a write is in the same units as a read, so inverting must undo `apply` exactly.
+    /// This is the defect the RFC found: the demo's `temp_scaled` read 17.001 °C from register
+    /// 17001, an operator edited it to 20, and the module wrote register 20 — the next read
+    /// then said 0.02.
+    #[test]
+    fn invert_undoes_apply() {
+        let scaled = Transform {
+            multiplier: 1.0,
+            divisor: 1.0,
+            decimal_shift: -3,
+            offset: 0.0,
+        };
+        assert_eq!(scaled.apply(Value::Number(17001.0)), Value::Number(17.001));
+        assert_eq!(scaled.invert(Value::Number(20.0)), Some(Value::Number(20000.0)));
+
+        // Every field at once, and a round trip through both directions.
+        let full = Transform {
+            multiplier: 2.0,
+            divisor: 4.0,
+            decimal_shift: 1,
+            offset: 7.5,
+        };
+        for wire in [0.0, 1.0, -3.25, 1234.5] {
+            let Value::Number(engineering) = full.apply(Value::Number(wire)) else {
+                panic!("a numeric value stays numeric");
+            };
+            let Some(Value::Number(back)) = full.invert(Value::Number(engineering)) else {
+                panic!("an invertible transform inverts");
+            };
+            assert!((back - wire).abs() < 1e-9, "{wire} -> {engineering} -> {back}");
+        }
+    }
+
+    /// Booleans and strings are untouched in both directions — the transform never applied to
+    /// them — and a zero `divisor` is read as 1 on the way back too.
+    #[test]
+    fn invert_leaves_non_numbers_and_survives_a_zero_divisor() {
+        let t = Transform {
+            multiplier: 10.0,
+            divisor: 0.0,
+            decimal_shift: 0,
+            offset: 5.0,
+        };
+        assert_eq!(t.invert(Value::Bool(true)), Some(Value::Bool(true)));
+        assert_eq!(
+            t.invert(Value::Text("hi".into())),
+            Some(Value::Text("hi".into()))
+        );
+        // apply: 3 * 10 / 1 + 5 = 35; invert: (35 - 5) * 1 / 10 = 3
+        assert_eq!(t.apply(Value::Number(3.0)), Value::Number(35.0));
+        assert_eq!(t.invert(Value::Number(35.0)), Some(Value::Number(3.0)));
+    }
+
+    /// `multiplier = 0` maps every wire value to `offset`, so no write can mean anything.
+    /// The loader refuses such a point when it is writable (§4.2); the model reports it here.
+    #[test]
+    fn a_zero_multiplier_is_not_invertible() {
+        let t = Transform {
+            multiplier: 0.0,
+            divisor: 1.0,
+            decimal_shift: 0,
+            offset: 4.0,
+        };
+        assert!(!t.is_invertible());
+        assert_eq!(t.invert(Value::Number(4.0)), None);
+        // A non-numeric value still passes through: there was nothing to invert.
+        assert_eq!(t.invert(Value::Bool(false)), Some(Value::Bool(false)));
+    }
+
+    #[test]
+    fn integer_datatypes_know_their_range() {
+        assert!(DataType::Uint16.is_integer());
+        assert!(!DataType::Float32.is_integer());
+        assert!(!DataType::Bool.is_integer());
+        assert_eq!(DataType::Uint16.value_range(), Some((0.0, 65535.0)));
+        assert_eq!(DataType::Int8.value_range(), Some((-128.0, 127.0)));
+        assert_eq!(DataType::Bool.value_range(), None);
+        assert_eq!(DataType::Bytes.value_range(), None);
     }
 
     #[test]

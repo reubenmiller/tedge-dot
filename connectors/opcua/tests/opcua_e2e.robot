@@ -122,6 +122,25 @@ Writes An Int32 Node And Reads It Back
     ${value}=    Get Json Field    ${payload}    value
     Should Be Equal As Numbers    ${value}    4242
 
+Writes A Scaled Node In Engineering Units
+    [Documentation]    A write carries the value in the SAME units a read reports (§4.2), so the
+    ...                runtime inverts the point's transform before the module builds the
+    ...                variant. setpoint_scaled is the Setpoint node with decimal_shift = -3:
+    ...                writing 12.345 must leave 12345 on the node — which `setpoint`, the
+    ...                unscaled view of the same node, reads back. The 0.1 connector encoded the
+    ...                request value verbatim, so this wrote 12 and the next read said 0.012.
+    Publish Message    ${CMD_PREFIX}/sps-1    {"status":"init","point":"setpoint_scaled","value":12.345}    retain=True
+    ${result}=    Wait For Message Containing    ${CMD_PREFIX}/sps-1    "status":"successful"    timeout=${SAMPLE_TIMEOUT}
+    # The result echoes the engineering value, not the 12345 that went on the wire.
+    ${echoed}=    Get Json Field    ${result}    value
+    Should Be True    abs(${echoed} - 12.345) < 1e-6
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/setpoint_scaled    timeout=${SAMPLE_TIMEOUT}
+    ${value}=    Get Json Field    ${payload}    value
+    Should Be True    abs(${value} - 12.345) < 1e-6
+    ${raw}=    Wait For Sample    ${SAMPLE_PREFIX}/setpoint    timeout=${SAMPLE_TIMEOUT}
+    ${wire}=    Get Json Field    ${raw}    value
+    Should Be Equal As Numbers    ${wire}    12345
+
 Writes A Boolean Node And Reads It Back
     [Documentation]    A write command sets Running true; the next sample reflects it.
     Publish Message    ${CMD_PREFIX}/run-1    {"status":"init","point":"running","value":true}    retain=True

@@ -201,6 +201,38 @@ Writes A Holding Register And Reads It Back
     ${value}=    Get Json Field    ${payload}    value
     Should Be Equal As Numbers    ${value}    4242
 
+Writes A Scaled Register In Engineering Units
+    [Documentation]    A write carries the value in the SAME units a read reports (§4.2), so the
+    ...                runtime inverts the point's transform before the module encodes the
+    ...                register. temp_scaled is register 3 with decimal_shift = -3: writing 20
+    ...                must leave 20000 in the register, and both the result and the next read
+    ...                must say 20. The 0.1 connector encoded the request value verbatim, so
+    ...                this wrote register 20 and the next read said 0.02.
+    Publish Message    ${CMD_PREFIX}/scaled-1    {"status":"init","point":"temp_scaled","value":20}    retain=True
+    ${result}=    Wait For Message Containing    ${CMD_PREFIX}/scaled-1    "status":"successful"    timeout=${SAMPLE_TIMEOUT}
+    # The result echoes the engineering value, not the 20000 that went on the wire.
+    ${echoed}=    Get Json Field    ${result}    value
+    Should Be Equal As Numbers    ${echoed}    20
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/temp_scaled    timeout=${SAMPLE_TIMEOUT}
+    ${value}=    Get Json Field    ${payload}    value
+    Should Be Equal As Numbers    ${value}    20
+    # ...and the unscaled view of the same register proves 20000 really was written.
+    ${raw}=    Wait For Sample    ${SAMPLE_PREFIX}/temp_u16    timeout=${SAMPLE_TIMEOUT}
+    ${wire}=    Get Json Field    ${raw}    value
+    Should Be Equal As Numbers    ${wire}    20000
+
+A Write Outside The Datatype Fails Before The Device Is Touched
+    [Documentation]    70 on temp_scaled inverts to 70000, which a uint16 register cannot hold,
+    ...                so the write fails with a reason instead of wrapping on the wire (§4.2).
+    Publish Message    ${CMD_PREFIX}/scaled-2    {"status":"init","point":"temp_scaled","value":70}    retain=True
+    ${result}=    Wait For Message Containing    ${CMD_PREFIX}/scaled-2    "status":"failed"    timeout=${SAMPLE_TIMEOUT}
+    ${reason}=    Get Json Field    ${result}    reason
+    Should Contain    ${reason}    does not fit uint16 after transform
+    # The register still holds what the previous test wrote: nothing was applied.
+    ${raw}=    Wait For Sample    ${SAMPLE_PREFIX}/temp_u16    timeout=${SAMPLE_TIMEOUT}
+    ${wire}=    Get Json Field    ${raw}    value
+    Should Be Equal As Numbers    ${wire}    20000
+
 
 Samples Carry Only What Changes Per Read
     [Documentation]    A sample is a time series row (§5): identity, value, quality. The point's

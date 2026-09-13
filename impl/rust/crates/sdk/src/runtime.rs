@@ -1136,6 +1136,89 @@ async fn publish_sample(
     }
 }
 
+/// Turn a write request's value — which is in **engineering units**, the same units a sample's
+/// `value` carries (contract §4.2) — into the wire value a module encodes.
+///
+/// A read scales the wire value by the point's `transform`; a write inverts it, so the round
+/// trip closes: write 20 °C to a point with `decimal_shift = -3` and the next read says 20,
+/// not 0.02. The inversion happens here, once, for every protocol and every write path
+/// (`write`, `write-batch`, and the `tedge-dot write --value` CLI), so a module keeps
+/// receiving exactly what it receives today: the wire value.
+///
+/// Values a transform never touches — booleans, strings, a `bytes` hex string — pass through,
+/// and so does every value of a point whose transform is the identity, which leaves an
+/// untransformed point's write byte-for-byte as it was.
+///
+/// For an integer datatype the inverted value is rounded to nearest (an operator editing a
+/// °C twin should not be refused for a value the register cannot express exactly), and a value
+/// the datatype could not hold afterwards fails the write rather than wrapping on the wire.
+pub fn wire_value(
+    point: &crate::config::PointConfig,
+    value: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let transform = point.transform.unwrap_or_default();
+    if transform.is_identity() {
+        return Ok(value.clone());
+    }
+    let Some(engineering) = value.as_f64() else {
+        // A bool, a string, or a `bytes` hex payload: the transform never applied to it.
+        return Ok(value.clone());
+    };
+    if !transform.is_invertible() {
+        // The loader refuses this at configuration time; this is the belt to that's braces.
+        return Err(format!(
+            "point {} is writable but its transform cannot be inverted (multiplier = 0)",
+            point.id
+        ));
+    }
+    let Some(crate::model::Value::Number(mut wire)) =
+        transform.invert(crate::model::Value::Number(engineering))
+    else {
+        return Ok(value.clone());
+    };
+    let mut integral = false;
+    if let Some(datatype) = point.datatype {
+        if datatype.is_integer() {
+            wire = wire.round();
+            integral = true;
+        }
+        if let Some((min, max)) = datatype.value_range() {
+            if !wire.is_finite() || wire < min || wire > max {
+                return Err(format!(
+                    "value {engineering} does not fit {} after transform (wire value {wire})",
+                    serde_json::to_value(datatype)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_string))
+                        .unwrap_or_default(),
+                ));
+            }
+        }
+    }
+    // An integer datatype gets a JSON integer, not `12345.0`: a module builds a typed value
+    // from this number (OPC UA a variant, Modbus a register), and a fractional JSON number for
+    // an integer point is not something a requester would ever send.
+    if integral && wire.abs() < 9e15 {
+        return Ok(serde_json::json!(wire as i64));
+    }
+    Ok(serde_json::json!(wire))
+}
+
+/// The configured point of a device, for the write paths that must resolve a request's point
+/// against the live configuration before touching the device.
+fn configured_point<'a>(
+    config: &'a ConnectorConfig,
+    device: &str,
+    point: &str,
+) -> Option<&'a crate::config::PointConfig> {
+    config
+        .devices
+        .iter()
+        .find(|d| d.name == device)?
+        .points
+        .iter()
+        .find(|p| p.id == point)
+}
+
 /// Build a resolved [`PointRef`] from a configured point. Shared by the scheduler and by callers
 /// (e.g. a CLI) that drive a connector's `read_points`/`execute` directly.
 pub fn point_ref(point: &crate::config::PointConfig, device_default: Option<Mode>) -> PointRef {
@@ -1256,7 +1339,7 @@ async fn handle_command(
 
     // `write-batch` (§6.4) is implemented once here on top of the module's `write`.
     if verb == "write-batch" {
-        handle_write_batch(connector, client, topic, &device, &json, limits).await?;
+        handle_write_batch(connector, client, topic, &device, config, &json, limits).await?;
         debug!(%device, %verb, "command handled");
         return Ok(false);
     }
@@ -1266,17 +1349,42 @@ async fn handle_command(
         .and_then(|p| p.as_str())
         .unwrap_or_default()
         .to_string();
+    let origin = json.get("origin");
+
+    // The request's `value` is in engineering units (§4.2). Invert the point's transform here,
+    // before the module sees it, so that what an operator edits on the twin is what reaches the
+    // device. An unknown point is left to the module, whose "unknown point" error is the
+    // canonical one.
+    let requested = json.get("value").cloned();
+    let wire = match (&requested, configured_point(config, &device, &point)) {
+        (Some(value), Some(configured)) => match wire_value(configured, value) {
+            Ok(wire) => Some(wire),
+            Err(reason) => {
+                publish_retained(
+                    client,
+                    topic,
+                    with_origin(
+                        serde_json::json!({ "status": "failed", "point": point, "reason": reason }),
+                        origin,
+                    )
+                    .to_string(),
+                )
+                .await?;
+                debug!(%device, %verb, "command rejected before the device was touched");
+                return Ok(false);
+            }
+        },
+        _ => requested.clone(),
+    };
     let request = CommandRequest {
         point: point.clone(),
-        value: json.get("value").cloned(),
+        value: wire,
         value_repr: json
             .get("value_repr")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
         raw: json.get("raw").and_then(|v| v.as_str()).map(|s| s.to_string()),
     };
-
-    let origin = json.get("origin");
 
     // executing
     publish_retained(
@@ -1295,7 +1403,10 @@ async fn handle_command(
             let mut obj = serde_json::Map::new();
             obj.insert("status".into(), serde_json::Value::String("successful".into()));
             obj.insert("point".into(), serde_json::Value::String(result.point));
-            if let Some(v) = result.value {
+            // Echo the value the requester asked for, in engineering units (§4.2): the module
+            // reports back the wire value it encoded, and `ot-parameter-state`'s optimistic
+            // twin update must stay in the units the twin displays.
+            if let Some(v) = requested.or(result.value) {
                 obj.insert("value".into(), v);
             }
             if let Some(r) = result.raw {
@@ -1376,11 +1487,13 @@ pub fn parse_batch_writes(json: &serde_json::Value) -> Result<Vec<BatchWrite>, S
 /// module's `write` verb and stop at the first failure (later points are left untouched).
 /// The result carries one entry per attempted write so a requester can tell what was
 /// applied before a failure.
+#[allow(clippy::too_many_arguments)]
 async fn handle_write_batch(
     connector: &mut Box<dyn Connector>,
     client: &Mqtt,
     topic: &str,
     device: &str,
+    config: &ConnectorConfig,
     json: &serde_json::Value,
     limits: Limits,
 ) -> Result<(), BoxError> {
@@ -1416,9 +1529,26 @@ async fn handle_write_batch(
     let mut results: Vec<serde_json::Value> = Vec::with_capacity(writes.len());
     let mut failure: Option<String> = None;
     for w in &writes {
+        // Engineering units in, wire value out (§4.2) — as for a single write.
+        let wire = match (&w.value, configured_point(config, device, &w.point)) {
+            (Some(value), Some(configured)) => match wire_value(configured, value) {
+                Ok(wire) => Some(wire),
+                Err(reason) => {
+                    let reason = format!("write to {} failed: {reason}", w.point);
+                    results.push(serde_json::json!({
+                        "point": w.point,
+                        "status": "failed",
+                        "reason": reason,
+                    }));
+                    failure = Some(reason);
+                    break;
+                }
+            },
+            _ => w.value.clone(),
+        };
         let request = CommandRequest {
             point: w.point.clone(),
-            value: w.value.clone(),
+            value: wire,
             value_repr: None,
             raw: w.raw.clone(),
         };
@@ -1433,7 +1563,8 @@ async fn handle_write_batch(
                 let mut obj = serde_json::Map::new();
                 obj.insert("point".into(), serde_json::Value::String(result.point));
                 obj.insert("status".into(), serde_json::Value::String("successful".into()));
-                if let Some(v) = result.value {
+                // The engineering value the requester asked for, not the wire value (§4.2).
+                if let Some(v) = w.value.clone().or(result.value) {
                     obj.insert("value".into(), v);
                 }
                 if let Some(r) = result.raw {
@@ -2557,6 +2688,82 @@ protocol_address = { host = "127.0.0.1" }
         assert_eq!(debug["raw"], serde_json::json!("1234"));
         assert!(debug.get("addr").is_some());
         assert!(debug.get("meta").is_none());
+    }
+
+    /// §4.2 — the write path is in engineering units. These pin the four rules: invert, leave
+    /// an untransformed point alone, round to nearest for an integer datatype, and refuse a
+    /// value the datatype cannot hold once inverted.
+    #[test]
+    fn wire_value_inverts_the_transform() {
+        let cfg: ConnectorConfig = toml::from_str(
+            r#"
+[connector]
+protocol = "modbus"
+
+[[device]]
+name = "plc-1"
+protocol_address = { host = "127.0.0.1" }
+
+  [[device.point]]
+  id = "temp_scaled"
+  datatype = "uint16"
+  access = "read_write"
+  address = { table = "holding", address = 3, count = 1 }
+  transform = { decimal_shift = -3 }
+
+  [[device.point]]
+  id = "plain_u16"
+  datatype = "uint16"
+  access = "read_write"
+  address = { table = "holding", address = 4, count = 1 }
+
+  [[device.point]]
+  id = "offset_u8"
+  datatype = "uint8"
+  access = "read_write"
+  address = { table = "holding", address = 5, count = 1 }
+  transform = { multiplier = 0.1, offset = 10.0 }
+
+  [[device.point]]
+  id = "coil"
+  datatype = "bool"
+  access = "read_write"
+  address = { table = "coil", address = 0, count = 1 }
+  transform = { decimal_shift = -3 }
+"#,
+        )
+        .unwrap();
+        let point = |id: &str| configured_point(&cfg, "plc-1", id).unwrap();
+
+        // The RFC's example: 20 °C on a point scaled by 10^-3 is register 20000, not 20.
+        assert_eq!(
+            wire_value(point("temp_scaled"), &serde_json::json!(20)).unwrap(),
+            serde_json::json!(20000)
+        );
+        // An identity transform leaves the request untouched, byte for byte.
+        assert_eq!(
+            wire_value(point("plain_u16"), &serde_json::json!(4242)).unwrap(),
+            serde_json::json!(4242)
+        );
+        // An integer datatype rounds to nearest: (10.04 - 10) / 0.1 = 0.4 -> 0.
+        assert_eq!(
+            wire_value(point("offset_u8"), &serde_json::json!(10.04)).unwrap(),
+            serde_json::json!(0)
+        );
+        // ...and (10.16 - 10) / 0.1 = 1.6 -> 2.
+        assert_eq!(
+            wire_value(point("offset_u8"), &serde_json::json!(10.16)).unwrap(),
+            serde_json::json!(2)
+        );
+        // A value the datatype cannot hold after inversion fails instead of wrapping: uint8
+        // tops out at 255, and (46 - 10) / 0.1 = 360.
+        let err = wire_value(point("offset_u8"), &serde_json::json!(46)).unwrap_err();
+        assert!(err.contains("does not fit uint8 after transform"), "{err}");
+        // A boolean has nothing to invert, transform declared or not.
+        assert_eq!(
+            wire_value(point("coil"), &serde_json::json!(true)).unwrap(),
+            serde_json::json!(true)
+        );
     }
 
     #[test]

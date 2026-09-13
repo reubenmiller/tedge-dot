@@ -867,25 +867,42 @@ async fn check_b2_seq_monotonic(ctx: &Ctx<'_>, layer: &mut Layer, from: usize) {
 }
 
 /// The probe value the harness writes for B6, per datatype.
+///
+/// A write is in **engineering units** (§4.2), so the probe is chosen on the *wire* — a value
+/// the datatype certainly holds — and then scaled through the point's transform to get what is
+/// actually sent. The runtime must invert it back to the wire probe, which is what the
+/// simulator is then checked against. For an untransformed point the two are the same number,
+/// so this is the previous behaviour; for a transformed one it is the round trip the 0.1
+/// defect broke.
+///
+/// Returns `(value to send, its repr, the engineering value a read must report)`.
 fn write_probe(point: &Point) -> Option<(serde_json::Value, &'static str, SdkValue)> {
-    match point.datatype {
-        Some(DataType::Bool) => Some((serde_json::json!(true), "boolean", SdkValue::Bool(true))),
-        Some(DataType::Float32) | Some(DataType::Float64) => Some((
-            serde_json::json!(99.5),
-            "number",
-            SdkValue::Number(99.5),
-        )),
-        Some(DataType::Int8) | Some(DataType::Uint8) => {
-            Some((serde_json::json!(42), "number", SdkValue::Number(42.0)))
-        }
-        Some(DataType::String) => Some((
-            serde_json::json!("conformance-probe"),
-            "string",
+    let (wire, repr) = match point.datatype {
+        Some(DataType::Bool) => (SdkValue::Bool(true), "boolean"),
+        Some(DataType::Float32) | Some(DataType::Float64) => (SdkValue::Number(99.5), "number"),
+        Some(DataType::Int8) | Some(DataType::Uint8) => (SdkValue::Number(42.0), "number"),
+        Some(DataType::String) => (
             SdkValue::Text("conformance-probe".to_string()),
-        )),
-        Some(DataType::Bytes) => None,
-        Some(_) => Some((serde_json::json!(12345), "number", SdkValue::Number(12345.0))),
-        None => None,
+            "string",
+        ),
+        Some(DataType::Bytes) => return None,
+        Some(_) => (SdkValue::Number(12345.0), "number"),
+        None => return None,
+    };
+    // What a read of that wire value reports — and therefore what a write of the same signal
+    // must carry, and what the result and the next sample must say.
+    let engineering = point.transform.apply(wire);
+    Some((probe_json(&engineering), repr, engineering))
+}
+
+/// A probe value as a requester would write it. Like [`sdk_value_to_json`], except that an
+/// integral number stays a JSON integer rather than becoming `12345.0`: a module may reject a
+/// fractional JSON number for an integer node (OPC UA builds a typed variant from it), and a
+/// probe must look like what a real requester sends.
+fn probe_json(v: &SdkValue) -> serde_json::Value {
+    match v {
+        SdkValue::Number(n) if n.fract() == 0.0 && n.abs() < 9e15 => serde_json::json!(*n as i64),
+        other => sdk_value_to_json(other),
     }
 }
 
@@ -935,12 +952,22 @@ async fn check_b6_write_roundtrip(ctx: &Ctx<'_>, layer: &mut Layer) {
                     && r.json().ok().map(|j| j["status"] == "executing").unwrap_or(false)
             })
             .await?;
-            ctx.wait_connector_record(mark, COMMAND_TIMEOUT, "status 'successful'", |r| {
-                r.topic == topic
-                    && r.retain
-                    && r.json().ok().map(|j| j["status"] == "successful").unwrap_or(false)
-            })
-            .await?;
+            let done = ctx
+                .wait_connector_record(mark, COMMAND_TIMEOUT, "status 'successful'", |r| {
+                    r.topic == topic
+                        && r.retain
+                        && r.json().ok().map(|j| j["status"] == "successful").unwrap_or(false)
+                })
+                .await?;
+            // The result echoes the value the requester sent — engineering units (§4.2) — not
+            // the wire value the module encoded, so an optimistic twin update stays in the
+            // units the twin displays.
+            let echoed = done.json()?["value"].clone();
+            if !json_value_eq(&echoed, &json_value) {
+                return Err(format!(
+                    "the result echoes {echoed}, expected the requested {json_value}"
+                ));
+            }
 
             // the simulator must have seen a protocol write with the new value
             let writes = ctx.sim.write_count(&point.spec())?;
@@ -975,6 +1002,33 @@ async fn check_b6_write_roundtrip(ctx: &Ctx<'_>, layer: &mut Layer) {
         }
         .await;
         layer.check(&id, &name, result);
+    }
+
+    // The defect §4.2 fixes hid because no suite round-tripped a point that was BOTH writable
+    // and transformed: the writable points were unscaled and the scaled points read-only, so
+    // encoding a write verbatim passed everything. Require the coverage explicitly, or it can
+    // quietly disappear again the next time a conformance configuration is edited.
+    let transformed = ctx.points.iter().any(|p| {
+        p.access.can_write()
+            && p.mode == Mode::Typed
+            && p.bitfield.is_none()
+            && !p.transform.is_identity()
+            && p.datatype.map(|d| d != DataType::Bytes).unwrap_or(false)
+    });
+    if transformed {
+        layer.pass(
+            "B6-write-transformed",
+            "a writable point with a transform is round-tripped in engineering units",
+            None,
+        );
+    } else {
+        layer.fail(
+            "B6-write-transformed",
+            "a writable point with a transform is round-tripped in engineering units",
+            "the conformance config declares no point that is both writable and transformed, \
+             so a write encoded in wire units instead of engineering units would pass (§4.2)"
+                .into(),
+        );
     }
 }
 
