@@ -38,6 +38,8 @@ databits = 8
 # [[device]]
 # name             = "plc-1"
 # protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id = 1 }
+# poll_interval    = "10s"   # optional: this device's own interval ([connector] poll_interval
+#                            # otherwise); a point's poll_interval overrides both
 # enabled          = false   # optional: keeps the definition but leaves the device out
 #                            # (not connected or polled); default true
 #

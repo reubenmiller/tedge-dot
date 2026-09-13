@@ -1236,7 +1236,73 @@ static void check_disabled_devices(void) {
     scratch_free(&s);
 }
 
+/* A key the contract does not define is refused (contract §3.3), naming the
+ * table and, when one is close enough to be what was meant, the key it
+ * resembles. Mirrors library.rs::unknown_keys_are_refused_with_the_key_they_resemble
+ * and unknown_keys_in_a_point_library_are_refused, messages included. */
+static void check_unknown_keys(void) {
+    scratch_t s;
+    scratch_init(&s);
+    static const struct {
+        const char *what, *connector, *device, *point, *tail, *message;
+    } cases[] = {
+        {"a device key", "", "polling_interval = \"10s\"\n", "", "",
+         "unknown key 'polling_interval' in device 'plc-1' (did you mean 'poll_interval'?)"},
+        {"a connector key", "log_levle = \"debug\"\n", "", "", "",
+         "unknown key 'log_levle' in [connector] (did you mean 'log_level'?)"},
+        {"a point key", "", "", "datatyp = \"uint16\"\n", "",
+         "unknown key 'datatyp' in point 't' (did you mean 'datatype'?)"},
+        {"a transform key", "", "", "transform = { multiplyer = 2 }\n", "",
+         "unknown key 'multiplyer' in the transform of point 't' (did you mean 'multiplier'?)"},
+        {"a top-level key", "", "", "", "[mqqt]\nhost = \"broker\"\n",
+         "unknown key 'mqqt' in the top level (did you mean 'mqtt'?)"},
+        {"a key like none", "", "colour = \"red\"\n", "", "",
+         "unknown key 'colour' in device 'plc-1'"},
+        {"a disabled device's key", "", "enabled = false\nenabeld = true\n", "", "",
+         "unknown key 'enabeld' in device 'plc-1' (did you mean 'enabled'?)"},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
+        char body[1024];
+        snprintf(body, sizeof body,
+                 "[connector]\nprotocol = \"modbus\"\n%s"
+                 "[[device]]\nname = \"plc-1\"\nprotocol_address = { unit_id = 1 }\n%s"
+                 "[[device.point]]\nid = \"t\"\ndatatype = \"uint16\"\n"
+                 "address = { address = 1 }\n%s%s",
+                 cases[i].connector, cases[i].device, cases[i].point, cases[i].tail);
+        check_body_rejected(cases[i].what, &s, body, cases[i].message);
+    }
+
+    /* The free-form objects are not checked. */
+    write_file(&s, "etc/modbus.toml",
+               "[connector]\nprotocol = \"modbus\"\n[connection]\nwhatever = 1\n"
+               "[[device]]\nname = \"plc-1\"\nprotocol_address = { unit_id = 1 }\n"
+               "[[device.point]]\nid = \"t\"\ndatatype = \"uint16\"\n"
+               "address = { address = 1 }\nmeta = { anything = 1 }\n");
+    char err[256] = "";
+    tdot_config_t *cfg = tdot_config_load(scratch_path(&s, "etc/modbus.toml"), err, sizeof err);
+    CHECK(cfg != NULL, "connection, protocol_address, address and meta are free-form: %s", err);
+    tdot_config_free(cfg);
+
+    /* A point library's keys are checked too. */
+    write_file(&s, "modbus/acme.toml",
+               "[library]\nprotocol = \"modbus\"\nvendor = \"acme\"\n\n"
+               "[[point]]\nid = \"t\"\naddress = {}\n");
+    cfg = load_with_libs(&s, "\"acme\"", "", err, sizeof err);
+    CHECK(!cfg && strstr(err, "unknown key 'vendor' in [library] of point library"),
+          "a [library] key must be refused, got: %s", cfg ? "<loaded>" : err);
+    tdot_config_free(cfg);
+    write_file(&s, "modbus/acme.toml",
+               "[library]\nprotocol = \"modbus\"\n\n"
+               "[[point]]\nid = \"t\"\naddress = {}\nunits = \"K\"\n");
+    cfg = load_with_libs(&s, "\"acme\"", "", err, sizeof err);
+    CHECK(!cfg && strstr(err, "unknown key 'units' in point 't' (did you mean 'unit'?)"),
+          "a library point key must be refused, got: %s", cfg ? "<loaded>" : err);
+    tdot_config_free(cfg);
+    scratch_free(&s);
+}
+
 int main(void) {
+    check_unknown_keys();
     check_disabled_devices();
     check_timeout_defaults();
     check_service_name_default();
