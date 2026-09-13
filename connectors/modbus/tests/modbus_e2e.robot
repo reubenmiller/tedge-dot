@@ -231,6 +231,25 @@ Describe Renders The Parameter Set Definition
     Should Be Equal    ${properties}[coil_rw][type]    boolean
     Should Be Equal    ${definition}[contexts]    ${{['asset', 'event', 'operation']}}
 
+Describe Renders Every Config In A Directory
+    [Documentation]    `tedge-dot describe` takes a directory, like `run`: one service runs every
+    ...                connector config it finds there, so the definitions a tenant admin registers
+    ...                have to cover all of them. The second config here is another device type on
+    ...                another protocol — describe needs neither the protocol module nor a device.
+    Write Describe Configs    /tmp/describe-dir
+    ${identifiers}=    Describe Identifiers    -c /tmp/describe-dir
+    Should Be Equal    ${identifiers}    ${{[$PARAM_SET, "acme_boiler_control_parameters"]}}
+    # A device filter applies across every file, not only the first one.
+    ${identifiers}=    Describe Identifiers    -c /tmp/describe-dir -d boiler-*
+    Should Be Equal    ${identifiers}    ${{["acme_boiler_control_parameters"]}}
+
+Describe Defaults To The Connector Config Directory
+    [Documentation]    Without `-c`, describe renders the directory the packaged service runs
+    ...                (/etc/tedge/plugins/ot) — every connector in it, not just modbus.toml.
+    Write Describe Configs    /etc/tedge/plugins/ot
+    ${identifiers}=    Describe Identifiers
+    Should Be Equal    ${identifiers}    ${{[$PARAM_SET, "acme_boiler_control_parameters"]}}
+
 Flows Register The Device And Advertise The Parameter Capability
     [Documentation]    (flows) ot-registration turns the link status into a child-device
     ...                registration and advertises parameter_update so a cloud mapper routes
@@ -360,6 +379,38 @@ Defines A Device From A Point Library Alone
 
 
 *** Keywords ***
+Write Describe Configs
+    [Documentation]    Fill `dir` with two connector configs: this stack's own (plus the point
+    ...                libraries it references by relative path) and a second one declaring another
+    ...                device type, on another protocol, with one writable point.
+    [Arguments]    ${dir}
+    DeviceLibrary.Execute Command
+    ...    cmd=mkdir -p ${dir} && cp /etc/connector.toml ${dir}/modbus.toml && cp -r /etc/points.d ${dir}/
+    ${lines}=    Create List
+    ...    [connector]
+    ...    protocol = "opcua"
+    ...    [[device]]
+    ...    name = "boiler-1"
+    ...    type = "acme-boiler"
+    ...    protocol_address = { endpoint = "opc.tcp://127.0.0.1:4840/" }
+    ...    [[device.point]]
+    ...    id = "setpoint"
+    ...    datatype = "float32"
+    ...    access = "read_write"
+    ...    address = { node_id = "ns=2;s=Setpoint" }
+    ${content}=    Evaluate    shlex.quote(chr(10).join($lines) + chr(10))    modules=shlex
+    DeviceLibrary.Execute Command    cmd=printf '%s' ${content} > ${dir}/opcua.toml
+
+Describe Identifiers
+    [Documentation]    The set identifiers `tedge-dot describe` renders for `args`, in output order.
+    [Arguments]    ${args}=${EMPTY}
+    ${output}=    DeviceLibrary.Execute Command
+    ...    cmd=tedge-dot describe ${args} --compact    strip=${True}
+    ${identifiers}=    Evaluate
+    ...    [json.loads(l)["identifier"] for l in $output.splitlines() if l.startswith("{")]
+    ...    modules=json
+    RETURN    ${identifiers}
+
 Sample Should Be Good
     [Arguments]    ${payload}
     ${quality}=    Get Json Field    ${payload}    quality

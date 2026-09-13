@@ -168,8 +168,9 @@ keeps one twin fragment per parameter set current, and the command flows turn a
 `c8y_ParameterUpdate` operation from the device's *Parameters* tab (mapped by the
 [tedge-parameter-plugin](https://github.com/thin-edge/tedge-parameter-plugin), which owns that
 operation) into one `write-batch`.
-A tenant admin declares the sets once with the definition `tedge-dot describe` prints from
-the same config. A set name is a tenant-wide identifier, so it is derived from the device's
+A tenant admin declares the sets once with the definitions `tedge-dot describe` prints from
+the same configuration — by default every connector config in `/etc/tedge/plugins/ot`, with a
+set that several of them share rendered once. A set name is a tenant-wide identifier, so it is derived from the device's
 **type** rather than from the protocol — `acme_meter_v2_control_parameters`, not
 `modbus_parameters` — which is what lets several device types on one protocol coexist in a
 tenant. See [RFC 0003](doc/rfc/0003-parameter-writes.md),

@@ -196,6 +196,110 @@ static void check_type_collisions(void) {
     }
 }
 
+/* Several configurations at once (`describe -c <dir>`): a set declared in two
+ * files is ONE definition, device types folding together collide across files,
+ * and the untyped-device warning is per protocol. Mirrors
+ * descriptor.rs::definitions_and_warnings_span_every_config. */
+static void check_across_configs(void) {
+    char *modbus = strdup(write_temp_config(
+        "[connector]\nprotocol = \"modbus\"\n"
+        "[[device]]\nname = \"plc1\"\ntype = \"acme-boiler-v2\"\n"
+        "protocol_address = { transport = \"tcp\", host = \"127.0.0.1\", port = 502, unit_id = 1 }\n"
+        "  [[device.point]]\n  id = \"temp_u16\"\n  datatype = \"uint16\"\n"
+        "  access = \"read_write\"\n  name = \"Boiler temp\"\n"
+        "  address = { table = \"holding\", address = 3, count = 1 }\n"
+        "[[device]]\nname = \"plc2\"\n"
+        "protocol_address = { transport = \"tcp\", host = \"127.0.0.1\", port = 503, unit_id = 1 }\n"
+        "  [[device.point]]\n  id = \"spare_rw\"\n  datatype = \"uint16\"\n"
+        "  access = \"read_write\"\n"
+        "  address = { table = \"holding\", address = 30, count = 1 }\n"));
+    char *opcua = strdup(write_temp_config(
+        "[connector]\nprotocol = \"opcua\"\n"
+        "[[device]]\nname = \"boiler2\"\ntype = \"acme boiler v2\"\n"
+        "protocol_address = { endpoint = \"opc.tcp://127.0.0.1:4840/\" }\n"
+        "  [[device.point]]\n  id = \"temp_u16\"\n  datatype = \"uint16\"\n"
+        "  access = \"read_write\"\n  name = \"Second title\"\n"
+        "  address = { node_id = \"ns=2;s=Temp\" }\n"
+        "  [[device.point]]\n  id = \"Tank.Level\"\n  datatype = \"float32\"\n"
+        "  access = \"read_write\"\n"
+        "  address = { node_id = \"ns=2;s=Level\" }\n"
+        "[[device]]\nname = \"opc1\"\n"
+        "protocol_address = { endpoint = \"opc.tcp://127.0.0.1:4841/\" }\n"
+        "  [[device.point]]\n  id = \"spare_rw\"\n  datatype = \"uint16\"\n"
+        "  access = \"read_write\"\n"
+        "  address = { node_id = \"ns=2;s=Spare\" }\n"));
+    char err[256];
+    tdot_config_t *a = tdot_config_load(modbus, err, sizeof err);
+    CHECK(a != NULL, "modbus config did not load: %s", err);
+    tdot_config_t *b = tdot_config_load(opcua, err, sizeof err);
+    CHECK(b != NULL, "opcua config did not load: %s", err);
+    if (!a || !b)
+        goto out;
+    const tdot_config_t *both[] = {a, b};
+
+    /* The second file's "acme boiler v2" folds to the same set name as the
+     * first file's "acme-boiler-v2", so there is ONE merged definition for
+     * both (a key they share keeps the first file's schema), plus each
+     * protocol's own fallback set for its untyped device. */
+    cJSON *docs = tdot_c8y_dtm_definitions_across(both, 2, NULL);
+    CHECK(cJSON_GetArraySize(docs) == 3, "expected 3 definitions, got %d",
+          cJSON_GetArraySize(docs));
+    const cJSON *shared = cJSON_GetArrayItem(docs, 0);
+    CHECK(strcmp(str_of(shared, "identifier"),
+                 "acme_boiler_v2_control_parameters") == 0,
+          "shared identifier = %s", str_of(shared, "identifier"));
+    CHECK(strcmp(str_of(prop(shared, "temp_u16"), "title"), "Boiler temp") == 0,
+          "the first file's definition of a key must win, got title %s",
+          str_of(prop(shared, "temp_u16"), "title"));
+    CHECK(prop(shared, "Tank_Level") == NULL && prop(shared, "Tank.Level") != NULL,
+          "the second file's extra key must be merged into the shared set");
+    CHECK(strcmp(cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(shared, "tags"), 1)
+                     ->valuestring,
+                 "modbus") == 0,
+          "a shared set is tagged with the protocol that declared it first");
+    const cJSON *opc = cJSON_GetArrayItem(docs, 2);
+    CHECK(strcmp(str_of(opc, "identifier"), "opcua_control_parameters") == 0,
+          "third identifier = %s", str_of(opc, "identifier"));
+    CHECK(strcmp(cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(opc, "tags"), 1)
+                     ->valuestring,
+                 "opcua") == 0,
+          "a set is tagged with its own protocol");
+    cJSON_Delete(docs);
+
+    /* Neither file collides on its own; together they do. */
+    char *warning = tdot_param_type_warnings(a);
+    CHECK(warning == NULL, "one file alone has no collision, got: %s", warning);
+    free(warning);
+    warning = tdot_param_type_warnings_across(both, 2);
+    CHECK(warning && strstr(warning, "'acme-boiler-v2', 'acme boiler v2'"),
+          "types folding together across files must be warned about, got: %s",
+          warning ? warning : "<none>");
+    free(warning);
+
+    char *untyped = tdot_param_untyped_devices_across(both, 2, "modbus");
+    CHECK(untyped && strcmp(untyped, "plc2") == 0, "modbus untyped = %s",
+          untyped ? untyped : "<none>");
+    free(untyped);
+    untyped = tdot_param_untyped_devices_across(both, 2, "opcua");
+    CHECK(untyped && strcmp(untyped, "opc1") == 0, "opcua untyped = %s",
+          untyped ? untyped : "<none>");
+    free(untyped);
+
+    char *bad = tdot_param_invalid_keys_across(both, 2, NULL);
+    CHECK(bad && strcmp(bad, "point id 'Tank.Level'") == 0,
+          "an invalid key in the second file must be reported, got: %s",
+          bad ? bad : "<none>");
+    free(bad);
+
+out:
+    tdot_config_free(a);
+    tdot_config_free(b);
+    unlink(modbus);
+    unlink(opcua);
+    free(modbus);
+    free(opcua);
+}
+
 int main(void) {
     char *path = write_temp_config(CONFIG);
     char err[256];
@@ -408,6 +512,7 @@ int main(void) {
     tdot_config_free(cfg);
     unlink(path);
     check_type_collisions();
+    check_across_configs();
 
     if (failures) {
         printf("describe: %d check(s) failed\n", failures);

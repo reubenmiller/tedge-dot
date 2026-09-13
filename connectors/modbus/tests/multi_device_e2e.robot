@@ -50,6 +50,27 @@ Every Instance Connects To Its Own Simulated Device
         Point Should Read    plc-${n}    device_id    ${n}
     END
 
+Describe Merges The Parameter Set The Instances Share
+    [Documentation]    `tedge-dot describe` over the stack's config directory covers all ten files and
+    ...                renders ONE definition for them: the devices are one device type, a config
+    ...                file each, and a DTM identifier is tenant-wide, so ten copies of the same
+    ...                definition could not all be registered. The untyped-device warning (§5.2) is
+    ...                likewise given once, naming the devices of every file.
+    # The entrypoint renders the files before it starts the process, so the last instance being
+    # up means all ten exist (this test may run on its own, straight after the stack starts).
+    Wait For Message Containing    te/device/main/service/tedge-dot-${DEVICE_COUNT}/status/health
+    ...    "status":"up"    timeout=${READY_TIMEOUT}
+    ${stdout}    ${stderr}=    DeviceLibrary.Execute Command
+    ...    cmd=tedge-dot describe -c ${CONFIG_DIR} --compact    stdout=${True}    stderr=${True}
+    ${definitions}=    Evaluate
+    ...    [json.loads(l) for l in $stdout.splitlines() if l.startswith("{")]    modules=json
+    Length Should Be    ${definitions}    1
+    Should Be Equal    ${definitions}[0][identifier]    modbus_control_parameters
+    Dictionary Should Contain Key    ${definitions}[0][jsonSchema][properties]    temp_u16
+    Should Contain X Times    ${stderr}    declare no `type`    1
+    Should Contain    ${stderr}    plc-9
+    Should Contain    ${stderr}    plc-10
+
 A Write Is Handled Only By The Instance Owning The Device
     ${topic}=    Set Variable    te/device/plc-3/ot/${PROTOCOL}/cmd/write/w-1
     Publish Message    ${topic}    {"status":"init","point":"temp_u16","value":3003}    retain=True

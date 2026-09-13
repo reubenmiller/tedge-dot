@@ -112,7 +112,9 @@ device the plugin's own workflow and parameter-set scripts keep working untouche
 Parameters tab only renders sets that have a Digital Twin Manager property definition, which a
 tenant admin registers once (the device never calls the DTM service — device users lack the
 roles anyway).
-`tedge-dot describe` prints exactly that definition from the connector config:
+`tedge-dot describe` prints exactly those definitions from the connector configs — by default
+every config in `/etc/tedge/plugins/ot`, the directory the service runs, with a set shared by
+several of them rendered once (`-c <file-or-dir>`, repeatable, narrows or widens that):
 
 ```sh
 # One definition per line, and the DTM service takes one per request — a configuration that
@@ -120,7 +122,7 @@ roles anyway).
 # loop's stdin as its own input pipeline and the remaining definitions are never registered.
 defs=$(mktemp) one=$(mktemp)
 trap 'rm -f "$defs" "$one"' EXIT
-tedge-dot describe -c /etc/tedge/plugins/ot/modbus.toml --compact > "$defs"
+tedge-dot describe --compact > "$defs"
 # Read from a file, not a pipe: a `while` on the right of a pipe runs in a subshell, where
 # `exit 1` would abort only the loop and leave the script reporting success.
 while read -r definition; do

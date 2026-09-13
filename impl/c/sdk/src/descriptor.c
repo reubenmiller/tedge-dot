@@ -187,35 +187,49 @@ static void append(char **buf, size_t *len, const char *sep, const char *text) {
 }
 
 char *tdot_param_invalid_keys(const tdot_config_t *cfg, const char *forced) {
+    return tdot_param_invalid_keys_across(&cfg, 1, forced);
+}
+
+char *tdot_param_invalid_keys_across(const tdot_config_t *const *cfgs,
+                                     size_t ncfgs, const char *forced) {
     char *buf = NULL;
     size_t len = 0;
-    for (size_t i = 0; i < cfg->ndevices; i++) {
-        const tdot_device_t *dev = &cfg->devices[i];
-        tdot_set_naming_t naming =
-            tdot_param_naming(dev, cfg->protocol, forced);
-        for (size_t j = 0; j < dev->npoints; j++) {
-            const tdot_point_t *pt = &dev->points[j];
-            size_t nsets = 0;
-            char **sets = tdot_param_sets(pt, &naming, &nsets);
-            if (!sets)
-                continue;
-            char item[256];
-            if (!tdot_param_key_valid(pt->id)) {
-                snprintf(item, sizeof item, "point id '%s'", pt->id);
-                append(&buf, &len, ", ", item);
-            }
-            for (size_t k = 0; k < nsets; k++)
-                if (!tdot_param_key_valid(sets[k])) {
-                    snprintf(item, sizeof item, "parameter set '%s'", sets[k]);
+    for (size_t c = 0; c < ncfgs; c++) {
+        const tdot_config_t *cfg = cfgs[c];
+        for (size_t i = 0; i < cfg->ndevices; i++) {
+            const tdot_device_t *dev = &cfg->devices[i];
+            tdot_set_naming_t naming =
+                tdot_param_naming(dev, cfg->protocol, forced);
+            for (size_t j = 0; j < dev->npoints; j++) {
+                const tdot_point_t *pt = &dev->points[j];
+                size_t nsets = 0;
+                char **sets = tdot_param_sets(pt, &naming, &nsets);
+                if (!sets)
+                    continue;
+                char item[256];
+                if (!tdot_param_key_valid(pt->id)) {
+                    snprintf(item, sizeof item, "point id '%s'", pt->id);
                     append(&buf, &len, ", ", item);
                 }
-            tdot_param_sets_free(sets, nsets);
+                for (size_t k = 0; k < nsets; k++)
+                    if (!tdot_param_key_valid(sets[k])) {
+                        snprintf(item, sizeof item, "parameter set '%s'",
+                                 sets[k]);
+                        append(&buf, &len, ", ", item);
+                    }
+                tdot_param_sets_free(sets, nsets);
+            }
         }
     }
     return buf;
 }
 
 char *tdot_param_type_warnings(const tdot_config_t *cfg) {
+    return tdot_param_type_warnings_across(&cfg, 1);
+}
+
+char *tdot_param_type_warnings_across(const tdot_config_t *const *cfgs,
+                                      size_t ncfgs) {
     /* Grouped by the set name the types actually derive -- the same string the
      * Rust build groups and displays by, so there is no second notion of
      * "qualifier" for the two to disagree about. Everything here is heap-built:
@@ -231,72 +245,77 @@ char *tdot_param_type_warnings(const tdot_config_t *cfg) {
     char *buf = NULL;
     size_t len = 0;
 
-    for (size_t i = 0; i < cfg->ndevices; i++) {
-        const char *declared = cfg->devices[i].type;
-        if (!declared || !*declared)
-            continue;
-        /* A type with nothing usable in it ("日本語", "---") folds away entirely
-         * and the sets are named "_control_parameters" -- which every such type
-         * shares, silently. */
-        bool usable = false;
-        for (const char *p = declared; *p; p++)
-            if (isalnum((unsigned char)*p)) {
-                usable = true;
-                break;
+    for (size_t c = 0; c < ncfgs; c++) {
+        const tdot_config_t *cfg = cfgs[c];
+        for (size_t i = 0; i < cfg->ndevices; i++) {
+            const char *declared = cfg->devices[i].type;
+            if (!declared || !*declared)
+                continue;
+            /* A type with nothing usable in it ("日本語", "---") folds away
+             * entirely and the sets are named "_control_parameters" -- which
+             * every such type shares, silently. */
+            bool usable = false;
+            for (const char *p = declared; *p; p++)
+                if (isalnum((unsigned char)*p)) {
+                    usable = true;
+                    break;
+                }
+            if (!usable) {
+                char *derived =
+                    tdot_param_set_name(declared, TDOT_PARAM_DEFAULT_GROUP);
+                static const char *UNUSABLE_FMT =
+                    "warning: device type '%s' has no [A-Za-z0-9] character, so "
+                    "its parameter sets are named '%s' with nothing to tell them "
+                    "apart from another such type's; name the type in ASCII";
+                size_t ulen = strlen(UNUSABLE_FMT) + strlen(declared) +
+                              strlen(derived) + 1;
+                char *msg = malloc(ulen);
+                if (msg) {
+                    snprintf(msg, ulen, UNUSABLE_FMT, declared, derived);
+                    append(&buf, &len, "\n", msg);
+                    free(msg);
+                }
+                free(derived);
             }
-        if (!usable) {
-            char *derived =
-                tdot_param_set_name(declared, TDOT_PARAM_DEFAULT_GROUP);
-            static const char *UNUSABLE_FMT =
-                "warning: device type '%s' has no [A-Za-z0-9] character, so its "
-                "parameter sets are named '%s' with nothing to tell them apart "
-                "from another such type's; name the type in ASCII";
-            size_t ulen =
-                strlen(UNUSABLE_FMT) + strlen(declared) + strlen(derived) + 1;
-            char *msg = malloc(ulen);
-            if (msg) {
-                snprintf(msg, ulen, UNUSABLE_FMT, declared, derived);
-                append(&buf, &len, "\n", msg);
-                free(msg);
+            /* A device with no parameters derives no set, so it cannot
+             * collide. */
+            tdot_set_naming_t naming =
+                tdot_param_naming(&cfg->devices[i], cfg->protocol, NULL);
+            bool has_parameters = false;
+            for (size_t j = 0; j < cfg->devices[i].npoints; j++)
+                if (tdot_param_is(&cfg->devices[i].points[j], &naming)) {
+                    has_parameters = true;
+                    break;
+                }
+            if (!has_parameters)
+                continue;
+            char *key = tdot_param_set_name(declared, TDOT_PARAM_DEFAULT_GROUP);
+            struct group *g = NULL;
+            for (size_t k = 0; k < ngroups; k++)
+                if (strcmp(groups[k].key, key) == 0) {
+                    g = &groups[k];
+                    break;
+                }
+            if (!g) {
+                groups = realloc(groups, (ngroups + 1) * sizeof *groups);
+                g = &groups[ngroups++];
+                g->key = key;
+                g->types = NULL;
+                g->ntypes = 0;
+            } else {
+                free(key);
             }
-            free(derived);
-        }
-        /* A device with no parameters derives no set, so it cannot collide. */
-        tdot_set_naming_t naming =
-            tdot_param_naming(&cfg->devices[i], cfg->protocol, NULL);
-        bool has_parameters = false;
-        for (size_t j = 0; j < cfg->devices[i].npoints; j++)
-            if (tdot_param_is(&cfg->devices[i].points[j], &naming)) {
-                has_parameters = true;
-                break;
+            bool seen = false;
+            for (size_t t = 0; t < g->ntypes; t++)
+                if (strcmp(g->types[t], declared) == 0) {
+                    seen = true; /* one type on two devices is one device type */
+                    break;
+                }
+            if (!seen) {
+                g->types =
+                    realloc(g->types, (g->ntypes + 1) * sizeof *g->types);
+                g->types[g->ntypes++] = strdup(declared);
             }
-        if (!has_parameters)
-            continue;
-        char *key = tdot_param_set_name(declared, TDOT_PARAM_DEFAULT_GROUP);
-        struct group *g = NULL;
-        for (size_t k = 0; k < ngroups; k++)
-            if (strcmp(groups[k].key, key) == 0) {
-                g = &groups[k];
-                break;
-            }
-        if (!g) {
-            groups = realloc(groups, (ngroups + 1) * sizeof *groups);
-            g = &groups[ngroups++];
-            g->key = key;
-            g->types = NULL;
-            g->ntypes = 0;
-        } else {
-            free(key);
-        }
-        bool seen = false;
-        for (size_t t = 0; t < g->ntypes; t++)
-            if (strcmp(g->types[t], declared) == 0) {
-                seen = true; /* the same type on two devices is one device type */
-                break;
-            }
-        if (!seen) {
-            g->types = realloc(g->types, (g->ntypes + 1) * sizeof *g->types);
-            g->types[g->ntypes++] = strdup(declared);
         }
     }
 
@@ -338,17 +357,28 @@ char *tdot_param_type_warnings(const tdot_config_t *cfg) {
 }
 
 char *tdot_param_untyped_devices(const tdot_config_t *cfg) {
+    return tdot_param_untyped_devices_across(&cfg, 1, cfg->protocol);
+}
+
+char *tdot_param_untyped_devices_across(const tdot_config_t *const *cfgs,
+                                        size_t ncfgs, const char *protocol) {
     char *buf = NULL;
     size_t len = 0;
-    for (size_t i = 0; i < cfg->ndevices; i++) {
-        const tdot_device_t *dev = &cfg->devices[i];
-        if (dev->type && *dev->type)
+    for (size_t c = 0; c < ncfgs; c++) {
+        const tdot_config_t *cfg = cfgs[c];
+        if (strcmp(cfg->protocol, protocol) != 0)
             continue;
-        tdot_set_naming_t naming = tdot_param_naming(dev, cfg->protocol, NULL);
-        for (size_t j = 0; j < dev->npoints; j++) {
-            if (tdot_param_is(&dev->points[j], &naming)) {
-                append(&buf, &len, ", ", dev->name);
-                break;
+        for (size_t i = 0; i < cfg->ndevices; i++) {
+            const tdot_device_t *dev = &cfg->devices[i];
+            if (dev->type && *dev->type)
+                continue;
+            tdot_set_naming_t naming =
+                tdot_param_naming(dev, cfg->protocol, NULL);
+            for (size_t j = 0; j < dev->npoints; j++) {
+                if (tdot_param_is(&dev->points[j], &naming)) {
+                    append(&buf, &len, ", ", dev->name);
+                    break;
+                }
             }
         }
     }
@@ -502,37 +532,52 @@ static char *title_from_key(const char *key) {
 }
 
 cJSON *tdot_c8y_dtm_definitions(const tdot_config_t *cfg, const char *forced) {
+    return tdot_c8y_dtm_definitions_across(&cfg, 1, forced);
+}
+
+cJSON *tdot_c8y_dtm_definitions_across(const tdot_config_t *const *cfgs,
+                                       size_t ncfgs, const char *forced) {
     /* One entry per set, in configuration order; `properties` keeps the order
      * the points are configured in so the default `order` matches Rust. */
     cJSON *sets = cJSON_CreateObject(); /* set name -> properties object */
-    for (size_t i = 0; i < cfg->ndevices; i++) {
-        const tdot_device_t *dev = &cfg->devices[i];
-        tdot_set_naming_t naming =
-            tdot_param_naming(dev, cfg->protocol, forced);
-        for (size_t j = 0; j < dev->npoints; j++) {
-            const tdot_point_t *pt = &dev->points[j];
-            cJSON *options = parameter_options(pt);
-            if (!options)
-                continue;
-            size_t nsets = 0;
-            char **point_sets = sets_of(options, &naming, &nsets);
-            for (size_t k = 0; k < nsets; k++) {
-                cJSON *props =
-                    cJSON_GetObjectItemCaseSensitive(sets, point_sets[k]);
-                if (!props)
-                    props = cJSON_AddObjectToObject(sets, point_sets[k]);
-                if (!cJSON_GetObjectItemCaseSensitive(props, pt->id)) /* first definition wins */
-                    cJSON_AddItemToObject(props, pt->id,
-                                          property_schema(pt, options));
+    /* set name -> protocol of the config that declared it first */
+    cJSON *protocols = cJSON_CreateObject();
+    for (size_t c = 0; c < ncfgs; c++) {
+        const tdot_config_t *cfg = cfgs[c];
+        for (size_t i = 0; i < cfg->ndevices; i++) {
+            const tdot_device_t *dev = &cfg->devices[i];
+            tdot_set_naming_t naming =
+                tdot_param_naming(dev, cfg->protocol, forced);
+            for (size_t j = 0; j < dev->npoints; j++) {
+                const tdot_point_t *pt = &dev->points[j];
+                cJSON *options = parameter_options(pt);
+                if (!options)
+                    continue;
+                size_t nsets = 0;
+                char **point_sets = sets_of(options, &naming, &nsets);
+                for (size_t k = 0; k < nsets; k++) {
+                    cJSON *props =
+                        cJSON_GetObjectItemCaseSensitive(sets, point_sets[k]);
+                    if (!props) {
+                        props = cJSON_AddObjectToObject(sets, point_sets[k]);
+                        cJSON_AddStringToObject(protocols, point_sets[k],
+                                                cfg->protocol);
+                    }
+                    if (!cJSON_GetObjectItemCaseSensitive(props, pt->id)) /* first definition wins */
+                        cJSON_AddItemToObject(props, pt->id,
+                                              property_schema(pt, options));
+                }
+                tdot_param_sets_free(point_sets, nsets);
+                cJSON_Delete(options);
             }
-            tdot_param_sets_free(point_sets, nsets);
-            cJSON_Delete(options);
         }
     }
 
     cJSON *docs = cJSON_CreateArray();
     cJSON *props;
     cJSON_ArrayForEach(props, sets) {
+        const char *protocol =
+            cJSON_GetObjectItemCaseSensitive(protocols, props->string)->valuestring;
         cJSON *doc = cJSON_CreateObject();
         cJSON_AddStringToObject(doc, "identifier", props->string);
 
@@ -545,10 +590,10 @@ cJSON *tdot_c8y_dtm_definitions(const tdot_config_t *cfg, const char *forced) {
         static const char *DESC_FMT =
             "Writable %s points exposed by tedge-dot (generated from the "
             "connector configuration)";
-        size_t dlen = strlen(DESC_FMT) + strlen(cfg->protocol) + 1;
+        size_t dlen = strlen(DESC_FMT) + strlen(protocol) + 1;
         char *description = malloc(dlen);
         if (description) {
-            snprintf(description, dlen, DESC_FMT, cfg->protocol);
+            snprintf(description, dlen, DESC_FMT, protocol);
             cJSON_AddStringToObject(schema, "description", description);
             free(description);
         }
@@ -571,7 +616,7 @@ cJSON *tdot_c8y_dtm_definitions(const tdot_config_t *cfg, const char *forced) {
 
         cJSON *tags = cJSON_AddArrayToObject(doc, "tags");
         cJSON_AddItemToArray(tags, cJSON_CreateString("tedge-dot"));
-        cJSON_AddItemToArray(tags, cJSON_CreateString(cfg->protocol));
+        cJSON_AddItemToArray(tags, cJSON_CreateString(protocol));
 
         cJSON_AddItemToArray(docs, doc);
     }

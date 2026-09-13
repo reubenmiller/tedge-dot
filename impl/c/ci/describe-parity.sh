@@ -146,6 +146,21 @@ if [ $# -eq 0 ]; then
         compare_run "folded-types-modbus.toml -d '$glob'" \
             "$repo/impl/c/ci/fixtures/folded-types-modbus.toml" -d "$glob"
     done
+    # Several configs at once — a directory, or `-c` repeated — render one list of definitions
+    # across all of them, with a set declared in several files merged into one, and the
+    # warnings computed over every file. The demo directory mixes all five protocols; the
+    # fixtures overlap on device names and types.
+    compare_run "demo/config (directory)" "$repo/demo/config"
+    compare_run "impl/c/ci/fixtures (directory)" "$repo/impl/c/ci/fixtures"
+    for glob in "d1" "nomatch"; do
+        compare_run "impl/c/ci/fixtures -d '$glob'" "$repo/impl/c/ci/fixtures" -d "$glob"
+    done
+    compare_run "untyped + folded-types (-c twice)" \
+        "$repo/impl/c/ci/fixtures/untyped-modbus.toml" \
+        -c "$repo/impl/c/ci/fixtures/folded-types-modbus.toml"
+    # A directory and one of its own files name that file twice; it is rendered once.
+    compare_run "demo/config + demo/config/modbus.toml" "$repo/demo/config" \
+        -c "$repo/demo/config/modbus.toml"
 fi
 
 if [ "$fail" != 0 ]; then
