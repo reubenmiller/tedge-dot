@@ -22,7 +22,8 @@ Every numbered section is an independent proposal with the same shape:
 - **Proposed** — the 0.2 replacement, with the same example rewritten.
 - **Why** — the argument, and what MHS does where it is relevant.
 - **Breaks** — what a user, a flow or an implementation has to change.
-- **Feedback** — a line to fill in. A section can be accepted, amended or rejected on its own;
+- **Feedback** — a markdown checklist to tick (`[x]`) plus a notes line. A section can be
+  accepted, amended or rejected on its own;
   the dependencies between them are listed in §11.
 
 The comparison with MHS is against what Anthropic and the press have described, not a
@@ -147,7 +148,13 @@ type; so should the contract.
 - Sample and command schemas: `mode` and `raw` (as a request field) removed; see §2.
 - Both SDKs, the conformance suite (the raw checks become `bytes` checks).
 
-> **Feedback:** ☐ accept ☐ accept with changes ☐ reject — notes:
+**Feedback**
+
+- [ ] accepted
+- [ ] accepted with changes
+- [ ] rejected
+
+Notes:
 
 ---
 
@@ -263,7 +270,13 @@ MHS makes the same split: the *reference file* describes the device once; reads 
   `[connector] sample_echo = ["publish", "meta"]` for a site that wants its flows stateless and
   pays the bytes knowingly.
 
-> **Feedback:** ☐ accept ☐ accept with changes ☐ reject — notes:
+**Feedback**
+
+- [ ] accepted
+- [ ] accepted with changes
+- [ ] rejected
+
+Notes:
 
 ---
 
@@ -396,7 +409,13 @@ artefact a future MCP server or agent would read (§10).
   §5.1 option A removes the publish-policy half of the window entirely. See open question 12.2.
 - Status schema: `point_labels` and link `info` removed; a new `manifest` definition.
 
-> **Feedback:** ☐ accept ☐ accept with changes ☐ reject — notes:
+**Feedback**
+
+- [ ] accepted
+- [ ] accepted with changes
+- [ ] rejected
+
+Notes:
 
 ---
 
@@ -488,8 +507,15 @@ whose set-temperature took different units from its get-temperature would fail t
 - Conformance B6 and the Modbus/OPC UA e2e suites gain a round trip on a writable point *with* a
   transform, so the defect cannot return.
 
-> **Feedback:** ☐ accept ☐ accept with changes ☐ reject — notes (in particular: round an inexact
-> integer write to nearest, or refuse it?):
+**Feedback**
+
+In particular: round an inexact integer write to nearest, or refuse it?
+
+- [ ] accepted
+- [ ] accepted with changes
+- [ ] rejected
+
+Notes:
 
 ---
 
@@ -604,7 +630,12 @@ connector; every flow that wants per-signal policy carries the lookup.
 
 Either way `publish` is the same typed table in the same place; the decision is only who reads it.
 
-> **Feedback (5.1):** ☐ A: runtime ☐ B: flows — notes:
+**Feedback (5.1)**
+
+- [ ] A: the runtime applies `publish`
+- [ ] B: the flows apply `publish`
+
+Notes:
 
 ### Why
 
@@ -635,8 +666,15 @@ here: a limit is a property of the signal, not flow logic, and belongs next to t
 - With §5.1 option A, `publish` becomes connector behaviour: the sample stream itself is
   filtered, not just the measurements derived from it.
 
-> **Feedback:** ☐ accept ☐ accept with changes ☐ reject — notes (in particular: enforce `range`
-> in the driver, or keep the driver limit-free and leave it to the cloud form?):
+**Feedback**
+
+In particular: enforce `range` in the driver, or keep the driver limit-free and leave it to the cloud form?
+
+- [ ] accepted
+- [ ] accepted with changes
+- [ ] rejected
+
+Notes:
 
 ---
 
@@ -718,8 +756,13 @@ also credited to this section, are removed by §7 with or without it.
 - The `ot-protocol` field in the child-device registration is dropped; the protocol is in the
   manifest.
 
-> **Feedback:** ☐ withdraw (keep the level) ☐ drop the level, case unsupported ☐ drop from
-> samples only — notes:
+**Feedback**
+
+- [ ] withdraw this section (keep the protocol level)
+- [ ] drop the level; one device on two protocols becomes unsupported
+- [ ] drop the level from samples only; key the retained messages by protocol
+
+Notes:
 
 ---
 
@@ -857,8 +900,15 @@ the connector see a thin-edge topic.
   it is open question 12.6; until that is verified, `ot-registration` keeps publishing them from
   `manifest.commands`, which is harmless if both do.
 
-> **Feedback:** ☐ accept ☐ accept with changes ☐ reject — notes (in particular: is "the
-> connector never speaks a thin-edge topic" a principle worth two flows?):
+**Feedback**
+
+In particular: is "the connector never speaks a thin-edge topic" a principle worth two flows?
+
+- [ ] accepted
+- [ ] accepted with changes
+- [ ] rejected
+
+Notes:
 
 ---
 
@@ -935,7 +985,13 @@ model-agnostic for the same reason.
 - `ot-parameter-state` loses its `default_set` parameter; the set names arrive resolved in the
   manifest.
 
-> **Feedback:** ☐ accept ☐ accept with changes ☐ reject — notes:
+**Feedback**
+
+- [ ] accepted
+- [ ] accepted with changes
+- [ ] rejected
+
+Notes:
 
 ---
 
@@ -991,7 +1047,13 @@ contract version, or C is explicitly at the previous version — never a mix tha
 - The parity checks (`just c-describe-parity`, the shared e2e/cloud/conformance runs against C)
   are suspended, not deleted, and resume against the ported build.
 
-> **Feedback:** ☐ accept ☐ accept with changes ☐ reject — notes:
+**Feedback**
+
+- [ ] accepted
+- [ ] accepted with changes
+- [ ] rejected
+
+Notes:
 
 ---
 
@@ -1030,7 +1092,12 @@ generated from `datatype` + `range`, and samples are a subscription. It would ne
 from the connector that 0.2 does not already publish — which is the test of whether 0.2 is the
 right shape.
 
-> **Feedback:** ☐ agree these are the right reservations ☐ notes:
+**Feedback**
+
+- [ ] these are the right reservations
+- [ ] something is missing or wrong (see notes)
+
+Notes:
 
 ---
 
