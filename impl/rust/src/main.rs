@@ -440,7 +440,7 @@ impl Connectors {
 
     /// Wait for the stopping connectors to disconnect and publish their final health, for up to
     /// [`STOP_GRACE`], then cancel whatever is left and wait for the cancellation to take effect
-    /// (a cancelled supervisor cancels its attempt, see [`AbortOnDrop`]). Cancel-safe: a task
+    /// (a cancelled supervisor cancels its attempt, see [`runtime::AbortOnDrop`]). Cancel-safe: a task
     /// leaves `stopping` only once it has finished, so a later call picks up where this one was
     /// interrupted.
     async fn finish_stopping(&mut self) {
@@ -465,27 +465,6 @@ impl Connectors {
     }
 }
 
-/// A spawned task that is cancelled when its handle is dropped. A plain `JoinHandle` detaches the
-/// task instead, so cancelling a supervisor would leave the connector it awaits running.
-struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
-
-impl<T> Drop for AbortOnDrop<T> {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-impl<T> std::future::Future for AbortOnDrop<T> {
-    type Output = Result<T, tokio::task::JoinError>;
-
-    fn poll(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        std::future::Future::poll(std::pin::Pin::new(&mut self.0), cx)
-    }
-}
-
 /// Supervise one connector: (re)load its config, run it under the SDK runtime, and restart it
 /// with a backoff when it fails — the config file is re-read on every attempt, so fixing a bad
 /// config is picked up without restarting the service, and a reload (SIGHUP) cuts the backoff
@@ -503,7 +482,7 @@ async fn supervise(
         // restarted like any other failure instead of taking the whole service down.
         // Held through `AbortOnDrop`, so a supervisor cancelled because it did not stop in time
         // (`Connectors::finish_stopping`) cancels its attempt too instead of detaching it.
-        let attempt = AbortOnDrop(tokio::spawn(
+        let attempt = runtime::AbortOnDrop(tokio::spawn(
             run_one(path.clone(), output, stop.clone(), reload.clone()).in_current_span(),
         ))
         .await
@@ -1429,7 +1408,7 @@ mod tests {
         let (started_tx, started) = tokio::sync::oneshot::channel();
         let (alive_tx, mut alive) = tokio::sync::mpsc::channel::<()>(1);
         let supervisor = tokio::spawn(async move {
-            let _ = AbortOnDrop(tokio::spawn(async move {
+            let _ = runtime::AbortOnDrop(tokio::spawn(async move {
                 let _alive = alive_tx;
                 let _ = started_tx.send(());
                 std::future::pending::<()>().await

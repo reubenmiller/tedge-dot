@@ -393,6 +393,35 @@ pub async fn run_until_watched(
         .map(|_| ())
 }
 
+/// How long a connector attempt waits for the broker to accept its session before it fails.
+const BROKER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long publishing one sample may wait for the MQTT client to take it.
+const SAMPLE_PUBLISH_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a stopping connector gives its final health and DISCONNECT to reach the broker.
+const MQTT_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// A spawned task that is cancelled when its handle is dropped. A plain `JoinHandle` detaches the
+/// task instead, so whoever gives up on it — a cancelled supervisor, a connector attempt that
+/// ended — would leave it running.
+pub struct AbortOnDrop<T>(pub tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl<T> Future for AbortOnDrop<T> {
+    type Output = Result<T, tokio::task::JoinError>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.0).poll(cx)
+    }
+}
+
 /// How [`run_until_reloadable`] ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunExit {
@@ -482,7 +511,15 @@ pub async fn run_until_reloadable(
     // what must be restored — the live config and link states — so this task only signals it.
     let reconnected = Arc::new(tokio::sync::Notify::new());
     let reconnected_tx = reconnected.clone();
-    tokio::spawn(async move {
+    // Whether the broker is connected right now. While it is not, the event loop only retries the
+    // connection and never reads the client's request queue, so whatever is published fills it
+    // and the next `publish().await` blocks — and the main loop with it: no reload, no stop, until
+    // the broker is back. The main loop checks this before publishing samples.
+    let (online_tx, mut online) = tokio::sync::watch::channel(false);
+    // Ends with this function, however it returns: the process may host other connectors and
+    // restart this one, and a leaked event loop would keep its session connected (or keep
+    // reconnecting) behind it.
+    let mut mqtt_task = AbortOnDrop(tokio::spawn(async move {
         let mut sessions = 0u64;
         loop {
             match eventloop.poll().await {
@@ -492,25 +529,50 @@ pub async fn run_until_reloadable(
                     }
                 }
                 Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                    online_tx.send_replace(true);
                     sessions += 1;
                     if sessions > 1 {
                         info!("reconnected to MQTT broker");
                         reconnected_tx.notify_one();
                     }
                 }
+                // The clean shutdown's DISCONNECT is written, after everything queued before it
+                // (the final health "down"): this session is over.
+                Ok(Event::Outgoing(rumqttc::Outgoing::Disconnect)) => break,
                 Ok(_) => {}
-                // The client half was dropped and every queued request (including the final
-                // health "down") has been flushed: this runtime instance is gone, so the
-                // task must exit rather than retry — the process may host other connectors
-                // and restart this one, and leaked event loops would pile up.
                 Err(rumqttc::ConnectionError::RequestsDone) => break,
                 Err(e) => {
+                    online_tx.send_replace(false);
                     warn!("mqtt event loop error: {e}; retrying");
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
         }
-    });
+    }));
+
+    // The broker must accept the session before the connector starts: nothing it publishes could
+    // be delivered otherwise, and a wrong host or port would pass for a running connector. As in
+    // the C runtime, not connecting fails this attempt, which the host retries on its backoff — or
+    // at once on a reload, since the fix is usually in the file. A stop or a reload is honoured
+    // while waiting.
+    tokio::pin!(shutdown);
+    let broker = format!("{}:{}", config.mqtt.host, config.mqtt.port);
+    tokio::select! {
+        _ = &mut shutdown => return Ok(RunExit::Stopped),
+        _ = reload.notified() => {
+            info!("reload requested while connecting to the MQTT broker {broker}; restarting");
+            return Ok(RunExit::Restart);
+        }
+        connected = tokio::time::timeout(BROKER_CONNECT_TIMEOUT, online.wait_for(|up| *up)) => {
+            if !matches!(connected, Ok(Ok(_))) {
+                return Err(format!(
+                    "cannot connect to the MQTT broker {broker} within {}s",
+                    BROKER_CONNECT_TIMEOUT.as_secs()
+                )
+                .into());
+            }
+        }
+    }
 
     // 3. Publish capability descriptor + service health (retained).
     publish_retained(&client, &cap_topic, capability_payload(&caps, &config)).await?;
@@ -540,7 +602,6 @@ pub async fn run_until_reloadable(
     // 6. Main loop: poll due points on a tick, route commands from the MQTT event-loop task.
     let mut tick = tokio::time::interval(Duration::from_millis(200));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    tokio::pin!(shutdown);
     // Set inside the loop: acted on after the iteration (`rearm`), or once the loop ends (`exit`).
     let mut rearm = false;
     let mut exit = RunExit::Stopped;
@@ -565,13 +626,17 @@ pub async fn run_until_reloadable(
                     let device = config.devices[device_index].name.clone();
                     match bounded(limits, "read", connector.read_points(&device, &points)).await {
                         Ok(mut samples) => {
+                            let online_now = *online.borrow();
                             for s in samples.iter_mut() {
                                 // The runtime owns the device identity for polled reads:
                                 // connectors routinely leave `device` empty, and the sample
                                 // topic + meta lookup are keyed by the configured name.
                                 s.device = device.clone();
-                                publish_sample(&client, &protocol, s, &mut seq_counters, &meta_index)
-                                    .await;
+                                publish_sample(
+                                    &client, &protocol, s, &mut seq_counters, &meta_index,
+                                    online_now,
+                                )
+                                .await;
                             }
                             // A batch where every point failed means the device itself is
                             // unreachable (a single bad point keeps the link healthy).
@@ -646,8 +711,11 @@ pub async fn run_until_reloadable(
                 }
             }
             Some(mut sample) = sample_rx.recv() => {
-                publish_sample(&client, &protocol, &mut sample, &mut seq_counters, &meta_index)
-                    .await;
+                let online_now = *online.borrow();
+                publish_sample(
+                    &client, &protocol, &mut sample, &mut seq_counters, &meta_index, online_now,
+                )
+                .await;
                 progress.mark();
             }
             _ = reconnected.notified() => {
@@ -703,9 +771,19 @@ pub async fn run_until_reloadable(
         }
     }
 
-    // 7. Clean shutdown.
+    // 7. Clean shutdown: the final health "down", then a DISCONNECT, given a moment to reach the
+    // broker (the event loop ends once the DISCONNECT is written). With the broker unreachable
+    // there is nothing to send them over, and the broker publishes the last will instead.
     let _ = bounded(limits, "disconnect", connector.disconnect()).await;
-    publish_health(&client, &health_topic, "down").await.ok();
+    let online_now = *online.borrow();
+    if online_now {
+        let flush = async {
+            publish_health(&client, &health_topic, "down").await.ok();
+            client.disconnect().await.ok();
+            let _ = (&mut mqtt_task).await;
+        };
+        let _ = tokio::time::timeout(MQTT_FLUSH_TIMEOUT, flush).await;
+    }
     Ok(exit)
 }
 
@@ -1046,19 +1124,34 @@ async fn publish_sample(
     sample: &mut Sample,
     seq_counters: &mut HashMap<(String, String), u64>,
     meta_index: &MetaIndex,
+    online: bool,
 ) {
     let counter = seq_counters
         .entry((sample.device.clone(), sample.point.clone()))
         .or_insert(0);
     *counter += 1;
     sample.seq = Some(*counter);
+    if !online {
+        // With the broker unreachable a queued sample cannot be sent, and enough of them fill the
+        // client's request queue until publishing blocks the main loop (see
+        // `run_until_reloadable`). A sample is a reading of the moment: it is dropped, and the
+        // gap shows in `seq`.
+        return;
+    }
     let topic = format!(
         "te/device/{}/ot/{}/sample/{}",
         sample.device, protocol, sample.point
     );
     let payload = envelope_with_meta(sample, meta_index).to_string();
-    if let Err(e) = client.publish(&topic, QoS::AtMostOnce, false, payload).await {
-        error!("failed to publish sample: {e}");
+    let publish = client.publish(&topic, QoS::AtMostOnce, false, payload);
+    match tokio::time::timeout(SAMPLE_PUBLISH_TIMEOUT, publish).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => error!("failed to publish sample: {e}"),
+        // The connection is gone but the event loop has not noticed yet (a half-open socket).
+        Err(_) => warn!(
+            "dropping a sample on {topic}: the MQTT client did not take it within {}s",
+            SAMPLE_PUBLISH_TIMEOUT.as_secs()
+        ),
     }
 }
 
