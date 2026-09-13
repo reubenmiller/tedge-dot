@@ -99,8 +99,10 @@ configuration is unchanged keeps running untouched; one whose file changed appli
 reconnecting its devices while its MQTT session and service health stay up; a file that cannot
 be used is logged and its connector keeps the configuration it has. A new file starts a
 connector and a removed file stops its connector. A change of `service_name`, `protocol`,
-`[mqtt]` or `stall_timeout` restarts that one connector, and `log_level` needs a service
-restart.
+`[mqtt]` or the effective stall timeout (`stall_timeout`, raised to twice `operation_timeout`)
+restarts that one connector, and `log_level` needs a service restart. A connector that cannot
+start, or cannot restart, is tried again every `TEDGE_DOT_RESTART_DELAY` seconds (default 5) and
+on every reload; the service keeps running meanwhile.
 
 ## One point list, many devices
 

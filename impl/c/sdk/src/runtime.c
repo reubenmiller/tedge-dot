@@ -1288,6 +1288,10 @@ static void push_sink(void *ctx, tdot_device_t *dev, tdot_point_t *pt,
 typedef struct {
     _Atomic int stop; /* stop this connector: its config file is gone */
     bool can_restart; /* whoever runs it restarts it on RUN_RESTART */
+    /* The reload generation current before its config file was read: a SIGHUP
+     * that arrives while the connector starts (the broker and device connects
+     * can take a while) is newer, so it is still acted on. */
+    unsigned start_gen;
 } run_ctl_t;
 
 static bool stop_requested(const run_ctl_t *ctl) {
@@ -1372,9 +1376,9 @@ static int run_connector(tdot_connector_t *conn, tdot_config_t *cfg,
 
     double deadline =
         opts->duration_s > 0 ? tdot_mono() + opts->duration_s : 0;
-    /* The reload generation this connector has acted on: the one current when
-     * it started, since it has just read its file. */
-    unsigned seen_gen = atomic_load(&g_reload_gen);
+    /* The reload generation this connector has acted on: the one current
+     * before its file was read, so a reload requested since is applied now. */
+    unsigned seen_gen = ctl ? ctl->start_gen : atomic_load(&g_reload_gen);
     int result = RUN_STOPPED;
 
     while (!stop_requested(ctl)) {
@@ -1650,7 +1654,7 @@ int tdot_runtime_run(tdot_connector_t *conn, tdot_config_t *cfg,
 
     /* The connector runs on this caller's thread, with the connector it was
      * given, so a reload that needs a restart is reported, not applied. */
-    run_ctl_t ctl = {.can_restart = false};
+    run_ctl_t ctl = {.can_restart = false, .start_gen = atomic_load(&g_reload_gen)};
     int rc = run_connector(conn, cfg, opts, &slot, &ctl);
 
     if (watching) {
@@ -1684,6 +1688,7 @@ typedef struct {
     bool running;     /* a thread was started and has not been joined */
     _Atomic int done; /* set by the thread once run_connector returned */
     int rc;           /* run_connector's result, valid once done */
+    double retry_at;  /* when a connector that is not running is tried again; 0: never */
 } worker_t;
 
 static void *worker_main(void *arg) {
@@ -1700,20 +1705,48 @@ static worker_t *worker_new(const char *path, const tdot_run_opts_t *opts) {
     return w;
 }
 
+/* TEDGE_DOT_RESTART_DELAY (whole seconds, default 5): how long a connector
+ * that could not start, or failed, waits before it is tried again; a reload
+ * tries it at once. Mirrors restart_delay_from_env in the Rust binary. */
+static double restart_delay_s(void) {
+    const char *v = getenv("TEDGE_DOT_RESTART_DELAY");
+    if (v) {
+        const char *p = *v == '+' ? v + 1 : v;
+        bool digits = *p != '\0';
+        for (const char *c = p; *c && digits; c++)
+            digits = *c >= '0' && *c <= '9';
+        if (digits)
+            return strtod(p, NULL);
+    }
+    return 5;
+}
+
+/* Remember that the worker's connector is not running and when to try it
+ * again: after the restart delay, or on the next reload. */
+static void worker_retry_later(worker_t *w) {
+    double delay = restart_delay_s();
+    w->retry_at = tdot_mono() + delay;
+    logmsg("info", "%s: trying its connector again in %.0fs, or on reload", w->path, delay);
+}
+
 /* Load the worker's config and start its connector thread. A config that
- * cannot be used is logged and the worker left stopped, to be tried again on
- * the next reload. */
+ * cannot be used is logged and the worker left stopped, to be tried again
+ * (worker_retry_later). */
 static bool worker_start(worker_t *w, watchdog_t *wd) {
+    /* Before the file is read: see run_ctl_t.start_gen. */
+    w->ctl.start_gen = atomic_load(&g_reload_gen);
     char err[256];
     tdot_config_t *cfg = tdot_config_load(w->path, err, sizeof err);
     if (!cfg) {
         logmsg("error", "%s", err);
+        worker_retry_later(w);
         return false;
     }
     tdot_connector_t *conn = tdot_connector_factory(cfg->protocol);
     if (!conn) {
         logmsg("error", "%s: unknown protocol '%s'", w->path, cfg->protocol);
         tdot_config_free(cfg);
+        worker_retry_later(w);
         return false;
     }
     w->cfg = cfg;
@@ -1730,9 +1763,11 @@ static bool worker_start(worker_t *w, watchdog_t *wd) {
         tdot_config_free(cfg);
         w->conn = NULL;
         w->cfg = NULL;
+        worker_retry_later(w);
         return false;
     }
     w->running = true;
+    w->retry_at = 0;
     watchdog_add(wd, &w->progress);
     logmsg("info", "loaded %s (%s)", w->path, cfg->protocol);
     return true;
@@ -1873,8 +1908,20 @@ int tdot_runtime_run_configs(const char *const *paths, size_t npaths,
     /* First of all, so a SIGHUP while starting up is a reload request rather
      * than the signal's default action, which terminates the process. */
     install_signal_handlers();
+    /* The reload generation the supervisor has acted on, taken before any
+     * config is read, so a reload requested while the connectors start is
+     * still acted on once they have. */
+    unsigned seen_gen = atomic_load(&g_reload_gen);
     if (opts->output == TDOT_OUTPUT_MQTT)
         mosquitto_lib_init();
+
+    /* With `discover` this is the service, and it runs until it is stopped or
+     * --duration elapses, as the Rust build does: a connector that cannot start
+     * or fails -- at start-up, or restarting after a reload -- is tried again
+     * after the restart delay and on every reload, rather than ending the
+     * process when it was the last one running. */
+    bool service = opts->discover != NULL;
+    double deadline = opts->duration_s > 0 ? tdot_mono() + opts->duration_s : 0;
 
     watchdog_t wd = {.lock = PTHREAD_MUTEX_INITIALIZER};
     workers_t ws = {0};
@@ -1893,39 +1940,44 @@ int tdot_runtime_run_configs(const char *const *paths, size_t npaths,
     if (started == 0) {
         logmsg("error", "no valid connector configs");
         rc = -1;
-        goto out;
+        if (!service)
+            goto out;
     }
     if (watchdog_wanted(opts))
         watching = start_thread(&wd_thread, watchdog_main, &wd) == 0;
 
-    unsigned seen_gen = atomic_load(&g_reload_gen);
     while (!g_stop) {
         struct timespec ts = {.tv_sec = 0, .tv_nsec = TICK_MS * 1000000L};
         nanosleep(&ts, NULL);
+        double now = tdot_mono();
+        if (service && deadline > 0 && now >= deadline)
+            break;
 
-        /* Reap the connectors that returned: restart one whose reload needs
-         * it, and remember a failure. */
+        /* Reap the connectors that returned -- restart one whose reload needs
+         * it, remember a failure -- and try again the ones whose retry is due. */
         size_t alive = 0;
-        for (size_t i = 0; i < ws.n; i++) {
+        for (size_t i = 0; i < ws.n && !g_stop; i++) {
             worker_t *w = ws.items[i];
             if (w->running && atomic_load(&w->done)) {
                 int wrc = w->rc;
                 worker_join(w, &wd);
-                if (wrc == RUN_RESTART && !g_stop) {
+                if (wrc == RUN_RESTART) {
                     logmsg("info", "restarting the connector of %s", w->path);
-                    worker_start(w, &wd);
+                    if (!worker_start(w, &wd))
+                        rc = -1;
                 } else if (wrc == RUN_FAILED) {
                     rc = -1;
+                    worker_retry_later(w);
                 }
+            } else if (service && !w->running && w->retry_at > 0 && now >= w->retry_at) {
+                worker_start(w, &wd);
             }
             if (w->running)
                 alive++;
         }
-        /* Every connector has stopped -- the --duration elapsed, or none could
-         * keep running -- so this process has nothing left to do. Unless a
-         * reload removed every config: that idles until a reload adds one, as
-         * the Rust build does. */
-        if (alive == 0 && !(ws.n == 0 && opts->discover))
+        /* Without `discover`, every connector having stopped -- the --duration
+         * elapsed, or none could keep running -- leaves nothing to do. */
+        if (alive == 0 && !service)
             break;
 
         unsigned gen = atomic_load(&g_reload_gen);
@@ -1961,5 +2013,11 @@ out:
     free(wd.slots);
     if (opts->output == TDOT_OUTPUT_MQTT)
         mosquitto_lib_cleanup();
+    /* The service was stopped as asked (a signal, --duration): a connector
+     * that failed on the way was retried and logged, and does not make the stop
+     * a failure -- `systemctl stop` would otherwise leave the unit "failed".
+     * The Rust build exits 0 the same way. */
+    if (service)
+        return 0;
     return rc;
 }

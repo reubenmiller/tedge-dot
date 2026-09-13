@@ -350,6 +350,26 @@ A Config Edit Is Applied On Reload
         Should Not Contain    ${payload}    "down"    the connector restarted instead of reloading
     END
 
+A Connector That Cannot Restart After A Reload Is Retried
+    [Documentation]    A reload that needs the connector restarted (a new [mqtt] port), into a
+    ...                configuration it cannot run with (nothing listens there), takes the connector
+    ...                down but not the service: the process keeps running and retrying, and the
+    ...                next reload of a usable file brings the connector back. It is the only
+    ...                connector, so a service that stopped with its last connector would be gone.
+    ${started}=    DeviceLibrary.Execute Command    cmd=cut -d' ' -f22 /proc/1/stat
+    DeviceLibrary.Execute Command
+    ...    cmd=cp /etc/connector.toml /tmp/connector.toml && sed -i 's/^port *= *1883$/port = 1/' /etc/connector.toml
+    Clear Messages
+    DeviceLibrary.Execute Command    cmd=kill -HUP 1
+    Wait For Message Containing    ${HEALTH_TOPIC}    "status":"down"    timeout=${SAMPLE_TIMEOUT}
+    # Past the 5s restart delay, so a failed restart has been retried (and failed) again.
+    Sleep    8s
+    DeviceLibrary.Execute Command    cmd=cp /tmp/connector.toml /etc/connector.toml && kill -HUP 1
+    Wait For Message Containing    ${HEALTH_TOPIC}    "status":"up"    timeout=${SAMPLE_TIMEOUT}
+    Wait For Message Containing    ${LINK_TOPIC}    "status":"connected"    timeout=${SAMPLE_TIMEOUT}
+    ${now}=    DeviceLibrary.Execute Command    cmd=cut -d' ' -f22 /proc/1/stat
+    Should Be Equal    ${now}    ${started}    the tedge-dot process exited and was started again
+
 Defines A Device From A Point Library Alone
     [Documentation]    A define-device command carrying only connection information and a
     ...                points_from reference must bring up a working device: this is what lets a

@@ -201,6 +201,23 @@ pub fn parse_duration(s: &str) -> Option<Duration> {
     Duration::try_from_secs_f64(secs).ok()
 }
 
+impl ConnectorConfig {
+    /// The stall watchdog's limit for this connector: `[connector] stall_timeout` (120s when it
+    /// does not parse), zero when disabled with `"0"`, and never less than twice
+    /// `operation_timeout` (30s when it does not parse), so one slow but legitimate call is not
+    /// read as a hang. The C loader derives `stall_timeout_s` the same way.
+    pub fn stall_limit(&self) -> Duration {
+        let configured =
+            parse_duration(&self.connector.stall_timeout).unwrap_or(Duration::from_secs(120));
+        if configured.is_zero() {
+            return Duration::ZERO;
+        }
+        let operation =
+            parse_duration(&self.connector.operation_timeout).unwrap_or(Duration::from_secs(30));
+        configured.max(operation.saturating_mul(2))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

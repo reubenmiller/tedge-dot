@@ -306,7 +306,12 @@ async fn run(args: RunArgs) -> ExitCode {
                     Ok(configs) => {
                         warn_duplicate_service_names(&configs);
                         warn_duplicate_devices(&configs);
-                        connectors.reconcile(configs).await;
+                        // Stopping the removed connectors can take up to STOP_GRACE; a shutdown
+                        // must not wait behind it (`connectors` keeps what is still stopping).
+                        tokio::select! {
+                            _ = connectors.reconcile(configs) => {}
+                            _ = &mut stop => break,
+                        }
                     }
                     Err(e) => error!("reload failed: {e}; the running connectors are unchanged"),
                 }
@@ -355,6 +360,9 @@ struct Connectors {
     output: Output,
     restart_delay: Duration,
     running: std::collections::BTreeMap<PathBuf, Supervised>,
+    /// Supervisors asked to stop that have not finished yet. Kept here, not in a local, so a
+    /// shutdown that interrupts a reload still waits for them.
+    stopping: Vec<tokio::task::JoinHandle<()>>,
 }
 
 /// One config file's supervisor, and the handles that steer it.
@@ -370,6 +378,7 @@ impl Connectors {
             output,
             restart_delay,
             running: std::collections::BTreeMap::new(),
+            stopping: Vec::new(),
         }
     }
 
@@ -398,15 +407,16 @@ impl Connectors {
             .filter(|path| !configs.contains(*path))
             .cloned()
             .collect();
-        let mut stopping = Vec::new();
         for path in gone {
             if let Some(connector) = self.running.remove(&path) {
                 info!("{} is gone; stopping its connector", path.display());
                 let _ = connector.stop.send(true);
-                stopping.push(connector.task);
+                self.stopping.push(connector.task);
             }
         }
-        join_connectors(stopping).await;
+        // Before starting anything: a new file may carry a removed one's service name, and the
+        // old connector's final health "down" must not land after the new one's "up".
+        self.finish_stopping().await;
         for path in configs {
             match self.running.get(&path) {
                 // A permit is kept when the supervisor is not waiting right now (it is between
@@ -420,26 +430,59 @@ impl Connectors {
         }
     }
 
-    async fn stop_all(self) {
-        for connector in self.running.values() {
+    async fn stop_all(mut self) {
+        for connector in std::mem::take(&mut self.running).into_values() {
             let _ = connector.stop.send(true);
+            self.stopping.push(connector.task);
         }
-        join_connectors(self.running.into_values().map(|c| c.task).collect()).await;
+        self.finish_stopping().await;
+    }
+
+    /// Wait for the stopping connectors to disconnect and publish their final health, for up to
+    /// [`STOP_GRACE`], then cancel whatever is left and wait for the cancellation to take effect
+    /// (a cancelled supervisor cancels its attempt, see [`AbortOnDrop`]). Cancel-safe: a task
+    /// leaves `stopping` only once it has finished, so a later call picks up where this one was
+    /// interrupted.
+    async fn finish_stopping(&mut self) {
+        let deadline = tokio::time::Instant::now() + STOP_GRACE;
+        while let Some(task) = self.stopping.last_mut() {
+            if tokio::time::timeout_at(deadline, task).await.is_err() {
+                break;
+            }
+            self.stopping.pop();
+        }
+        if self.stopping.is_empty() {
+            return;
+        }
+        warn!("some connectors did not stop in time; cancelling them");
+        for task in &self.stopping {
+            task.abort();
+        }
+        while let Some(task) = self.stopping.last_mut() {
+            let _ = task.await;
+            self.stopping.pop();
+        }
     }
 }
 
-/// Wait for stopping connectors to disconnect and publish their final health, for up to
-/// [`STOP_GRACE`]; whatever has not finished by then is abandoned.
-async fn join_connectors(mut tasks: Vec<tokio::task::JoinHandle<()>>) {
-    let deadline = tokio::time::Instant::now() + STOP_GRACE;
-    for task in &mut tasks {
-        let _ = tokio::time::timeout_at(deadline, task).await;
+/// A spawned task that is cancelled when its handle is dropped. A plain `JoinHandle` detaches the
+/// task instead, so cancelling a supervisor would leave the connector it awaits running.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
     }
-    if tasks.iter().any(|task| !task.is_finished()) {
-        warn!("some connectors did not stop in time; abandoning them");
-        for task in tasks {
-            task.abort();
-        }
+}
+
+impl<T> std::future::Future for AbortOnDrop<T> {
+    type Output = Result<T, tokio::task::JoinError>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::future::Future::poll(std::pin::Pin::new(&mut self.0), cx)
     }
 }
 
@@ -458,9 +501,11 @@ async fn supervise(
         info!("starting connector ({})", path.display());
         // Run each attempt on its own task so a panicking protocol module is contained and
         // restarted like any other failure instead of taking the whole service down.
-        let attempt = tokio::spawn(
+        // Held through `AbortOnDrop`, so a supervisor cancelled because it did not stop in time
+        // (`Connectors::finish_stopping`) cancels its attempt too instead of detaching it.
+        let attempt = AbortOnDrop(tokio::spawn(
             run_one(path.clone(), output, stop.clone(), reload.clone()).in_current_span(),
-        )
+        ))
         .await
         .unwrap_or_else(|join_err| Err(format!("connector task panicked: {join_err}")));
 
@@ -547,30 +592,25 @@ async fn run_one(
 /// large batch on a slow serial line) would be read as a hang and restart the connector in a
 /// loop; a too-small value is raised rather than honoured.
 fn stall_timeout(config: &ConnectorConfig) -> Duration {
-    let configured = parse_duration(&config.connector.stall_timeout).unwrap_or_else(|| {
-        warn!(
-            "invalid connector.stall_timeout '{}'; using 120s",
-            config.connector.stall_timeout
-        );
-        Duration::from_secs(120)
-    });
-    if configured.is_zero() {
-        info!("stall watchdog disabled (connector.stall_timeout = 0)");
-        return Duration::ZERO;
-    }
-    let operation = parse_duration(&config.connector.operation_timeout)
-        .unwrap_or_else(|| Duration::from_secs(30));
-    let floor = operation.saturating_mul(2);
-    if configured < floor {
-        warn!(
+    let limit = config.stall_limit();
+    match parse_duration(&config.connector.stall_timeout) {
+        None => warn!(
+            "invalid connector.stall_timeout '{}'; using {}s",
+            config.connector.stall_timeout,
+            limit.as_secs()
+        ),
+        Some(configured) if configured.is_zero() => {
+            info!("stall watchdog disabled (connector.stall_timeout = 0)")
+        }
+        Some(configured) if configured < limit => warn!(
             "connector.stall_timeout ({}s) is not longer than operation_timeout ({}s); using {}s",
             configured.as_secs(),
-            operation.as_secs(),
-            floor.as_secs()
-        );
-        return floor;
+            (limit / 2).as_secs(),
+            limit.as_secs()
+        ),
+        Some(_) => {}
     }
-    configured
+    limit
 }
 
 /// Resolves with a reason once the connector's loop has made no progress for `limit`.
@@ -1380,6 +1420,29 @@ mod tests {
         .await
         .expect("watchdog did not fire after progress stopped");
         assert!(reason.contains("no progress"), "unexpected reason: {reason}");
+    }
+
+    /// A connector abandoned because it did not stop in time must really stop: cancelling its
+    /// supervisor cancels the attempt the supervisor awaits, rather than detaching it.
+    #[tokio::test]
+    async fn cancelling_a_supervisor_cancels_its_attempt() {
+        let (started_tx, started) = tokio::sync::oneshot::channel();
+        let (alive_tx, mut alive) = tokio::sync::mpsc::channel::<()>(1);
+        let supervisor = tokio::spawn(async move {
+            let _ = AbortOnDrop(tokio::spawn(async move {
+                let _alive = alive_tx;
+                let _ = started_tx.send(());
+                std::future::pending::<()>().await
+            }))
+            .await;
+        });
+        started.await.expect("the attempt did not start");
+        supervisor.abort();
+        let ended = tokio::time::timeout(Duration::from_secs(2), alive.recv()).await;
+        assert!(
+            matches!(ended, Ok(None)),
+            "the attempt kept running after its supervisor was cancelled"
+        );
     }
 
     /// Disabled means disabled: it must never resolve.

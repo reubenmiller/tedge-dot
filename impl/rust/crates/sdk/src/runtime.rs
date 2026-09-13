@@ -1590,12 +1590,14 @@ enum Reloaded {
 /// A change the running connector cannot adopt in place: its MQTT client id, last will and
 /// command subscriptions are named after the service and the protocol, the protocol selects the
 /// module, the client is connected to one broker, and the host's stall watchdog takes its limit
-/// when the connector starts. The C runtime draws the same line (`needs_restart` in runtime.c).
+/// when the connector starts — the effective one ([`ConnectorConfig::stall_limit`]), so a new
+/// `operation_timeout` that raises it counts and a respelt `stall_timeout` does not. The C
+/// runtime draws the same line (`needs_restart` in runtime.c).
 fn needs_restart(running: &ConnectorConfig, new: &ConnectorConfig) -> bool {
     running.connector.protocol != new.connector.protocol
         || running.connector.service_name() != new.connector.service_name()
         || running.mqtt != new.mqtt
-        || running.connector.stall_timeout != new.connector.stall_timeout
+        || running.stall_limit() != new.stall_limit()
 }
 
 /// Re-read the connector's config file and apply what changed, keeping the running configuration
