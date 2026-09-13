@@ -174,13 +174,16 @@ if [ $# -eq 0 ]; then
         -c "$repo/demo/config/modbus.toml"
 
     # Which files a set of paths names has to agree as well, not only what the files say: a
-    # config read from a pipe, a hidden file named just `.toml` (no extension, so not a config),
-    # one file under several spellings, and more paths than a fixed-size table would hold. The
-    # untyped fixture makes the warnings — which list the devices of every file loaded — tell.
+    # config read from a pipe, a hidden file named just `.toml` (no extension, so not a config —
+    # and not valid TOML here, so a build that loaded it would fail the run), one file under
+    # several spellings, and more paths than a fixed-size table would hold. A file loaded twice
+    # renders exactly like one loaded once, so the spellings case only pins that both builds
+    # accept them; the Rust unit test `discover_configs_judges_files_not_spellings` pins the
+    # de-duplication itself.
     STDIN_FROM="$repo/demo/config/modbus.toml" compare_run "a config from a pipe (-c /dev/stdin)" /dev/stdin
     paths_dir=$(mktemp -d)
     trap 'rm -rf "$compare" "$rust_errs" "$c_errs" "$paths_dir"' EXIT
-    cp "$repo/impl/c/ci/fixtures/untyped-modbus.toml" "$paths_dir/.toml"
+    printf '[[[ not a config\n' > "$paths_dir/.toml"
     cp "$repo/impl/c/ci/fixtures/untyped-modbus.toml" "$paths_dir/untyped.toml"
     compare_run "a directory holding a bare .toml" "$paths_dir"
     compare_run "one file under three spellings" "$paths_dir" \

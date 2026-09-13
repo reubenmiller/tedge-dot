@@ -250,10 +250,12 @@ async fn shutdown_or_deadline(duration: Option<Duration>) {
 /// Run every discovered connector concurrently in this process (long-lived service).
 async fn run(args: RunArgs) -> ExitCode {
     let config_args = combined_config_args(&args.configs, &args.config);
-    let configs = match discover_configs(&config_args) {
+    let configs = match discover_configs(&config_args)
+        .and_then(|configs| require_rereadable(&configs).map(|()| configs))
+    {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("error: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -472,6 +474,21 @@ fn discover_configs(args: &[String]) -> Result<Vec<PathBuf>, String> {
     let mut seen = std::collections::HashSet::new();
     found.retain(|p| seen.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())));
     Ok(found)
+}
+
+/// `run` reads a connector's config again whenever it restarts the connector, which a pipe
+/// (`-c <(generate-config)`) cannot provide a second time: the first read would empty it and every
+/// restart after that fail. So `run` takes files and directories only; `describe`, which reads
+/// each config once, takes pipes too. The C build refuses the same paths.
+fn require_rereadable(configs: &[PathBuf]) -> Result<(), String> {
+    match configs.iter().find(|path| !path.is_file()) {
+        Some(path) => Err(format!(
+            "config path '{}' is not a regular file; `run` re-reads its configs, so it needs \
+             files or directories",
+            path.display()
+        )),
+        None => Ok(()),
+    }
 }
 
 /// Default log filter for the service: the most verbose `connector.log_level` across the
@@ -1270,6 +1287,26 @@ mod tests {
             discover_configs(&["/dev/null".into()]).unwrap(),
             vec![PathBuf::from("/dev/null")]
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `run` re-reads its configs, so it refuses a path it could only read once (a pipe); a file
+    /// and a symlink to one are fine.
+    #[test]
+    fn run_refuses_a_config_it_cannot_read_again() {
+        let dir = std::env::temp_dir().join(format!("tedge-dot-rereadable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = write(&dir, "a.toml", "");
+        assert_eq!(require_rereadable(std::slice::from_ref(&file)), Ok(()));
+        #[cfg(unix)]
+        {
+            let link = dir.join("link.toml");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert_eq!(require_rereadable(&[link]), Ok(()));
+            let err = require_rereadable(&[PathBuf::from("/dev/null")]).unwrap_err();
+            assert!(err.contains("not a regular file"), "{err}");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -491,6 +491,17 @@ static int cmd_run(const args_t *a) {
     struct stat st;
     if (a->config && stat(a->config, &st) == 0 && S_ISDIR(st.st_mode))
         return run_dir(a->config, &opts);
+    /* Otherwise a file, as in the Rust build: a connector can need its config
+     * again (the Rust build re-reads it to restart one), which a pipe such as
+     * `-c <(generate-config)` cannot provide twice. `describe` reads once, so it
+     * takes pipes too. */
+    if (a->config && stat(a->config, &st) == 0 && !S_ISREG(st.st_mode)) {
+        fprintf(stderr,
+                "error: config path '%s' is not a regular file; `run` re-reads its "
+                "configs, so it needs files or directories\n",
+                a->config);
+        return 1;
+    }
 
     tdot_config_t *cfg;
     tdot_connector_t *conn;
