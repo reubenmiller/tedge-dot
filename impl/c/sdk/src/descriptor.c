@@ -364,6 +364,8 @@ char *tdot_param_untyped_devices_across(const tdot_config_t *const *cfgs,
                                         size_t ncfgs, const char *protocol) {
     char *buf = NULL;
     size_t len = 0;
+    const char **listed = NULL; /* borrowed names, each warned about once */
+    size_t nlisted = 0;
     for (size_t c = 0; c < ncfgs; c++) {
         const tdot_config_t *cfg = cfgs[c];
         if (strcmp(cfg->protocol, protocol) != 0)
@@ -374,14 +376,21 @@ char *tdot_param_untyped_devices_across(const tdot_config_t *const *cfgs,
                 continue;
             tdot_set_naming_t naming =
                 tdot_param_naming(dev, cfg->protocol, NULL);
-            for (size_t j = 0; j < dev->npoints; j++) {
-                if (tdot_param_is(&dev->points[j], &naming)) {
-                    append(&buf, &len, ", ", dev->name);
-                    break;
-                }
-            }
+            bool has_parameters = false;
+            for (size_t j = 0; j < dev->npoints && !has_parameters; j++)
+                has_parameters = tdot_param_is(&dev->points[j], &naming);
+            /* Named once, even when several files define a device of that name. */
+            bool seen = false;
+            for (size_t k = 0; k < nlisted && !seen; k++)
+                seen = strcmp(listed[k], dev->name) == 0;
+            if (!has_parameters || seen)
+                continue;
+            listed = realloc(listed, (nlisted + 1) * sizeof *listed);
+            listed[nlisted++] = dev->name;
+            append(&buf, &len, ", ", dev->name);
         }
     }
+    free(listed);
     return buf;
 }
 

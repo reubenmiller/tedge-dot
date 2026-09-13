@@ -82,9 +82,10 @@ struct DescribeArgs {
     /// What to print.
     #[arg(short, long, value_enum, default_value_t = DescribeFormat::C8yDtm)]
     format: DescribeFormat,
-    /// Device name or wildcard pattern to restrict the output to.
-    #[arg(short, long, default_value = "*")]
-    device: String,
+    /// Device name or wildcard pattern to restrict the output to; it must match at least one
+    /// device. Default: every device.
+    #[arg(short, long)]
+    device: Option<String>,
     /// One parameter set for every point that does not name an absolute one, instead of the
     /// derived <type-or-protocol>_<group>_parameters. Must match the ot-parameter-state flow
     /// setting.
@@ -441,8 +442,14 @@ async fn stall_watchdog(progress: runtime::Progress, limit: Duration) -> String 
     }
 }
 
-/// Expand the `run` arguments into concrete config files: directories contribute their `*.toml`
-/// entries (sorted), files are taken as-is, and duplicates are dropped.
+/// Expand config path arguments into concrete config files: directories contribute their `*.toml`
+/// regular files (sorted), anything else that exists is taken as-is (a file, or a pipe such as
+/// `-c <(generate-config)`), and a file named twice is kept once.
+///
+/// "Named twice" is judged by where the path resolves to, so the same file under two spellings
+/// (`dir` and `dir//a.toml`, or a symlink) is one config; the spelling it was first named by is
+/// what gets used and reported. `impl/c/src/main.c` (`collect_configs`) applies the same rules,
+/// which `describe-parity.sh` pins.
 fn discover_configs(args: &[String]) -> Result<Vec<PathBuf>, String> {
     let mut found = Vec::new();
     for arg in args {
@@ -456,14 +463,14 @@ fn discover_configs(args: &[String]) -> Result<Vec<PathBuf>, String> {
                 .collect();
             entries.sort();
             found.extend(entries);
-        } else if path.is_file() {
+        } else if path.exists() {
             found.push(path.to_path_buf());
         } else {
             return Err(format!("config path '{arg}' does not exist"));
         }
     }
     let mut seen = std::collections::HashSet::new();
-    found.retain(|p| seen.insert(p.clone()));
+    found.retain(|p| seen.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())));
     Ok(found)
 }
 
@@ -915,14 +922,14 @@ fn cmd_describe(args: DescribeArgs) -> Result<(), String> {
         .as_deref()
         .map(tedge_dot_sdk::descriptor::trim_c)
         .filter(|s| !s.is_empty());
-    if args.device != "*" {
+    // A pattern that was given must match a device somewhere — `*` included, as in the C build:
+    // what decides is whether `-d` was given, not what it says.
+    if let Some(pattern) = &args.device {
         for config in &mut configs {
-            config
-                .devices
-                .retain(|d| wildcard_match(&args.device, &d.name));
+            config.devices.retain(|d| wildcard_match(pattern, &d.name));
         }
         if configs.iter().all(|config| config.devices.is_empty()) {
-            return Err(format!("no device matches '{}'", args.device));
+            return Err(format!("no device matches '{pattern}'"));
         }
     }
     // Parameter ids become fragment keys on the device twin, so they must be plain identifiers.
@@ -1233,6 +1240,36 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["a.toml", "b.toml"]);
 
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// One file is one config however it is spelled (judged by where the path resolves to), a
+    /// hidden file named just `.toml` has no extension and is not a config, and a path that is
+    /// not a regular file — a pipe, `-c <(generate-config)` — is still taken. The C build's
+    /// `collect_configs` follows the same rules (pinned by `describe-parity.sh`).
+    #[test]
+    fn discover_configs_judges_files_not_spellings() {
+        let dir = std::env::temp_dir().join(format!("tedge-dot-spelling-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write(&dir, "a.toml", "");
+        write(&dir, ".toml", "");
+
+        let spelled = format!("{}//a.toml", dir.display());
+        let found = discover_configs(&[
+            spelled.clone(),
+            dir.display().to_string(),
+            format!("{}/./a.toml", dir.display()),
+        ])
+        .unwrap();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].as_os_str(), spelled.as_str(), "kept as first named");
+
+        #[cfg(unix)]
+        assert_eq!(
+            discover_configs(&["/dev/null".into()]).unwrap(),
+            vec![PathBuf::from("/dev/null")]
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

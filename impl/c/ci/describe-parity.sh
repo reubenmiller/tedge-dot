@@ -97,8 +97,15 @@ compare_run() {
     local name=$1 config=$2
     shift 2
     local rust_out c_out rust_rc=0 c_rc=0
-    rust_out=$("$rust_bin" describe -c "$config" --compact "$@" 2>"$rust_errs") || rust_rc=$?
-    c_out=$("$c_bin" describe -c "$config" --compact "$@" 2>"$c_errs") || c_rc=$?
+    if [ -n "${STDIN_FROM:-}" ]; then
+        # Each binary reads the file through its own pipe (`-c /dev/stdin`): a config that is
+        # not a regular file must be accepted, or refused, by both.
+        rust_out=$(cat "$STDIN_FROM" | "$rust_bin" describe -c "$config" --compact "$@" 2>"$rust_errs") || rust_rc=$?
+        c_out=$(cat "$STDIN_FROM" | "$c_bin" describe -c "$config" --compact "$@" 2>"$c_errs") || c_rc=$?
+    else
+        rust_out=$("$rust_bin" describe -c "$config" --compact "$@" 2>"$rust_errs") || rust_rc=$?
+        c_out=$("$c_bin" describe -c "$config" --compact "$@" 2>"$c_errs") || c_rc=$?
+    fi
     # A config one binary rejects and the other accepts is the divergence that matters most:
     # the same file must be usable, or unusable, from either package.
     if [ "$rust_rc" != "$c_rc" ]; then
@@ -158,9 +165,32 @@ if [ $# -eq 0 ]; then
     compare_run "untyped + folded-types (-c twice)" \
         "$repo/impl/c/ci/fixtures/untyped-modbus.toml" \
         -c "$repo/impl/c/ci/fixtures/folded-types-modbus.toml"
+    # The configs a package installs define no devices: rendering them is empty, not an error,
+    # while a `-d` pattern that was given — even `*` — must match a device.
+    compare_run "packaging/config (no devices)" "$repo/packaging/config"
+    compare_run "packaging/config -d '*' (no devices)" "$repo/packaging/config" -d '*'
     # A directory and one of its own files name that file twice; it is rendered once.
     compare_run "demo/config + demo/config/modbus.toml" "$repo/demo/config" \
         -c "$repo/demo/config/modbus.toml"
+
+    # Which files a set of paths names has to agree as well, not only what the files say: a
+    # config read from a pipe, a hidden file named just `.toml` (no extension, so not a config),
+    # one file under several spellings, and more paths than a fixed-size table would hold. The
+    # untyped fixture makes the warnings — which list the devices of every file loaded — tell.
+    STDIN_FROM="$repo/demo/config/modbus.toml" compare_run "a config from a pipe (-c /dev/stdin)" /dev/stdin
+    paths_dir=$(mktemp -d)
+    trap 'rm -rf "$compare" "$rust_errs" "$c_errs" "$paths_dir"' EXIT
+    cp "$repo/impl/c/ci/fixtures/untyped-modbus.toml" "$paths_dir/.toml"
+    cp "$repo/impl/c/ci/fixtures/untyped-modbus.toml" "$paths_dir/untyped.toml"
+    compare_run "a directory holding a bare .toml" "$paths_dir"
+    compare_run "one file under three spellings" "$paths_dir" \
+        -c "$paths_dir//untyped.toml" -c "$paths_dir/./untyped.toml"
+    many=()
+    for i in $(seq 1 70); do
+        cp "$repo/impl/c/ci/fixtures/untyped-modbus.toml" "$paths_dir/copy-$i.toml"
+        many+=(-c "$paths_dir/copy-$i.toml")
+    done
+    compare_run "70 config paths" "$paths_dir/copy-1.toml" "${many[@]:2}"
 fi
 
 if [ "$fail" != 0 ]; then

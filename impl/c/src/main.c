@@ -45,9 +45,6 @@ static void usage(void) {
  * service runs. */
 #define DEFAULT_CONFIG_DIR "/etc/tedge/plugins/ot"
 
-/* Config paths one invocation may name (only `describe` takes more than one). */
-#define MAX_CONFIG_ARGS 64
-
 static volatile sig_atomic_t g_stop = 0;
 static void on_signal(int sig) {
     (void)sig;
@@ -55,9 +52,11 @@ static void on_signal(int sig) {
 }
 
 typedef struct {
-    const char *config; /* the first of `configs` */
-    const char *configs[MAX_CONFIG_ARGS]; /* every -c/--config and positional path */
+    const char *config;   /* the first of `configs` */
+    const char **configs; /* every -c/--config and positional path, as many as
+                             given (only `describe` takes more than one) */
     int nconfigs;
+    int capconfigs;
     const char *device;
     const char *points[16];
     int npoints;
@@ -74,9 +73,15 @@ typedef struct {
 } args_t;
 
 static int add_config(args_t *a, const char *path) {
-    if (a->nconfigs == MAX_CONFIG_ARGS) {
-        fprintf(stderr, "too many config paths (at most %d)\n", MAX_CONFIG_ARGS);
-        return -1;
+    if (a->nconfigs == a->capconfigs) {
+        int cap = a->capconfigs ? a->capconfigs * 2 : 4;
+        const char **grown = realloc(a->configs, (size_t)cap * sizeof *grown);
+        if (!grown) {
+            fputs("out of memory\n", stderr);
+            return -1;
+        }
+        a->configs = grown;
+        a->capconfigs = cap;
     }
     a->configs[a->nconfigs++] = path;
     if (!a->config)
@@ -132,9 +137,10 @@ static int parse_args(int argc, char **argv, args_t *a) {
     if (!a->config) {
         /* `describe` needs neither a device nor a broker, so — like the Rust
          * binary — it falls back to the directory the packaged service runs. */
-        if (describe)
-            add_config(a, DEFAULT_CONFIG_DIR);
-        else {
+        if (describe) {
+            if (add_config(a, DEFAULT_CONFIG_DIR) != 0)
+                return -1;
+        } else {
             fputs("missing --config\n", stderr);
             return -1;
         }
@@ -364,46 +370,64 @@ static void free_paths(char **paths, size_t n) {
     free(paths);
 }
 
-/* Append `path` unless it is already listed: a directory and one of its own
- * files name that file twice, and it is one config. */
-static void push_path(char ***paths, size_t *n, size_t *cap, const char *path) {
-    for (size_t i = 0; i < *n; i++)
-        if (strcmp((*paths)[i], path) == 0)
-            return;
+static void push_string(char ***list, size_t *n, size_t *cap, char *owned) {
     if (*n == *cap) {
         *cap = *cap ? *cap * 2 : 8;
-        *paths = realloc(*paths, *cap * sizeof **paths);
+        *list = realloc(*list, *cap * sizeof **list);
     }
-    (*paths)[(*n)++] = strdup(path);
+    (*list)[(*n)++] = owned;
 }
 
-/* Expand config arguments into the files they name, like the Rust binary's
- * discover_configs(): a directory contributes its *.toml regular files in
- * sorted order, a file is taken as is, and a file named twice is kept once.
- * Returns 0 with an array the caller releases with free_paths(), or -1 after
- * printing why (a path that does not exist, a directory that cannot be read). */
+/* The config files found so far, each with the canonical path it resolves to:
+ * the same file under two spellings (`dir` and `dir//a.toml`, or a symlink) is
+ * one config, kept under the spelling it was first named by. */
+typedef struct {
+    char **paths, **keys;
+    size_t n, cap, nkeys, capkeys;
+} config_list_t;
+
+static void config_list_push(config_list_t *l, const char *path) {
+    char *key = realpath(path, NULL);
+    if (!key)
+        key = strdup(path);
+    for (size_t i = 0; i < l->nkeys; i++)
+        if (strcmp(l->keys[i], key) == 0) {
+            free(key);
+            return;
+        }
+    push_string(&l->keys, &l->nkeys, &l->capkeys, key);
+    push_string(&l->paths, &l->n, &l->cap, strdup(path));
+}
+
+/* Expand config arguments into the files they name, by the same rules as the
+ * Rust binary's discover_configs() (describe-parity.sh pins them): a directory
+ * contributes its *.toml regular files in sorted order, anything else that
+ * exists is taken as is (a file, or a pipe such as `-c <(generate-config)`),
+ * and a file named twice is kept once. Returns 0 with an array the caller
+ * releases with free_paths(), or -1 after printing why (a path that does not
+ * exist, a directory that cannot be read). */
 static int collect_configs(const char *const *args, size_t nargs,
                            char ***out, size_t *nout) {
-    char **paths = NULL;
-    size_t n = 0, cap = 0;
-    for (size_t i = 0; i < nargs; i++) {
+    config_list_t list = {0};
+    int rc = 0;
+    for (size_t i = 0; i < nargs && rc == 0; i++) {
         struct stat st;
         if (stat(args[i], &st) != 0) {
             fprintf(stderr, "error: config path '%s' does not exist\n", args[i]);
-            free_paths(paths, n);
-            return -1;
+            rc = -1;
+            break;
         }
         if (!S_ISDIR(st.st_mode)) {
-            push_path(&paths, &n, &cap, args[i]);
+            config_list_push(&list, args[i]);
             continue;
         }
         DIR *d = opendir(args[i]);
         if (!d) {
             fprintf(stderr, "error: cannot read config directory %s\n", args[i]);
-            free_paths(paths, n);
-            return -1;
+            rc = -1;
+            break;
         }
-        /* Without the trailing '/', so `dir/` and `dir` name the same files. */
+        /* Without the trailing '/', so `dir/` and `dir` spell the same files. */
         int dirlen = (int)strlen(args[i]);
         while (dirlen > 1 && args[i][dirlen - 1] == '/')
             dirlen--;
@@ -411,24 +435,31 @@ static int collect_configs(const char *const *args, size_t nargs,
         size_t nfound = 0, capfound = 0;
         struct dirent *e;
         while ((e = readdir(d))) {
+            /* A name that is only `.toml` has no extension (a hidden file), as
+             * Rust's Path::extension() sees it, so it is not a config. */
             const char *dot = strrchr(e->d_name, '.');
-            if (!dot || strcmp(dot, ".toml") != 0)
+            if (!dot || dot == e->d_name || strcmp(dot, ".toml") != 0)
                 continue;
             char full[1024];
             snprintf(full, sizeof full, "%.*s/%s", dirlen, args[i], e->d_name);
             struct stat fst;
             if (stat(full, &fst) != 0 || !S_ISREG(fst.st_mode))
                 continue;
-            push_path(&found, &nfound, &capfound, full);
+            push_string(&found, &nfound, &capfound, strdup(full));
         }
         closedir(d);
         qsort(found, nfound, sizeof *found, cmp_str); /* stable, predictable order */
         for (size_t j = 0; j < nfound; j++)
-            push_path(&paths, &n, &cap, found[j]);
+            config_list_push(&list, found[j]);
         free_paths(found, nfound);
     }
-    *out = paths;
-    *nout = n;
+    free_paths(list.keys, list.nkeys);
+    if (rc != 0) {
+        free_paths(list.paths, list.n);
+        return rc;
+    }
+    *out = list.paths;
+    *nout = list.n;
     return 0;
 }
 
@@ -676,5 +707,6 @@ int main(int argc, char **argv) {
     else
         usage();
     free(shifted);
+    free(a.configs);
     return rc;
 }

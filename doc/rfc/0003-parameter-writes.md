@@ -51,7 +51,8 @@ From the connector configuration, rendered on demand for a tenant admin to regis
 # loop's stdin as its own input pipeline and the remaining definitions are never registered.
 defs=$(mktemp) one=$(mktemp)
 trap 'rm -f "$defs" "$one"' EXIT
-tedge-dot describe -c /etc/tedge/plugins/ot/modbus.toml --compact > "$defs"
+# every connector config the service runs (/etc/tedge/plugins/ot), a shared set rendered once
+tedge-dot describe --compact > "$defs"
 # Read from a file, not a pipe: a `while` on the right of a pipe runs in a subshell, where
 # `exit 1` would abort only the loop and leave the script reporting success.
 while read -r definition; do
@@ -191,7 +192,7 @@ MQTT, and it has no notion of point state; on child devices it cannot run at all
 | --- | --- | --- |
 | SDK | parameter/set derivation from the config + DTM rendering | `impl/rust/crates/sdk/src/descriptor.rs` |
 | SDK runtime | `access` in samples, `write-batch` | `impl/rust/crates/sdk/src/runtime.rs` |
-| CLI | `tedge-dot describe [--set] [--device] [--compact]` | `impl/rust/src/main.rs`, `impl/c/src/main.c` |
+| CLI | `tedge-dot describe [<config-or-dir>...] [--config <config-or-dir>]... [--set] [--device] [--compact]` | `impl/rust/src/main.rs`, `impl/c/src/main.c` |
 | Flows | `ot-parameter-state` (new); `ot-command-forward` reshapes `parameter_update`, `ot-command-result` honours `origin.command`; `ot-registration` advertises `parameter_update` | `flows/` |
 | c8y glue | none — the tedge-parameter-plugin's template (installed by the cloud e2e image) | |
 | Tests | offline flow checks incl. the chain through shared mapper state (`just test-flows`); e2e: `access` in samples, batch semantics, and the flows-driven parameter round-trip on a cloud-free flows runner (`just test-e2e modbus|opcua`); cloud: DTM registration → fragment → operation → measurement (`cloud/modbus/tests/parameters_c8y.robot`) | |

@@ -275,14 +275,22 @@ pub fn devices_without_type(config: &ConnectorConfig) -> Vec<String> {
 /// `protocol`. Per protocol, because the set such a device falls back to — and so everything it
 /// collides with — is named after it.
 pub fn untyped_devices_across(configs: &[ConnectorConfig], protocol: &str) -> Vec<String> {
-    devices_across(configs)
-        .filter(|(p, d)| *p == protocol && d.device_type.as_deref().unwrap_or("").is_empty())
-        .filter(|(p, d)| {
-            let naming = SetNaming::of(d, p, None);
-            d.points.iter().any(|point| !parameters_of(point, &naming).is_empty())
-        })
-        .map(|(_, d)| d.name.clone())
-        .collect()
+    let mut names: Vec<String> = Vec::new();
+    for (p, device) in devices_across(configs) {
+        if p != protocol || !device.device_type.as_deref().unwrap_or("").is_empty() {
+            continue;
+        }
+        let naming = SetNaming::of(device, p, None);
+        let has_parameters = device
+            .points
+            .iter()
+            .any(|point| !parameters_of(point, &naming).is_empty());
+        // Named once, even when several files define a device of that name.
+        if has_parameters && !names.contains(&device.name) {
+            names.push(device.name.clone());
+        }
+    }
+    names
 }
 
 /// Warnings about the device types a configuration declares: types that produce the *same* set
