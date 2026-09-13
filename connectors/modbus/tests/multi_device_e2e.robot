@@ -139,6 +139,36 @@ A Device Is Switched Off And On Again With Set-Config
     Command Should Be Handled Once    ${service}/e-3    executing    successful
     Point Should Read    plc-8    device_id    8
 
+A Device Polls At Its Own Interval
+    [Documentation]    A device's `poll_interval` overrides the connector's (§3): set to 4s on plc-9
+    ...                and persisted to its file, its points are sampled every four seconds while
+    ...                plc-10 keeps the connector's one second. Keys are checked by name (§3.3), so
+    ...                the misspelling `polling_interval` is refused, naming the key it resembles,
+    ...                instead of being accepted and silently ignored.
+    ${service}=    Set Variable    te/device/main/service/tedge-dot-9/ot/cmd/set-config
+    Publish Message    ${service}/p-1
+    ...    {"status":"init","target":"device:plc-9","config":{"polling_interval":"4s"}}    retain=True
+    Command Should Be Handled Once    ${service}/p-1    executing    failed
+    ${result}=    Get Message    ${service}/p-1
+    ${reason}=    Get Json Field    ${result}    reason
+    Should Contain    ${reason}    did you mean 'poll_interval'
+
+    Publish Message    ${service}/p-2
+    ...    {"status":"init","target":"device:plc-9","config":{"poll_interval":"4s"}}    retain=True
+    Command Should Be Handled Once    ${service}/p-2    executing    successful
+    ${config}=    DeviceLibrary.Execute Command    cmd=cat ${CONFIG_DIR}/plc-9.toml
+    Should Match Regexp    ${config}    poll_interval\\s*=\\s*"4s"
+    Clear Messages
+    Sleep    12s
+    ${slow}=    Get Messages    te/device/plc-9/ot/${PROTOCOL}/sample/device_id
+    ${fast}=    Get Messages    te/device/plc-10/ot/${PROTOCOL}/sample/device_id
+    ${slow_count}=    Get Length    ${slow}
+    ${fast_count}=    Get Length    ${fast}
+    Should Be True    2 <= ${slow_count} <= 4
+    ...    plc-9 was sampled ${slow_count} times in 12s at its own 4s interval
+    Should Be True    ${fast_count} >= 9
+    ...    plc-10 was sampled ${fast_count} times in 12s at the connector's 1s interval
+
 Flows Route A Management Command To The Service It Names
     [Documentation]    (flows) A thin-edge `ot_define_device` naming a `service` is bridged to that
     ...                instance's service topic, applied there alone, and its result completes the

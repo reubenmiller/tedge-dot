@@ -10,6 +10,154 @@
 
 #include "cjson/cJSON.h"
 
+/* ---- known keys (contract §3.3) -------------------------------------------
+ * The keys a contract-level table may carry. Anything else is refused, with the
+ * nearest known key suggested, so a misspelt setting -- `polling_interval` for
+ * `poll_interval` -- is reported instead of silently doing nothing. The
+ * protocol-specific objects (`connection`, `protocol_address`, `address`) and
+ * `meta` are free-form and not checked. The Rust loader
+ * (impl/rust/crates/sdk/src/library.rs `check_keys`) refuses the same keys with
+ * the same message. */
+static const char *const TOP_KEYS[] = {"connector", "mqtt", "connection", "device", NULL};
+static const char *const CONNECTOR_KEYS[] = {
+    "protocol",          "service_name",  "poll_interval",      "log_level",
+    "operation_timeout", "stall_timeout", "point_library_path", NULL};
+static const char *const MQTT_KEYS[] = {"host", "port", NULL};
+static const char *const DEVICE_KEYS[] = {
+    "name",         "type",        "protocol_address", "poll_interval",
+    "default_mode", "points_from", "point",            "enabled",
+    NULL};
+static const char *const POINT_KEYS[] = {
+    "id",      "mode",   "datatype", "endianness",  "word_order",
+    "poll_interval", "address", "access", "unit", "name", "description",
+    "transform", "meta", "subscribe", NULL};
+static const char *const TRANSFORM_KEYS[] = {"multiplier", "divisor",
+                                             "decimal_shift", "offset", NULL};
+static const char *const LIBRARY_TOP_KEYS[] = {"library", "point", NULL};
+static const char *const LIBRARY_KEYS[] = {"protocol", "type", "description",
+                                           "version", NULL};
+
+/* Levenshtein distance over bytes (as the Rust loader computes it). */
+static size_t edit_distance(const char *a, const char *b) {
+    size_t la = strlen(a), lb = strlen(b);
+    size_t *prev = malloc((lb + 1) * sizeof *prev);
+    size_t *cur = malloc((lb + 1) * sizeof *cur);
+    if (!prev || !cur) {
+        free(prev);
+        free(cur);
+        return (size_t)-1;
+    }
+    for (size_t j = 0; j <= lb; j++)
+        prev[j] = j;
+    for (size_t i = 1; i <= la; i++) {
+        cur[0] = i;
+        for (size_t j = 1; j <= lb; j++) {
+            size_t best = prev[j - 1] + (a[i - 1] != b[j - 1]);
+            if (prev[j] + 1 < best)
+                best = prev[j] + 1;
+            if (cur[j - 1] + 1 < best)
+                best = cur[j - 1] + 1;
+            cur[j] = best;
+        }
+        size_t *swap = prev;
+        prev = cur;
+        cur = swap;
+    }
+    size_t distance = prev[lb];
+    free(prev);
+    free(cur);
+    return distance;
+}
+
+/* Refuse the first key of `tbl` that is not in `known` (NULL-terminated),
+ * naming the table (`place`) and, when one is close enough to be what was
+ * meant, the known key it most resembles: within an edit distance of a third
+ * of the key's length, and at least 2. Returns 0, or -1 with `err` filled. */
+static int check_keys(toml_table_t *tbl, const char *const *known,
+                      const char *place, char *err, size_t errlen) {
+    for (int i = 0;; i++) {
+        const char *key = toml_key_in(tbl, i);
+        if (!key)
+            return 0;
+        bool is_known = false;
+        for (const char *const *k = known; *k && !is_known; k++)
+            is_known = strcmp(*k, key) == 0;
+        if (is_known)
+            continue;
+        const char *nearest = NULL;
+        size_t nearest_distance = 0;
+        for (const char *const *k = known; *k; k++) {
+            size_t distance = edit_distance(key, *k);
+            if (!nearest || distance < nearest_distance) {
+                nearest = *k;
+                nearest_distance = distance;
+            }
+        }
+        size_t limit = strlen(key) / 3 < 2 ? 2 : strlen(key) / 3;
+        if (nearest && nearest_distance <= limit)
+            snprintf(err, errlen, "unknown key '%s' in %s (did you mean '%s'?)",
+                     key, place, nearest);
+        else
+            snprintf(err, errlen, "unknown key '%s' in %s", key, place);
+        return -1;
+    }
+}
+
+/* The keys of one point definition, inline or in a point library, and of its
+ * transform. */
+static int check_point_keys(toml_table_t *pt, char *err, size_t errlen) {
+    toml_datum_t id = toml_string_in(pt, "id");
+    char place[256];
+    snprintf(place, sizeof place, "point '%s'", id.ok ? id.u.s : "<unnamed>");
+    int rc = check_keys(pt, POINT_KEYS, place, err, errlen);
+    toml_table_t *transform = toml_table_in(pt, "transform");
+    if (rc == 0 && transform) {
+        snprintf(place, sizeof place, "the transform of point '%s'",
+                 id.ok ? id.u.s : "<unnamed>");
+        rc = check_keys(transform, TRANSFORM_KEYS, place, err, errlen);
+    }
+    if (id.ok)
+        free(id.u.s);
+    return rc;
+}
+
+/* The keys of a connector configuration, table by table (§3.3): the top level,
+ * [connector], [mqtt], every device -- a disabled one included, since a
+ * misspelt key is a mistake whether or not the device is switched on -- and
+ * its inline points. Mirrors `check_document` in the Rust loader. */
+static int check_document_keys(toml_table_t *root, char *err, size_t errlen) {
+    if (check_keys(root, TOP_KEYS, "the top level", err, errlen) != 0)
+        return -1;
+    toml_table_t *conn = toml_table_in(root, "connector");
+    if (conn && check_keys(conn, CONNECTOR_KEYS, "[connector]", err, errlen) != 0)
+        return -1;
+    toml_table_t *mqtt = toml_table_in(root, "mqtt");
+    if (mqtt && check_keys(mqtt, MQTT_KEYS, "[mqtt]", err, errlen) != 0)
+        return -1;
+    toml_array_t *devices = toml_array_in(root, "device");
+    int ndevices = devices ? toml_array_nelem(devices) : 0;
+    for (int i = 0; i < ndevices; i++) {
+        toml_table_t *dt = toml_table_at(devices, i);
+        if (!dt)
+            continue;
+        toml_datum_t name = toml_string_in(dt, "name");
+        char place[256];
+        snprintf(place, sizeof place, "device '%s'", name.ok ? name.u.s : "<unnamed>");
+        if (name.ok)
+            free(name.u.s);
+        if (check_keys(dt, DEVICE_KEYS, place, err, errlen) != 0)
+            return -1;
+        toml_array_t *points = toml_array_in(dt, "point");
+        int npoints = points ? toml_array_nelem(points) : 0;
+        for (int j = 0; j < npoints; j++) {
+            toml_table_t *pt = toml_table_at(points, j);
+            if (pt && check_point_keys(pt, err, errlen) != 0)
+                return -1;
+        }
+    }
+    return 0;
+}
+
 static char *dup_or(const char *s, const char *dflt) {
     return strdup(s ? s : dflt);
 }
@@ -495,7 +643,17 @@ static toml_array_t *library_points(toml_table_t *root, const char *path,
             return NULL;
         }
     }
+    /* The known keys (§3.3), after the check above: a connector configuration
+     * pointed at by mistake deserves that message rather than "unknown key
+     * 'connector'". */
+    char place[PATH_MAX + 64];
+    snprintf(place, sizeof place, "point library '%s'", path);
+    if (check_keys(root, LIBRARY_TOP_KEYS, place, err, errlen) != 0)
+        return NULL;
     toml_table_t *library = toml_table_in(root, "library");
+    snprintf(place, sizeof place, "[library] of point library '%s'", path);
+    if (library && check_keys(library, LIBRARY_KEYS, place, err, errlen) != 0)
+        return NULL;
     toml_datum_t d = library ? toml_string_in(library, "protocol")
                              : (toml_datum_t){.ok = 0};
     if (!d.ok) {
@@ -524,9 +682,15 @@ static toml_array_t *library_points(toml_table_t *root, const char *path,
     int n = toml_array_nelem(points);
     char **ids = calloc(n ? (size_t)n : 1, sizeof *ids);
     const char *dup = NULL;
-    bool missing_id = false;
-    for (int i = 0; i < n && !dup && !missing_id; i++) {
+    bool missing_id = false, bad_key = false;
+    for (int i = 0; i < n && !dup && !missing_id && !bad_key; i++) {
         toml_table_t *pt = toml_table_at(points, i);
+        char why[512];
+        if (pt && check_point_keys(pt, why, sizeof why) != 0) {
+            snprintf(err, errlen, "point library '%s': %s", path, why);
+            bad_key = true;
+            break;
+        }
         toml_datum_t id = pt ? toml_string_in(pt, "id") : (toml_datum_t){.ok = 0};
         if (!id.ok) {
             missing_id = true;
@@ -546,7 +710,7 @@ static toml_array_t *library_points(toml_table_t *root, const char *path,
     for (int i = 0; i < n; i++)
         free(ids[i]);
     free(ids);
-    return (dup || missing_id) ? NULL : points;
+    return (dup || missing_id || bad_key) ? NULL : points;
 }
 
 /* True when `key` is present in `tbl` under any TOML type. `toml_raw_in` only
@@ -785,6 +949,14 @@ tdot_config_t *tdot_config_load(const char *path, char *err, size_t errlen) {
     tdot_config_t *cfg = calloc(1, sizeof *cfg);
     cfg->root = root;
     cfg->path = strdup(path);
+
+    /* The known keys (§3.3), on the document as written and before anything is
+     * read from it, in the order the Rust loader checks them. */
+    char why[512];
+    if (check_document_keys(root, why, sizeof why) != 0) {
+        snprintf(err, errlen, "%s: %s", path, why);
+        goto fail;
+    }
 
     toml_table_t *conn = toml_table_in(root, "connector");
     if (!conn) {
