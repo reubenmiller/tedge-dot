@@ -102,32 +102,46 @@ const TRANSFORM_KEYS: &[&str] = &["multiplier", "divisor", "decimal_shift", "off
 const LIBRARY_TOP_KEYS: &[&str] = &["library", "point"];
 const LIBRARY_KEYS: &[&str] = &["protocol", "type", "description", "version"];
 
-/// Refuse the first key of `table` that is not `known`, naming the table (`place`) and, when one
-/// is close enough to be what was meant, the known key it most resembles. A value that is not a
-/// table is left to the typed parse, whose message for a wrong shape is the canonical one.
+/// Refuse the keys of `table` that are not `known`, naming the table (`place`) and, for each, the
+/// known key it most resembles when one is close enough to be what was meant. Every unknown key
+/// is listed, in byte order, so the message does not depend on how a TOML parser orders a table
+/// (the C loader's keeps file order). A value that is not a table is left to the typed parse,
+/// whose message for a wrong shape is the canonical one.
 fn check_keys(table: &Value, known: &[&str], place: &str) -> Result<(), String> {
     let Some(table) = table.as_table() else {
         return Ok(());
     };
-    match table.keys().find(|key| !known.contains(&key.as_str())) {
-        Some(key) => Err(unknown_key(key, known, place)),
-        None => Ok(()),
+    let mut unknown: Vec<&str> = table
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !known.contains(key))
+        .collect();
+    unknown.sort_unstable();
+    match unknown.as_slice() {
+        [] => Ok(()),
+        [key] => Err(format!("unknown key '{key}' in {place}{}", suggestion(key, known))),
+        keys => {
+            let listed: Vec<String> = keys
+                .iter()
+                .map(|key| format!("'{key}'{}", suggestion(key, known)))
+                .collect();
+            Err(format!("unknown keys in {place}: {}", listed.join(", ")))
+        }
     }
 }
 
-/// The message for an unknown key: the nearest known key is suggested when its edit distance is
-/// at most a third of the key's length (and at least 2), so `polling_interval` suggests
-/// `poll_interval` while an unrelated word suggests nothing.
-fn unknown_key(key: &str, known: &[&str], place: &str) -> String {
+/// The suggestion for an unknown key: the nearest known key, when its edit distance is at most a
+/// third of the key's length (and at least 2), so `polling_interval` suggests `poll_interval`
+/// while an unrelated word suggests nothing. Ties go to the first known key.
+fn suggestion(key: &str, known: &[&str]) -> String {
     let limit = (key.len() / 3).max(2);
-    let suggestion = known
+    known
         .iter()
         .map(|candidate| (edit_distance(key, candidate), *candidate))
         .min_by_key(|(distance, _)| *distance)
         .filter(|(distance, _)| *distance <= limit)
         .map(|(_, candidate)| format!(" (did you mean '{candidate}'?)"))
-        .unwrap_or_default();
-    format!("unknown key '{key}' in {place}{suggestion}")
+        .unwrap_or_default()
 }
 
 /// Levenshtein distance over bytes (as the C loader computes it).
@@ -1204,6 +1218,13 @@ points_from = ["not-installed"]
         assert_eq!(
             refused(config("", "enabled = false\nenabeld = true", "")),
             "unknown key 'enabeld' in device 'plc-1' (did you mean 'enabled'?)"
+        );
+        // Every unknown key of a table is listed, in byte order whatever the file order and
+        // whether the value is a scalar or a table, so both loaders name the same keys.
+        assert_eq!(
+            refused(config("", "zeta = 1\npolling_interval = \"10s\"\nalpha_tbl = { a = 1 }", "")),
+            "unknown keys in device 'plc-1': 'alpha_tbl', \
+             'polling_interval' (did you mean 'poll_interval'?), 'zeta'"
         );
         // The free-form objects are not checked.
         resolve(

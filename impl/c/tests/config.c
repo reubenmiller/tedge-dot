@@ -1260,6 +1260,12 @@ static void check_unknown_keys(void) {
          "unknown key 'colour' in device 'plc-1'"},
         {"a disabled device's key", "", "enabled = false\nenabeld = true\n", "", "",
          "unknown key 'enabeld' in device 'plc-1' (did you mean 'enabled'?)"},
+        /* Every unknown key is listed, in byte order: tomlc99 keeps file order
+         * and puts tables last, the Rust parser sorts. */
+        {"several keys", "",
+         "zeta = 1\npolling_interval = \"10s\"\nalpha_tbl = { a = 1 }\n", "", "",
+         "unknown keys in device 'plc-1': 'alpha_tbl', "
+         "'polling_interval' (did you mean 'poll_interval'?), 'zeta'"},
     };
     for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
         char body[1024];
