@@ -133,6 +133,33 @@ A Device Is Removed Only By The Service It Is Addressed To
     Command Should Be Handled Once    ${topic}    executing    successful
     Configs Defining Device Should Be    plc-11
 
+A Device Is Switched Off And On Again With Set-Config
+    [Documentation]    `enabled` (§3.3) is an ordinary device field, so `set-config` switches a device
+    ...                off in place: the reload stops polling it and its commands go unanswered, as
+    ...                for a removed device — but its definition stays in the file, and switching it
+    ...                back on brings the same device back.
+    ${service}=    Set Variable    te/device/main/service/tedge-dot-8/ot/cmd/set-config
+    Publish Message    ${service}/e-1
+    ...    {"status":"init","target":"device:plc-8","config":{"enabled":false}}    retain=True
+    Command Should Be Handled Once    ${service}/e-1    executing    successful
+    Configs Defining Device Should Be    plc-8    ${CONFIG_DIR}/plc-8.toml
+    ${config}=    DeviceLibrary.Execute Command    cmd=cat ${CONFIG_DIR}/plc-8.toml
+    Should Match Regexp    ${config}    enabled\\s*=\\s*false
+
+    Clear Messages
+    No Messages On Topic    te/device/plc-8/ot/${PROTOCOL}/sample/#    timeout=5
+    ${write}=    Set Variable    te/device/plc-8/ot/${PROTOCOL}/cmd/write/e-2
+    Publish Message    ${write}    {"status":"init","point":"temp_u16","value":8008}    retain=True
+    Sleep    ${SETTLE}
+    ${transitions}=    Connector Transitions On    ${write}
+    Should Be Empty    ${transitions}    a disabled device's commands must go unanswered
+    Publish Message    ${write}    ${EMPTY}    retain=True
+
+    Publish Message    ${service}/e-3
+    ...    {"status":"init","target":"device:plc-8","config":{"enabled":true}}    retain=True
+    Command Should Be Handled Once    ${service}/e-3    executing    successful
+    Point Should Read    plc-8    device_id    8
+
 Flows Route A Management Command To The Service It Names
     [Documentation]    (flows) A thin-edge `ot_define_device` naming a `service` is bridged to that
     ...                instance's service topic, applied there alone, and its result completes the

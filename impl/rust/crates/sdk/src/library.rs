@@ -112,6 +112,7 @@ fn expand(doc: &mut Value, base_dir: &Path) -> Result<(), String> {
     // "was this reference already here" ambiguous for the management guard.
     let mut seen: Vec<&str> = Vec::new();
     let mut normalised: Vec<(usize, String)> = Vec::new();
+    let mut disabled: Vec<usize> = Vec::new();
     for (index, device) in devices.iter().enumerate() {
         let Some(name) = device.get("name").and_then(Value::as_str) else {
             continue; // a device without a name is the typed parse's error to report
@@ -120,6 +121,19 @@ fn expand(doc: &mut Value, base_dir: &Path) -> Result<(), String> {
             return Err(format!("device '{name}' is defined more than once"));
         }
         seen.push(name);
+        // `enabled = false` (§3.3) takes the device out of the configuration before anything else
+        // about it is read — its type, its address, its point libraries — so a config can carry a
+        // ready-made device switched off, even one naming a library that is not installed yet.
+        // Its name still counted above: switching it on must not produce a duplicate.
+        match device.get("enabled") {
+            None | Some(Value::Boolean(true)) => {}
+            Some(Value::Boolean(false)) => {
+                tracing::info!(device = %name, "device is disabled (enabled = false); not loaded");
+                disabled.push(index);
+                continue;
+            }
+            Some(_) => return Err(format!("device '{name}': enabled must be true or false")),
+        }
         // Checked here rather than left to the typed parse, because an empty string would
         // otherwise be accepted as a type and silently behave like an absent one — and the C
         // loader must reject exactly the same files as this one.
@@ -139,6 +153,10 @@ fn expand(doc: &mut Value, base_dir: &Path) -> Result<(), String> {
         if let Some(table) = devices[index].as_table_mut() {
             table.insert("type".to_string(), Value::String(device_type));
         }
+    }
+    // Last in, first out, so the indices still to remove stay valid.
+    for index in disabled.into_iter().rev() {
+        devices.remove(index);
     }
 
     let mut cache: HashMap<PathBuf, Library> = HashMap::new();
@@ -951,6 +969,67 @@ protocol_address = { transport = "tcp", host = "10.0.0.1", port = 502, unit_id =
         let cfg = resolve(text, dir.path()).unwrap();
         assert!(cfg.devices[0].points_from.is_empty());
         assert_eq!(cfg.devices[0].points.len(), 1);
+    }
+
+    /// `enabled = false` (§3.3) takes a device out of the configuration before anything else
+    /// about it is read. Mirrors `check_disabled_devices` in impl/c/tests/config.c.
+    #[test]
+    fn a_disabled_device_is_left_out_without_resolving_its_libraries() {
+        let dir = Dir::new("disabled");
+        let text = format!(
+            r#"
+[connector]
+protocol = "modbus"
+point_library_path = ["{}"]
+
+[[device]]
+name             = "plc-1"
+enabled          = true
+protocol_address = {{ transport = "tcp", host = "10.0.0.1", port = 502, unit_id = 1 }}
+
+  [[device.point]]
+  id       = "only"
+  datatype = "uint16"
+  address  = {{ table = "holding", address = 1, count = 1 }}
+
+# Nothing about it is valid beyond its name, and nothing has to be.
+[[device]]
+name        = "plc-2"
+enabled     = false
+type        = ""
+points_from = ["not-installed"]
+"#,
+            dir.path().display()
+        );
+        let cfg = resolve(&text, dir.path()).unwrap();
+        let names: Vec<&str> = cfg.devices.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["plc-1"]);
+        assert!(cfg.devices[0].enabled);
+    }
+
+    #[test]
+    fn enabled_must_be_a_boolean_and_disabled_names_still_count() {
+        let dir = Dir::new("enabled-shape");
+        let device =
+            |name: &str, extra: &str| format!("[[device]]\nname = \"{name}\"\n{extra}\nprotocol_address = {{ unit_id = 1 }}\n");
+        let err = resolve(
+            &format!("[connector]\nprotocol = \"modbus\"\n{}", device("plc-1", "enabled = \"no\"")),
+            dir.path(),
+        )
+        .unwrap_err();
+        assert!(err.contains("enabled must be true or false"), "{err}");
+
+        // Switching the disabled one on would make two devices of one name.
+        let err = resolve(
+            &format!(
+                "[connector]\nprotocol = \"modbus\"\n{}{}",
+                device("plc-1", ""),
+                device("plc-1", "enabled = false")
+            ),
+            dir.path(),
+        )
+        .unwrap_err();
+        assert!(err.contains("defined more than once"), "{err}");
     }
 
     #[test]

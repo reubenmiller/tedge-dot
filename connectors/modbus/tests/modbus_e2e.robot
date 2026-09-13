@@ -49,6 +49,21 @@ Connector Publishes Capability Descriptor
     ${verbs}=    Get Json Field    ${payload}    command_verbs
     List Should Contain Value    ${verbs}    write
 
+A Disabled Device Is Left Out Of The Connector
+    [Documentation]    `enabled = false` (§3.3) takes a device out of the configuration: plc-off is
+    ...                never connected, polled or advertised, and the point library it names — not
+    ...                installed — is not even looked up, so the connector starts all the same.
+    Wait For Message Containing    ${LINK_TOPIC}    "status":"connected"    timeout=${READY_TIMEOUT}
+    No Messages On Topic    te/device/plc-off/#    timeout=5
+    ${write}=    Set Variable    te/device/plc-off/ot/${PROTOCOL}/cmd/write/off-1
+    Publish Message    ${write}    {"status":"init","point":"temp_u16","value":1}    retain=True
+    Sleep    3s
+    ${payloads}=    Get Messages    ${write}
+    ${answers}=    Evaluate
+    ...    [p for p in $payloads if p and json.loads(p).get("status") != "init"]    modules=json
+    Should Be Empty    ${answers}    nothing owns a disabled device, so its commands go unanswered
+    Publish Message    ${write}    ${EMPTY}    retain=True
+
 Capability Descriptor Carries The Point Labels
     [Documentation]    A point's `name`/`description` (§3.1) are static, so they are published
     ...                once in the retained capability descriptor (§7) rather than echoed in
@@ -358,10 +373,11 @@ A Config Edit Is Applied On Reload
     ...                apply what changed in place, without a restart: a point added to the file is
     ...                sampled, and the service health never goes down. reload_e2e.robot covers a
     ...                directory of configs, with files added, removed and broken.
-    # Inserted into plc1's own point list, right after its `points_from`, so it lands on plc1
+    # Inserted into plc1's own point list, right after its `points_from` (matched by plc1's
+    # library, not just the key: the disabled plc-off has a `points_from` too), so it lands on plc1
     # whatever devices the file declares after it.
     DeviceLibrary.Execute Command
-    ...    cmd=sed -i '/^points_from/a [[device.point]]\\nid = "reloaded_u16"\\ndatatype = "uint16"\\naddress = { table = "holding", address = 3, count = 1 }' /etc/connector.toml
+    ...    cmd=sed -i '/^points_from.*"plc-sim"/a [[device.point]]\\nid = "reloaded_u16"\\ndatatype = "uint16"\\naddress = { table = "holding", address = 3, count = 1 }' /etc/connector.toml
     Clear Messages
     DeviceLibrary.Execute Command    cmd=kill -HUP 1
     Wait For Sample    ${SAMPLE_PREFIX}/reloaded_u16    timeout=${SAMPLE_TIMEOUT}

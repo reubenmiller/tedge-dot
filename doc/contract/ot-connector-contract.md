@@ -111,6 +111,7 @@ protocol_address = { } # protocol-specific: how to reach this device. Shape per 
 poll_interval = "2s"            # optional per-device override
 default_mode  = "typed"         # optional; default output mode for this device's points
 points_from   = []              # optional; point libraries to inherit points from, in order (§3.4)
+enabled       = true            # optional; false keeps the definition but leaves the device out (§3.3)
 
   [[device.point]]
   id       = "<point-id>"       # unique within the device; appears in topics
@@ -221,6 +222,13 @@ that they are objects and that each connector documents and schema-validates the
 - A device `type`, where present, MUST be a non-empty string; a connector MUST reject a blank
   one rather than treat it as absent, so the same configuration is accepted by every
   implementation.
+- A device with `enabled = false` is **not loaded**: the connector MUST NOT connect to, poll,
+  describe or answer commands for it, and MUST NOT read anything else about it — its type, its
+  address or its point libraries — so a configuration can carry a ready-made device switched
+  off, even one whose library is not installed. `enabled` MUST be a boolean when present
+  (default `true`), and a disabled device's `name` still counts towards uniqueness. The
+  definition stays in the file, so `set-config` (§6.3, target `device:<name>`) can switch it
+  on again.
 - Duration strings follow the thin-edge convention (`"500ms"`, `"2s"`, `"5m"`).
 - Unknown top-level keys SHOULD be rejected; unknown keys inside protocol-specific objects
   are delegated to the connector's own schema.
