@@ -543,7 +543,8 @@ fn duplicate_devices(configs: &[PathBuf]) -> Vec<((String, String), Vec<String>)
             continue;
         };
         let path = path.display().to_string();
-        for device in &config.devices {
+        // Parsed without the loader, so disabled devices are still here: they own nothing.
+        for device in config.devices.iter().filter(|d| d.enabled) {
             let paths = owners
                 .entry((config.connector.protocol.clone(), device.name.clone()))
                 .or_default();
@@ -1101,8 +1102,15 @@ mod tests {
         let a = write(&dir, "a.toml", &config("modbus", "a", &["plc-1", "plc-2"]));
         let b = write(&dir, "b.toml", &config("modbus", "b", &["plc-2"]));
         let c = write(&dir, "c.toml", &config("opcua", "c", &["plc-1"]));
+        // A disabled definition (§3.3) owns nothing, so it duplicates nothing.
+        let d = write(
+            &dir,
+            "d.toml",
+            "[connector]\nprotocol = \"modbus\"\nservice_name = \"d\"\n\
+             [[device]]\nname = \"plc-1\"\nprotocol_address = {}\nenabled = false\n",
+        );
 
-        let duplicates = duplicate_devices(&[a.clone(), b.clone(), c]);
+        let duplicates = duplicate_devices(&[a.clone(), b.clone(), c, d]);
         assert_eq!(
             duplicates,
             vec![(

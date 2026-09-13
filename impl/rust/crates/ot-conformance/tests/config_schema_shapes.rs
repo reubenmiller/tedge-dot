@@ -59,6 +59,27 @@ fn a_complete_self_contained_point_is_accepted() {
     .expect("the pre-existing shape must keep validating");
 }
 
+/// A disabled device is not loaded (§3.3), so the loaders accept one carrying nothing but its
+/// name — and the schema must not demand more than they do. Every other device still needs its
+/// address, and `enabled` must be a boolean.
+#[test]
+fn a_disabled_device_needs_only_its_name() {
+    let config = |device: serde_json::Value| {
+        serde_json::json!({ "connector": { "protocol": "modbus" }, "device": [device] })
+    };
+    accepts(config(serde_json::json!({
+        "name": "plc-9", "enabled": false, "point": [{ "id": "patch_only" }],
+    })))
+    .expect("nothing but the name of a disabled device is read");
+
+    let err = accepts(config(serde_json::json!({ "name": "plc-9", "enabled": true })))
+        .expect_err("an enabled device still needs its address");
+    assert!(err.contains("protocol_address"), "{err}");
+
+    accepts(device(serde_json::json!({ "enabled": "no" })))
+        .expect_err("enabled must be a boolean");
+}
+
 #[test]
 fn points_from_must_be_an_array_of_non_empty_strings() {
     accepts(device(serde_json::json!({ "points_from": "acme-meter" })))

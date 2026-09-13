@@ -38,6 +38,8 @@ databits = 8
 # [[device]]
 # name             = "plc-1"
 # protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id = 1 }
+# enabled          = false   # optional: keeps the definition but leaves the device out
+#                            # (not connected or polled); default true
 #
 #   [[device.point]]
 #   id       = "boiler_temp"

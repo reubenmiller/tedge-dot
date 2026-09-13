@@ -1190,7 +1190,54 @@ static void check_watchdog_period(void) {
           tdot_runtime_watchdog_period(loose, 1));
 }
 
+/* `enabled = false` (contract §3.3) takes a device out of the configuration
+ * before anything else about it is read, but its name still counts. Mirrors
+ * library.rs::a_disabled_device_is_left_out_without_resolving_its_libraries and
+ * enabled_must_be_a_boolean_and_disabled_names_still_count. */
+static void check_disabled_devices(void) {
+    scratch_t s;
+    scratch_init(&s);
+    char body[2048];
+    snprintf(body, sizeof body,
+             "[connector]\nprotocol = \"modbus\"\npoint_library_path = [\"%s\"]\n"
+             "\n[[device]]\nname = \"plc-1\"\nenabled = true\n"
+             "protocol_address = { transport = \"tcp\", host = \"10.0.0.1\", port = 502, "
+             "unit_id = 1 }\n"
+             "\n  [[device.point]]\n  id = \"only\"\n  datatype = \"uint16\"\n"
+             "  address = { table = \"holding\", address = 1, count = 1 }\n"
+             /* Nothing about it is valid beyond its name, and nothing has to be. */
+             "\n[[device]]\nname = \"plc-2\"\nenabled = false\ntype = \"\"\n"
+             "points_from = [\"not-installed\"]\n",
+             s.dir);
+    write_file(&s, "etc/modbus.toml", body);
+    char err[256] = "";
+    tdot_config_t *cfg = tdot_config_load(scratch_path(&s, "etc/modbus.toml"), err, sizeof err);
+    CHECK(cfg != NULL, "a config with a disabled device must load: %s", err);
+    if (cfg) {
+        CHECK(cfg->ndevices == 1 && strcmp(cfg->devices[0].name, "plc-1") == 0,
+              "only the enabled device is loaded (got %zu device(s))", cfg->ndevices);
+        CHECK(tdot_config_device(cfg, "plc-2") == NULL, "the disabled device is not loaded");
+        tdot_config_free(cfg);
+    }
+
+    const char *not_bool =
+        "[connector]\nprotocol = \"modbus\"\n"
+        "\n[[device]]\nname = \"plc-1\"\nenabled = \"no\"\n"
+        "protocol_address = { unit_id = 1 }\n";
+    check_body_rejected("enabled as a string", &s, not_bool, "enabled must be true or false");
+
+    const char *duplicate =
+        "[connector]\nprotocol = \"modbus\"\n"
+        "\n[[device]]\nname = \"plc-1\"\n"
+        "protocol_address = { unit_id = 1 }\n"
+        "\n[[device]]\nname = \"plc-1\"\nenabled = false\n";
+    check_body_rejected("a disabled device named like an enabled one", &s, duplicate,
+                        "defined more than once");
+    scratch_free(&s);
+}
+
 int main(void) {
+    check_disabled_devices();
     check_timeout_defaults();
     check_service_name_default();
     check_timeouts_are_parsed();

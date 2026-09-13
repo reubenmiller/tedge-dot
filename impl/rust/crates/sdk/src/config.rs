@@ -97,6 +97,16 @@ pub struct DeviceConfig {
     pub points_from: Vec<String>,
     #[serde(rename = "point", default)]
     pub points: Vec<PointConfig>,
+    /// `false` takes the device out of the configuration (§3.3). The loader
+    /// ([`crate::library::load`]) drops a disabled device before reading anything else about it,
+    /// so every device a connector is given is enabled; the field only matters to code that
+    /// parses a configuration without the loader.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]

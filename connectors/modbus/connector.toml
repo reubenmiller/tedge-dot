@@ -65,3 +65,12 @@ points_from      = ["plc-sim", "./points.d/modbus/plc-sim-extra.toml"]
   datatype = "bool"
   access   = "read_write"
   address  = { table = "coil", address = 48, count = 1 }
+
+# Switched off (§3.3): a disabled device is not loaded at all — never connected, polled or
+# advertised — and nothing else about it is read, so the point library it names need not be
+# installed. This one does not exist: remove `enabled = false` and the config no longer loads.
+[[device]]
+name             = "plc-off"
+protocol_address = { transport = "tcp", host = "simulator", port = 502, unit_id = 1 }
+points_from      = ["not-installed-pack"]
+enabled          = false

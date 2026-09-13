@@ -904,27 +904,52 @@ tdot_config_t *tdot_config_load(const char *path, char *err, size_t errlen) {
     search_path_free(&probe);
 
     toml_array_t *devices = toml_array_in(root, "device");
-    cfg->ndevices = devices ? (size_t)toml_array_nelem(devices) : 0;
-    cfg->devices = calloc(cfg->ndevices ? cfg->ndevices : 1,
-                          sizeof(tdot_device_t));
-    for (size_t i = 0; i < cfg->ndevices; i++) {
+    size_t ndeclared = devices ? (size_t)toml_array_nelem(devices) : 0;
+    cfg->ndevices = 0; /* counts the enabled devices as they are loaded */
+    cfg->devices = calloc(ndeclared ? ndeclared : 1, sizeof(tdot_device_t));
+    for (size_t i = 0; i < ndeclared; i++) {
         toml_table_t *dt = toml_table_at(devices, (int)i);
-        tdot_device_t *dev = &cfg->devices[i];
         d = toml_string_in(dt, "name");
         if (!d.ok) {
             snprintf(err, errlen, "%s: device #%zu missing name", path, i + 1);
             goto fail;
         }
-        dev->name = d.u.s;
         /* §3.3: unique within a connector. Two same-named devices publish over
          * each other on one entity's topics, and they make "was this reference
-         * already here" ambiguous for the management guard's before-lookup. */
-        for (size_t k = 0; k < i; k++)
-            if (cfg->devices[k].name && strcmp(cfg->devices[k].name, dev->name) == 0) {
+         * already here" ambiguous for the management guard's before-lookup.
+         * Checked against every declared device, disabled ones included:
+         * switching one on must not produce a duplicate. */
+        for (size_t k = 0; k < i; k++) {
+            toml_datum_t other = toml_string_in(toml_table_at(devices, (int)k), "name");
+            bool same = other.ok && strcmp(other.u.s, d.u.s) == 0;
+            if (other.ok)
+                free(other.u.s);
+            if (same) {
                 snprintf(err, errlen, "%s: device '%s' is defined more than once", path,
-                         dev->name);
+                         d.u.s);
+                free(d.u.s);
                 goto fail;
             }
+        }
+        /* `enabled = false` (§3.3) takes the device out of the configuration
+         * before anything else about it is read -- its type, its address, its
+         * point libraries -- so a config can carry a ready-made device switched
+         * off, even one naming a library that is not installed yet. */
+        if (key_present(dt, "enabled")) {
+            toml_datum_t enabled = toml_bool_in(dt, "enabled");
+            if (!enabled.ok) {
+                snprintf(err, errlen, "%s: device %s: enabled must be true or false",
+                         path, d.u.s);
+                free(d.u.s);
+                goto fail;
+            }
+            if (!enabled.u.b) {
+                free(d.u.s);
+                continue;
+            }
+        }
+        tdot_device_t *dev = &cfg->devices[cfg->ndevices++];
+        dev->name = d.u.s;
         /* The device type (§3.1). Parsed before the libraries are resolved, so a
          * device's own declaration wins over the one its library names. A
          * present-but-unusable value is an error rather than an absent type:

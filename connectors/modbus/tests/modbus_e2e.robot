@@ -49,6 +49,21 @@ Connector Publishes Capability Descriptor
     ${verbs}=    Get Json Field    ${payload}    command_verbs
     List Should Contain Value    ${verbs}    write
 
+A Disabled Device Is Left Out Of The Connector
+    [Documentation]    `enabled = false` (§3.3) takes a device out of the configuration: plc-off is
+    ...                never connected, polled or advertised, and the point library it names — not
+    ...                installed — is not even looked up, so the connector starts all the same.
+    Wait For Message Containing    ${LINK_TOPIC}    "status":"connected"    timeout=${READY_TIMEOUT}
+    No Messages On Topic    te/device/plc-off/#    timeout=5
+    ${write}=    Set Variable    te/device/plc-off/ot/${PROTOCOL}/cmd/write/off-1
+    Publish Message    ${write}    {"status":"init","point":"temp_u16","value":1}    retain=True
+    Sleep    3s
+    ${payloads}=    Get Messages    ${write}
+    ${answers}=    Evaluate
+    ...    [p for p in $payloads if p and json.loads(p).get("status") != "init"]    modules=json
+    Should Be Empty    ${answers}    nothing owns a disabled device, so its commands go unanswered
+    Publish Message    ${write}    ${EMPTY}    retain=True
+
 Capability Descriptor Carries The Point Labels
     [Documentation]    A point's `name`/`description` (§3.1) are static, so they are published
     ...                once in the retained capability descriptor (§7) rather than echoed in
