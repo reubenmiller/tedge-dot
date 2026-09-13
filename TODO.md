@@ -2,6 +2,14 @@
 
 ## In flight / next
 
+* [ ] Contract 0.2 (`doc/rfc/0006-contract-0.2.md`, decisions recorded 2026-09-13) lands on the
+      `develop` branch in the RFC's order: §3 manifest → §2 slim envelope → §4 writes in
+      engineering units → §5 typed metadata + `range` + runtime `publish` → §1 `mode` →
+      `datatype` → §7 thin-edge commands → §8 `manifest --format`. §6 was withdrawn.
+* [ ] Port `impl/c/` to contract 0.2 in one pass once it is ratified and shipped in Rust
+      (RFC 0006 §9, option A), then re-enable the `c`, `e2e-c` and `packaging-parity` CI jobs
+      and resume `just c-describe-parity` (→ `c-manifest-parity`).
+
 * [ ] Ship profibus in the `tedge-dot-rs` package: the `profibus` cargo feature is excluded
       from the goreleaser builds because its serial dependency (`serialport` via `profirust`)
       has a native libudev build script that does not cross-compile with cargo-zigbuild.

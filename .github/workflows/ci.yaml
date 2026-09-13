@@ -49,6 +49,10 @@ jobs:
   packaging-parity:
     name: Packaging manifest parity
     runs-on: ubuntu-latest
+    # Frozen with the C build (RFC 0006 §9): the tedge-dot-c manifest stays at 0.1 while the
+    # Rust package follows the 0.2 flows and configs, so the two are not expected to match
+    # until the C port lands. Re-enable together with the `c` job.
+    if: false
     steps:
       - uses: actions/checkout@v4
       - uses: extractions/setup-just@v2
@@ -85,6 +89,11 @@ jobs:
   c:
     name: C build & conformance (${{ matrix.protocol }})
     runs-on: ubuntu-latest
+    # Contract 0.2 transition (RFC 0006 §9, option A): the C implementation is frozen at
+    # contract 0.1, whole, until 0.2 is ratified and shipped in Rust. The shared suites move to
+    # 0.2 with the Rust build, so this job would only report the freeze as a failure. It is
+    # gated rather than deleted: flip the condition back when the C port lands.
+    if: false
     strategy:
       fail-fast: false
       matrix:
@@ -195,6 +204,11 @@ jobs:
   e2e-c:
     name: e2e, C connector (${{ matrix.protocol }})
     runs-on: ubuntu-latest
+    # Contract 0.2 transition (RFC 0006 §9, option A): the C implementation is frozen at
+    # contract 0.1, whole, until 0.2 is ratified and shipped in Rust. The shared suites move to
+    # 0.2 with the Rust build, so this job would only report the freeze as a failure. It is
+    # gated rather than deleted: flip the condition back when the C port lands.
+    if: false
     strategy:
       fail-fast: false
       # Capped so fewer stacks pull the broker image at the same moment. The pre-pull in the
