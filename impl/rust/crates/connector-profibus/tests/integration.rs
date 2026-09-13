@@ -13,7 +13,7 @@
 
 use connector_profibus::ProfibusConnector;
 use tedge_dot_sdk::{
-    Access, Connector, ConnectorConfig, DataType, Endianness, Mode, PointRef, Quality, Transform,
+    Access, Connector, ConnectorConfig, DataType, Endianness, PointRef, Quality, Transform,
     WordOrder,
 };
 
@@ -87,8 +87,7 @@ fn make_connector() -> ProfibusConnector {
 fn point_ref(id: &str, dt: DataType) -> PointRef {
     PointRef {
         id: id.to_string(),
-        mode: Mode::Typed,
-        datatype: Some(dt),
+        datatype: dt,
         endianness: Endianness::Big,
         word_order: WordOrder::Big,
         access: Access::Read,
@@ -120,8 +119,10 @@ protocol_address = { station_address = 200, input_bytes = 2, output_bytes = 0 }
     assert!(c.configure(&config).is_err());
 }
 
+/// §1 — `datatype` is required on every point: in 0.1 a point could omit it by being in raw
+/// mode, and now `bytes` says that.
 #[test]
-fn configure_rejects_typed_point_without_datatype() {
+fn a_point_without_a_datatype_is_refused() {
     let toml = cfg_toml(
         r#"
 [[device]]
@@ -134,10 +135,8 @@ protocol_address = { station_address = 5, input_bytes = 4, output_bytes = 0 }
   address = { direction = "input", byte_offset = 0 }
 "#,
     );
-    let config: ConnectorConfig = toml::from_str(&toml).unwrap();
-    let mut c = ProfibusConnector::default();
-    // default mode is typed; no datatype and no bit_offset → error
-    assert!(c.configure(&config).is_err());
+    let err = toml::from_str::<ConnectorConfig>(&toml).unwrap_err();
+    assert!(err.to_string().contains("datatype"), "{err}");
 }
 
 #[test]
@@ -211,8 +210,7 @@ async fn read_returns_bad_for_output_point() {
     let mut c = make_connector();
     let refs = vec![PointRef {
         id: "do_byte0".to_string(),
-        mode: Mode::Typed,
-        datatype: Some(DataType::Uint8),
+        datatype: DataType::Uint8,
         endianness: Endianness::Big,
         word_order: WordOrder::Big,
         access: Access::Write,

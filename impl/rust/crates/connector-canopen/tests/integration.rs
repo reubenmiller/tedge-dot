@@ -139,8 +139,10 @@ protocol_address = { node_id = 1 }
     assert!(c.configure(&cfg).is_err());
 }
 
+/// §1 — `datatype` is required on every point. In 0.1 a point could omit it by being in raw
+/// mode; now `bytes` says that, and a point with neither is refused by the loader itself.
 #[test]
-fn configure_rejects_typed_point_without_datatype() {
+fn a_point_without_a_datatype_is_refused() {
     let toml = r#"
 [connector]
 protocol = "canopen"
@@ -151,20 +153,20 @@ interface = "vcan0"
 [[device]]
 name = "plc1"
 protocol_address = { node_id = 1 }
-default_mode = "typed"
 
   [[device.point]]
   id = "mystery"
   access = "read"
   address = { index = 0x2000, subindex = 0 }
 "#;
-    let cfg: ConnectorConfig = toml::from_str(toml).unwrap();
-    let mut c = make_connector();
-    assert!(c.configure(&cfg).is_err());
+    let err = toml::from_str::<ConnectorConfig>(toml).unwrap_err();
+    assert!(err.to_string().contains("datatype"), "{err}");
 }
 
+/// ...and `bytes` is how a point says "just give me what was read" — the SDO payload here,
+/// which is exactly what raw mode delivered.
 #[test]
-fn configure_accepts_raw_point_without_datatype() {
+fn configure_accepts_a_bytes_point() {
     let toml = r#"
 [connector]
 protocol = "canopen"
@@ -175,10 +177,10 @@ interface = "vcan0"
 [[device]]
 name = "plc1"
 protocol_address = { node_id = 1 }
-default_mode = "raw"
 
   [[device.point]]
   id = "raw_obj"
+  datatype = "bytes"
   access = "read"
   address = { index = 0x2000, subindex = 0 }
 "#;

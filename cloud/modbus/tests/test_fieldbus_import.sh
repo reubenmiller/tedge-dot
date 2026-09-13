@@ -69,7 +69,7 @@ rm -f stderr.tmp
 assert "device name from the operation payload" '.name == "fieldbus1"'
 assert "tcp protocol_address from protocol/ipAddress/address" \
   '.protocol_address == {transport: "tcp", host: "simulator", port: 502, unit_id: 1}'
-assert "default_mode is typed" '.default_mode == "typed"'
+assert "no default_mode (§1: mode is gone)" '.default_mode == null'
 assert "unsupported register skipped, everything else kept (3 regs + 2 coils)" \
   '.point | length == 5'
 assert "no point emitted for the unsupported layout" \

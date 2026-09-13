@@ -9,7 +9,7 @@
     "device",
     "protocol",
     "point",
-    "mode",
+    "datatype",
     "quality"
   ],
   "additionalProperties": false,
@@ -32,12 +32,6 @@
       "type": "string",
       "minLength": 1
     },
-    "mode": {
-      "enum": [
-        "raw",
-        "typed"
-      ]
-    },
     "datatype": {
       "enum": [
         "bool",
@@ -54,7 +48,7 @@
         "string",
         "bytes"
       ],
-      "description": "The point's datatype. With the JSON type of 'value' it carries everything the removed 'value_repr' said, and it tells a consumer that a string-typed 'value' is an int64 outside the JSON safe range (§4.1)."
+      "description": "The point's datatype (§4) — always present, because it is the only type system: 'bytes' is the raw case, whose value is the hex of what was read. With the JSON type of 'value' it carries everything the removed 'value_repr' said, and it tells a consumer that a string-typed 'value' is an int64 outside the JSON safe range (§4.1)."
     },
     "value": {
       "type": [
@@ -62,7 +56,7 @@
         "boolean",
         "string"
       ],
-      "description": "Decoded value in typed mode. Absent in raw mode and when quality=bad."
+      "description": "The point's value: the decoded primitive, or — for datatype 'bytes' — the hex of what was read. Absent when quality=bad."
     },
     "quality": {
       "enum": [
@@ -92,25 +86,8 @@
     {
       "if": {
         "properties": {
-          "mode": {
-            "const": "typed"
-          }
-        }
-      },
-      "then": {
-        "required": [
-          "datatype"
-        ]
-      }
-    },
-    {
-      "if": {
-        "properties": {
           "quality": {
             "const": "good"
-          },
-          "mode": {
-            "const": "typed"
           }
         }
       },
@@ -141,7 +118,6 @@
       "device": "plc-1",
       "protocol": "modbus",
       "point": "boiler_temp",
-      "mode": "typed",
       "datatype": "float32",
       "value": 42.5,
       "quality": "good",
@@ -152,16 +128,16 @@
       "device": "plc-1",
       "protocol": "modbus",
       "point": "run_command",
-      "mode": "raw",
       "quality": "good",
-      "seq": 12408
+      "seq": 12408,
+      "datatype": "bytes",
+      "value": "0001"
     },
     {
       "ts": "2026-05-30T10:00:02.000Z",
       "device": "plc-1",
       "protocol": "modbus",
       "point": "boiler_temp",
-      "mode": "typed",
       "datatype": "float32",
       "quality": "bad",
       "error": "modbus exception: gateway target device failed to respond"
@@ -171,7 +147,6 @@
       "device": "plc-1",
       "protocol": "modbus",
       "point": "boiler_temp",
-      "mode": "typed",
       "datatype": "float32",
       "value": 42.5,
       "quality": "good",

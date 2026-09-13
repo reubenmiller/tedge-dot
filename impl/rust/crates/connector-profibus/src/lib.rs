@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex};
 use tedge_dot_sdk::{
     decode_primitive, encode_primitive, extract_bitfield, Access, Capabilities, CommandRequest,
     CommandResult, ConfigError, Connector, ConnectorConfig, ConnectorError, DataType, DeviceId,
-    Endianness, LinkReport, LinkStatus, Mode, PointRef, Quality, Sample, Transform, Value,
+    Endianness, LinkReport, LinkStatus, PointRef, Quality, Sample, Transform, Value,
     WordOrder,
 };
 use time::OffsetDateTime;
@@ -49,8 +49,7 @@ const PROTOCOL: &str = "profibus";
 #[derive(Clone)]
 struct ProfibusPoint {
     address: PointAddress,
-    mode: Mode,
-    datatype: Option<DataType>,
+    datatype: DataType,
     endianness: Endianness,
     word_order: WordOrder,
     access: Access,
@@ -150,13 +149,8 @@ impl Connector for ProfibusConnector {
                         ConfigError::Invalid(format!("point '{}' address: {e}", p.id))
                     })?;
 
-                let mode = p.resolved_mode(d.default_mode);
-                if mode == Mode::Typed && p.datatype.is_none() && point_addr.bit_offset.is_none() {
-                    return Err(ConfigError::Invalid(format!(
-                        "point '{}' is typed but has no datatype",
-                        p.id
-                    )));
-                }
+                // `bytes` is the slice at `byte_offset` — to the end of the image when no
+                // length is given, which is what raw mode delivered in 0.1.
                 let access = Access::parse(p.access.as_deref());
                 if access.can_write() && point_addr.is_input() {
                     return Err(ConfigError::Invalid(format!(
@@ -168,7 +162,6 @@ impl Connector for ProfibusConnector {
                     p.id.clone(),
                     ProfibusPoint {
                         address: point_addr,
-                        mode,
                         datatype: p.datatype,
                         endianness: Endianness::parse(p.endianness.as_deref()),
                         word_order: WordOrder::parse(p.word_order.as_deref()),
@@ -188,7 +181,6 @@ impl Connector for ProfibusConnector {
         Capabilities {
             protocol: PROTOCOL,
             version: env!("CARGO_PKG_VERSION"),
-            modes: vec![Mode::Raw, Mode::Typed],
             datatypes: vec![
                 DataType::Bool,
                 DataType::Int8,
@@ -198,6 +190,8 @@ impl Connector for ProfibusConnector {
                 DataType::Int32,
                 DataType::Uint32,
                 DataType::Float32,
+                // `bytes` is the raw case (§1): what raw mode delivered in 0.1.
+                DataType::Bytes,
             ],
             point_kinds: vec!["input".into(), "output".into()],
             command_verbs: vec!["write".into()],
@@ -975,9 +969,9 @@ fn decode_point(id: &str, model: &ProfibusPoint, buffer: &[u8]) -> Sample {
             return bad_sample(id, "byte_offset out of range for input buffer", Some(addr), None);
         }
         let raw = vec![buffer[start]];
-        return match model.mode {
-            Mode::Raw => good_sample(id, model, raw, None),
-            Mode::Typed => {
+        return match model.datatype {
+            DataType::Bytes => good_sample(id, model, raw, None),
+            _ => {
                 let n = extract_bitfield(&raw, model.endianness, model.word_order, bit_off, bit_cnt);
                 let value = if bit_cnt == 1 {
                     Value::Bool(n != 0)
@@ -990,20 +984,15 @@ fn decode_point(id: &str, model: &ProfibusPoint, buffer: &[u8]) -> Sample {
     }
 
     // Byte-level extraction.
-    let dt = match model.datatype {
-        Some(d) => d,
-        None if model.mode == Mode::Raw => {
-            // raw mode with no datatype — emit the whole remaining buffer slice
+    let dt = model.datatype;
+    let byte_len = match dt.byte_len() {
+        Some(n) => n,
+        // `bytes` has no fixed width: emit the whole remaining slice of the image, which is
+        // what raw mode did.
+        None if dt == DataType::Bytes => {
             let raw = buffer[start..].to_vec();
             return good_sample(id, model, raw, None);
         }
-        None => {
-            return bad_sample(id, "typed point has no datatype", Some(addr), None);
-        }
-    };
-
-    let byte_len = match dt.byte_len() {
-        Some(n) => n,
         None => {
             return bad_sample(id, "unsupported variable-length datatype", Some(addr), None);
         }
@@ -1023,19 +1012,9 @@ fn decode_point(id: &str, model: &ProfibusPoint, buffer: &[u8]) -> Sample {
     }
 
     let bytes = buffer[start..end].to_vec();
-    match model.mode {
-        Mode::Raw => good_sample(id, model, bytes, None),
-        Mode::Typed => {
-            match decode_primitive(&bytes, dt, model.endianness, model.word_order) {
-                Ok(value) => good_sample(id, model, bytes, Some(value)),
-                Err(e) => bad_sample(
-                    id,
-                    &format!("decode error: {e}"),
-                    Some(addr),
-                    None,
-                ),
-            }
-        }
+    match decode_primitive(&bytes, dt, model.endianness, model.word_order) {
+        Ok(value) => good_sample(id, model, bytes, Some(value)),
+        Err(e) => bad_sample(id, &format!("decode error: {e}"), Some(addr), None),
     }
 }
 
@@ -1047,8 +1026,15 @@ fn encode_point(
     let addr = &model.address;
     let start = addr.byte_offset;
 
-    if let Some(raw_hex) = &request.raw {
-        let bytes = parse_hex(raw_hex)?;
+    // A `bytes` write carries the hex string in `value` (§1): the separate `raw` request
+    // field is gone with raw mode.
+    if model.datatype == DataType::Bytes {
+        let hex = request
+            .value
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "a bytes write needs a hex string in 'value'".to_string())?;
+        let bytes = parse_hex(hex)?;
         write_bytes_into(buffer, start, &bytes);
         return Ok(());
     }
@@ -1076,9 +1062,7 @@ fn encode_point(
     }
 
     // Byte-level write.
-    let dt = model
-        .datatype
-        .ok_or_else(|| "typed write requires a datatype".to_string())?;
+    let dt = model.datatype;
     let bytes = encode_primitive(&value, dt, model.endianness, model.word_order)
         .map_err(|e| e.to_string())?;
     write_bytes_into(buffer, start, &bytes);
@@ -1101,13 +1085,12 @@ fn good_sample(id: &str, model: &ProfibusPoint, raw: Vec<u8>, value: Option<Valu
         device: String::new(),
         protocol: PROTOCOL,
         point: id.to_string(),
-        mode: model.mode,
-        datatype: if model.mode == Mode::Typed {
-            model.datatype.or(Some(DataType::Bool))
-        } else {
-            None
+        datatype: model.datatype,
+        // A `bytes` point's value IS the hex of the slice read (§1).
+        value: match model.datatype {
+            DataType::Bytes => Some(Value::Text(tedge_dot_sdk::model::hex_grouped(&raw, 2))),
+            _ => value.map(|v| model.transform.apply(v)),
         },
-        value: value.map(|v| model.transform.apply(v)),
         raw,
         raw_group: 2,
         quality: Quality::Good,
@@ -1124,8 +1107,8 @@ fn bad_sample(id: &str, error: &str, addr: Option<&PointAddress>, unit: Option<S
         device: String::new(),
         protocol: PROTOCOL,
         point: id.to_string(),
-        mode: Mode::Typed,
-        datatype: None,
+        // Nothing decoded, so nothing to say beyond "these bytes".
+        datatype: DataType::Bytes,
         value: None,
         raw: Vec::new(),
         raw_group: 2,
@@ -1200,8 +1183,7 @@ pub mod __test_helpers {
                 bit_offset,
                 bit_count,
             },
-            mode: Mode::Typed,
-            datatype: Some(datatype),
+            datatype,
             endianness: Endianness::Big,
             word_order: WordOrder::Big,
             access: Access::Read,
@@ -1227,8 +1209,7 @@ pub mod __test_helpers {
                 bit_offset,
                 bit_count,
             },
-            mode: Mode::Typed,
-            datatype: Some(datatype),
+            datatype,
             endianness: Endianness::Big,
             word_order: WordOrder::Big,
             access: Access::Write,
@@ -1253,19 +1234,19 @@ pub mod __test_helpers {
                 bit_offset: None,
                 bit_count: None,
             },
-            mode: Mode::Raw,
-            datatype: None,
+            datatype: DataType::Bytes,
             endianness: Endianness::Big,
             word_order: WordOrder::Big,
             access: Access::Write,
             unit: None,
             transform: Transform::default(),
         };
+        // A `bytes` write carries the hex in `value` (§1), not in a separate `raw` field.
         let request = CommandRequest {
             point: "test".to_string(),
-            value: None,
+            value: Some(serde_json::Value::String(hex.to_string())),
             value_repr: None,
-            raw: Some(hex.to_string()),
+            raw: None,
         };
         encode_point(&model, buffer, &request).expect("encode failed");
     }

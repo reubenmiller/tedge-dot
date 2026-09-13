@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tedge_dot_sdk::{
     Access, Capabilities, CommandRequest, CommandResult, ConfigError, Connector, ConnectorConfig,
-    ConnectorError, DataType, DeviceId, LinkReport, LinkStatus, Mode, PointRef, Quality, Sample,
+    ConnectorError, DataType, DeviceId, LinkReport, LinkStatus, PointRef, Quality, Sample,
     SampleSink, Transform, Value,
 };
 use time::OffsetDateTime;
@@ -51,8 +51,7 @@ const MAX_SAFE_INT: i64 = 9_007_199_254_740_991;
 #[derive(Clone)]
 struct CanPoint {
     signal: ResolvedSignal,
-    mode: Mode,
-    datatype: Option<DataType>,
+    datatype: DataType,
     access: Access,
     unit: Option<String>,
     transform: Transform,
@@ -109,19 +108,12 @@ impl Connector for CanbusConnector {
                     config::resolve_signal(&dbc, &addr.message_name, &addr.signal_name)
                         .map_err(|e| ConfigError::Invalid(format!("point '{}': {e}", p.id)))?;
 
-                let mode = p.resolved_mode(d.default_mode);
-                if mode == Mode::Typed && p.datatype.is_none() {
-                    return Err(ConfigError::Invalid(format!(
-                        "point '{}' is typed but has no datatype",
-                        p.id
-                    )));
-                }
-
+                // `bytes` is the whole payload of the signal's frame — what raw mode
+                // published in 0.1.
                 points.insert(
                     p.id.clone(),
                     CanPoint {
                         signal,
-                        mode,
                         datatype: p.datatype,
                         access: Access::parse(p.access.as_deref()),
                         unit: p.unit.clone(),
@@ -144,7 +136,6 @@ impl Connector for CanbusConnector {
         Capabilities {
             protocol: PROTOCOL,
             version: env!("CARGO_PKG_VERSION"),
-            modes: vec![Mode::Raw, Mode::Typed],
             datatypes: vec![
                 DataType::Bool,
                 DataType::Int8,
@@ -157,6 +148,8 @@ impl Connector for CanbusConnector {
                 DataType::Uint64,
                 DataType::Float32,
                 DataType::Float64,
+                // `bytes` is the raw case (§1): what raw mode delivered in 0.1.
+                DataType::Bytes,
             ],
             point_kinds: vec!["signal".into()],
             command_verbs: vec!["write".into()],
@@ -470,15 +463,15 @@ impl CanbusConnector {
 
 fn build_sample(device: &DeviceId, point_id: &str, pt: &CanPoint, payload: &[u8], ts: OffsetDateTime) -> Sample {
     let addr = serde_json::json!({ "can_id": format!("0x{:X}", pt.signal.can_id) });
-    match pt.mode {
-        Mode::Raw => Sample {
+    match pt.datatype {
+        // `bytes`: the value IS the hex of the frame payload (§1).
+        DataType::Bytes => Sample {
             ts,
             device: device.clone(),
             protocol: PROTOCOL,
             point: point_id.to_string(),
-            mode: Mode::Raw,
-            datatype: None,
-            value: None,
+            datatype: DataType::Bytes,
+            value: Some(Value::Text(tedge_dot_sdk::model::hex_grouped(payload, 1))),
             raw: payload.to_vec(),
             raw_group: 1,
             quality: Quality::Good,
@@ -487,11 +480,7 @@ fn build_sample(device: &DeviceId, point_id: &str, pt: &CanPoint, payload: &[u8]
             seq: None,
             error: None,
         },
-        Mode::Typed => {
-            let dt = match pt.datatype {
-                Some(d) => d,
-                None => return make_bad_sample(device, point_id, "typed point missing datatype", ts),
-            };
+        dt => {
             let extracted = extract_can_signal(payload, &pt.signal);
             let value = match decode_signal(extracted, dt, &pt.signal) {
                 Ok(v) => v,
@@ -503,8 +492,7 @@ fn build_sample(device: &DeviceId, point_id: &str, pt: &CanPoint, payload: &[u8]
                 device: device.clone(),
                 protocol: PROTOCOL,
                 point: point_id.to_string(),
-                mode: Mode::Typed,
-                datatype: Some(dt),
+                datatype: dt,
                 value: Some(value),
                 raw: payload.to_vec(),
                 raw_group: 1,
@@ -524,8 +512,9 @@ fn make_bad_sample(device: &DeviceId, point_id: &str, error: &str, ts: OffsetDat
         device: device.clone(),
         protocol: PROTOCOL,
         point: point_id.to_string(),
-        mode: Mode::Typed,
-        datatype: None,
+        // Nothing decoded, so nothing to say beyond "these bytes" — the datatype whose
+        // envelope is complete without a value.
+        datatype: DataType::Bytes,
         value: None,
         raw: vec![],
         raw_group: 1,

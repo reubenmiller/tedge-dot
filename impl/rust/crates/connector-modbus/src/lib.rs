@@ -15,7 +15,7 @@ use std::time::Duration;
 use tedge_dot_sdk::{
     decode_primitive, encode_primitive, extract_bitfield, Access, Capabilities, CommandRequest,
     CommandResult, ConfigError, Connector, ConnectorConfig, ConnectorError, DataType, DeviceId,
-    Endianness, LinkReport, LinkStatus, Mode, PointRef, Quality, Sample, Transform, Value,
+    Endianness, LinkReport, LinkStatus, PointRef, Quality, Sample, Transform, Value,
     WordOrder,
 };
 use time::OffsetDateTime;
@@ -30,8 +30,7 @@ const PROTOCOL: &str = "modbus";
 #[derive(Clone)]
 struct ModbusPoint {
     address: ModbusAddress,
-    mode: Mode,
-    datatype: Option<DataType>,
+    datatype: DataType,
     endianness: Endianness,
     word_order: WordOrder,
     access: Access,
@@ -95,13 +94,9 @@ impl Connector for ModbusConnector {
                     .map_err(|e| {
                         ConfigError::Invalid(format!("point '{}' address: {e}", p.id))
                     })?;
-                let mode = p.resolved_mode(d.default_mode);
-                if mode == Mode::Typed && p.datatype.is_none() && !addr.table.is_bit() {
-                    return Err(ConfigError::Invalid(format!(
-                        "point '{}' is typed but has no datatype",
-                        p.id
-                    )));
-                }
+                // `bytes` on a register point is the registers read, on a coil point the
+                // coils: both are exactly what raw mode delivered in 0.1, so nothing is
+                // refused here that used to work.
                 if matches!(p.access.as_deref(), Some("write") | Some("read_write"))
                     && !addr.table.is_writable()
                 {
@@ -114,7 +109,6 @@ impl Connector for ModbusConnector {
                     p.id.clone(),
                     ModbusPoint {
                         address: addr,
-                        mode,
                         datatype: p.datatype,
                         endianness: Endianness::parse(p.endianness.as_deref()),
                         word_order: WordOrder::parse(p.word_order.as_deref()),
@@ -134,7 +128,6 @@ impl Connector for ModbusConnector {
         Capabilities {
             protocol: PROTOCOL,
             version: env!("CARGO_PKG_VERSION"),
-            modes: vec![Mode::Raw, Mode::Typed],
             datatypes: vec![
                 DataType::Bool,
                 DataType::Int16,
@@ -145,6 +138,8 @@ impl Connector for ModbusConnector {
                 DataType::Uint64,
                 DataType::Float32,
                 DataType::Float64,
+                // `bytes` is the raw case (§1): what raw mode delivered in 0.1.
+                DataType::Bytes,
             ],
             point_kinds: vec![
                 "coil".into(),
@@ -371,9 +366,10 @@ async fn read_one_unbounded(
         match read_bits(ctx, addr.table, addr.address, count).await {
             Ok(bits) => {
                 let raw = pack_bits(&bits);
-                let value = match model.mode {
-                    Mode::Raw => None,
-                    Mode::Typed => Some(Value::Bool(bits.first().copied().unwrap_or(false))),
+                let value = match model.datatype {
+                    // `bytes`: the value is the hex of the coils, filled in by `good_sample`.
+                    DataType::Bytes => None,
+                    _ => Some(Value::Bool(bits.first().copied().unwrap_or(false))),
                 };
                 good_sample(id, model, unit_id, raw, 1, value)
             }
@@ -384,20 +380,11 @@ async fn read_one_unbounded(
         match read_registers(ctx, addr.table, addr.address, count).await {
             Ok(regs) => {
                 let bytes: Vec<u8> = regs.iter().flat_map(|r| r.to_be_bytes()).collect();
-                match model.mode {
-                    Mode::Raw => good_sample(id, model, unit_id, bytes, 2, None),
-                    Mode::Typed => {
-                        let dt = match model.datatype {
-                            Some(dt) => dt,
-                            None => {
-                                return bad_sample(
-                                    id,
-                                    Some(model),
-                                    unit_id,
-                                    2,
-                                    "typed point missing datatype",
-                                )
-                            }
+                match model.datatype {
+                    // `bytes`: the value is the hex of the registers, filled in by `good_sample`.
+                    DataType::Bytes => good_sample(id, model, unit_id, bytes, 2, None),
+                    dt => {
+                        {
                         };
                         let value = if let (Some(sb), Some(bc)) =
                             (addr.start_bit, addr.bit_count)
@@ -446,10 +433,23 @@ async fn write_point(
 ) -> Result<(), ConnectorError> {
     let addr = &model.address;
 
+    // A `bytes` write carries the hex string in `value` (§1): there is no separate `raw`
+    // request field any more, because there is no separate raw mode.
+    let bytes_payload: Option<Vec<u8>> = match model.datatype {
+        DataType::Bytes => match request.value.as_ref().and_then(|v| v.as_str()) {
+            Some(hex) => Some(parse_hex(hex)?),
+            None => {
+                return Err(ConnectorError::Decode(
+                    "a bytes write needs a hex string in 'value'".into(),
+                ))
+            }
+        },
+        _ => None,
+    };
+
     // Coil write.
     if addr.table == Table::Coil {
-        let on = if let Some(raw) = &request.raw {
-            let bytes = parse_hex(raw)?;
+        let on = if let Some(bytes) = &bytes_payload {
             bytes.first().copied().unwrap_or(0) != 0
         } else {
             match request.value.as_ref().and_then(json_to_value) {
@@ -462,13 +462,10 @@ async fn write_point(
     }
 
     // Holding register write.
-    let regs: Vec<u16> = if let Some(raw) = &request.raw {
-        let bytes = parse_hex(raw)?;
+    let regs: Vec<u16> = if let Some(bytes) = bytes_payload {
         bytes_to_registers(&bytes)
     } else {
-        let dt = model
-            .datatype
-            .ok_or_else(|| ConnectorError::Decode("typed write needs a datatype".into()))?;
+        let dt = model.datatype;
         let value = request
             .value
             .as_ref()
@@ -609,13 +606,13 @@ fn good_sample(
         device: String::new(), // filled in by the SDK from the topic context if needed
         protocol: PROTOCOL,
         point: id.to_string(),
-        mode: model.mode,
-        datatype: if model.mode == Mode::Typed {
-            model.datatype.or(Some(DataType::Bool))
-        } else {
-            None
+        datatype: model.datatype,
+        // A `bytes` point's value IS the hex of what was read (§1), so it is built here rather
+        // than decoded: there is no primitive to decode it into.
+        value: match model.datatype {
+            DataType::Bytes => Some(Value::Text(tedge_dot_sdk::model::hex_grouped(&raw, group))),
+            _ => value.map(|v| model.transform.apply(v)),
         },
-        value: value.map(|v| model.transform.apply(v)),
         raw,
         raw_group: group,
         quality: Quality::Good,
@@ -633,20 +630,15 @@ fn bad_sample(
     group: usize,
     error: &str,
 ) -> Sample {
-    // Echo the point's mode/datatype so the envelope stays schema-valid: `typed` requires a
-    // `datatype`. A point we know nothing about reports as `raw`, which requires neither.
-    let mode = model.map(|m| m.mode).unwrap_or(Mode::Raw);
+    // A point we know nothing about reports as `bytes`, which needs no value — the one
+    // datatype whose envelope is complete without one.
+    let datatype = model.map(|m| m.datatype).unwrap_or(DataType::Bytes);
     Sample {
         ts: OffsetDateTime::now_utc(),
         device: String::new(),
         protocol: PROTOCOL,
         point: id.to_string(),
-        mode,
-        datatype: if mode == Mode::Typed {
-            model.and_then(|m| m.datatype).or(Some(DataType::Bool))
-        } else {
-            None
-        },
+        datatype,
         value: None,
         raw: Vec::new(),
         raw_group: group,
@@ -720,13 +712,11 @@ fn register_count(addr: &ModbusAddress, model: &ModbusPoint) -> u16 {
     if let Some(c) = addr.count {
         return c;
     }
-    match model.mode {
-        Mode::Raw => 1,
-        Mode::Typed => model
-            .datatype
-            .and_then(|dt| dt.byte_len())
-            .map(|bytes| bytes.div_ceil(2).max(1) as u16)
-            .unwrap_or(1),
+    match model.datatype.byte_len() {
+        // `bytes` (and `string`) have no fixed width: without an explicit `count` one register
+        // is read, which is what raw mode did.
+        None => 1,
+        Some(bytes) => bytes.div_ceil(2).max(1) as u16,
     }
 }
 
@@ -806,7 +796,7 @@ fn databits_from(n: u8) -> tokio_serial::DataBits {
 mod tests {
     use super::*;
 
-    fn point(table: Table, datatype: Option<DataType>, mode: Mode) -> ModbusPoint {
+    fn point(table: Table, datatype: DataType) -> ModbusPoint {
         ModbusPoint {
             address: ModbusAddress {
                 table,
@@ -815,7 +805,6 @@ mod tests {
                 start_bit: None,
                 bit_count: None,
             },
-            mode,
             datatype,
             endianness: Endianness::Big,
             word_order: WordOrder::Big,
@@ -827,9 +816,9 @@ mod tests {
 
     #[test]
     fn register_count_from_datatype() {
-        assert_eq!(register_count(&point(Table::Holding, Some(DataType::Uint16), Mode::Typed).address, &point(Table::Holding, Some(DataType::Uint16), Mode::Typed)), 1);
-        assert_eq!(register_count(&point(Table::Holding, Some(DataType::Float32), Mode::Typed).address, &point(Table::Holding, Some(DataType::Float32), Mode::Typed)), 2);
-        assert_eq!(register_count(&point(Table::Holding, Some(DataType::Float64), Mode::Typed).address, &point(Table::Holding, Some(DataType::Float64), Mode::Typed)), 4);
+        assert_eq!(register_count(&point(Table::Holding, DataType::Uint16).address, &point(Table::Holding, DataType::Uint16)), 1);
+        assert_eq!(register_count(&point(Table::Holding, DataType::Float32).address, &point(Table::Holding, DataType::Float32)), 2);
+        assert_eq!(register_count(&point(Table::Holding, DataType::Float64).address, &point(Table::Holding, DataType::Float64)), 4);
     }
 
     #[test]

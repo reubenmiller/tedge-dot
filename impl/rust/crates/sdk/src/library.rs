@@ -89,14 +89,12 @@ const DEVICE_KEYS: &[&str] = &[
     "type",
     "protocol_address",
     "poll_interval",
-    "default_mode",
     "points_from",
     "point",
     "enabled",
 ];
 const POINT_KEYS: &[&str] = &[
     "id",
-    "mode",
     "datatype",
     "endianness",
     "word_order",
@@ -316,10 +314,7 @@ fn check_ranges(config: &ConnectorConfig) -> Result<(), String> {
             if point.range.is_none() {
                 continue;
             }
-            let numeric = point
-                .datatype
-                .map(|d| d.value_range().is_some())
-                .unwrap_or(false);
+            let numeric = point.datatype.value_range().is_some();
             if !numeric {
                 return Err(format!(
                     "device '{}': point '{}' declares a range, but its datatype is not numeric",
@@ -1184,7 +1179,7 @@ points_from      = ["acme-meter"]
         assert_eq!(points[0].unit.as_deref(), Some("K"), "inline wins over the library");
         assert_eq!(
             points[0].datatype,
-            Some(crate::model::DataType::Float32),
+            crate::model::DataType::Float32,
             "and inherits what it does not restate"
         );
     }
@@ -1848,7 +1843,7 @@ point            = {value}
             "patching the name must not drop the inherited description"
         );
         assert_eq!(point.unit.as_deref(), Some("°C"));
-        assert_eq!(point.datatype, Some(crate::model::DataType::Float32));
+        assert_eq!(point.datatype, crate::model::DataType::Float32);
     }
 
     #[test]

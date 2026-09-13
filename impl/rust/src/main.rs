@@ -977,7 +977,7 @@ async fn cmd_read(args: ReadArgs) -> Result<(), String> {
             refs: t
                 .points
                 .iter()
-                .map(|p| runtime::point_ref(p, t.device.default_mode))
+                .map(|p| runtime::point_ref(p))
                 .collect(),
             interval: effective_interval(&config, t.device, args.interval),
             next_due: now,
@@ -1612,15 +1612,18 @@ poll_interval = "5s"
 
   [[device.point]]
   id = "temp_u16"
+  datatype = "uint16"
   access = "read_write"
   address = { table = "holding", address = 3 }
 
   [[device.point]]
   id = "temp_scaled"
+  datatype = "uint16"
   address = { table = "holding", address = 3 }
 
   [[device.point]]
   id = "cmd_only"
+  datatype = "bool"
   access = "write"
   address = { table = "coil", address = 1 }
 
@@ -1630,6 +1633,7 @@ protocol_address = { host = "127.0.0.2" }
 
   [[device.point]]
   id = "level_f32"
+  datatype = "float32"
   address = { table = "holding", address = 6 }
 "#,
         )

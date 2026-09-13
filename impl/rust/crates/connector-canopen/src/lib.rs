@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use tedge_dot_sdk::{
     Access, Capabilities, CommandRequest, CommandResult, ConfigError, Connector, ConnectorConfig,
-    ConnectorError, DataType, DeviceId, LinkReport, LinkStatus, Mode, PointRef,
+    ConnectorError, DataType, DeviceId, LinkReport, LinkStatus, PointRef,
     Quality, Sample, SampleSink, Transform, Value,
 };
 use time::OffsetDateTime;
@@ -201,8 +201,7 @@ mod linux_bus {
 #[derive(Clone)]
 struct CanopenPoint {
     od: OdAddress,
-    mode: Mode,
-    datatype: Option<DataType>,
+    datatype: DataType,
     access: Access,
     unit: Option<String>,
     transform: Transform,
@@ -252,19 +251,11 @@ impl Connector for CanopenConnector {
                         ConfigError::Invalid(format!("point '{}' address: {e}", p.id))
                     })?;
 
-                let mode = p.resolved_mode(d.default_mode);
-                if mode == Mode::Typed && p.datatype.is_none() {
-                    return Err(ConfigError::Invalid(format!(
-                        "point '{}' is typed but has no datatype",
-                        p.id
-                    )));
-                }
-
+                // `bytes` is the SDO payload — what raw mode published in 0.1.
                 points.insert(
                     p.id.clone(),
                     CanopenPoint {
                         od,
-                        mode,
                         datatype: p.datatype,
                         access: Access::parse(p.access.as_deref()),
                         unit: p.unit.clone(),
@@ -288,7 +279,6 @@ impl Connector for CanopenConnector {
         Capabilities {
             protocol: PROTOCOL,
             version: env!("CARGO_PKG_VERSION"),
-            modes: vec![Mode::Raw, Mode::Typed],
             datatypes: vec![
                 DataType::Bool,
                 DataType::Int8,
@@ -302,6 +292,8 @@ impl Connector for CanopenConnector {
                 DataType::Float32,
                 DataType::Float64,
                 DataType::String,
+                // `bytes` is the raw case (§1): what raw mode delivered in 0.1.
+                DataType::Bytes,
             ],
             point_kinds: vec!["object".into()],
             command_verbs: vec!["write".into()],
@@ -456,15 +448,15 @@ impl CanopenConnector {
                 }
             };
 
-            let sample = match pt.mode {
-                Mode::Raw => Sample {
+            let sample = match pt.datatype {
+                // `bytes`: the value IS the hex of the SDO payload (§1).
+                DataType::Bytes => Sample {
                     ts,
                     device: device.clone(),
                     protocol: PROTOCOL,
                     point: pr.id.clone(),
-                    mode: Mode::Raw,
-                    datatype: None,
-                    value: None,
+                    datatype: DataType::Bytes,
+                    value: Some(Value::Text(tedge_dot_sdk::model::hex_grouped(&raw_bytes, 1))),
                     raw: raw_bytes,
                     raw_group: 1,
                     quality: Quality::Good,
@@ -473,16 +465,7 @@ impl CanopenConnector {
                     seq: None,
                     error: None,
                 },
-                Mode::Typed => {
-                    let dt = match pt.datatype {
-                        Some(d) => d,
-                        None => {
-                            samples.push(make_bad_sample(
-                                device, &pr.id, "typed point missing datatype", ts, addr,
-                            ));
-                            continue;
-                        }
-                    };
+                dt => {
                     // CANopen is little-endian on the wire.
                     match decode_primitive(&raw_bytes, dt, Endianness::Little, WordOrder::Big) {
                         Ok(value) => {
@@ -492,8 +475,7 @@ impl CanopenConnector {
                                 device: device.clone(),
                                 protocol: PROTOCOL,
                                 point: pr.id.clone(),
-                                mode: Mode::Typed,
-                                datatype: Some(dt),
+                                datatype: dt,
                                 value: Some(value),
                                 raw: raw_bytes,
                                 raw_group: 1,
@@ -638,8 +620,8 @@ fn make_bad_sample(
         device: device.clone(),
         protocol: PROTOCOL,
         point: point_id.to_string(),
-        mode: Mode::Typed,
-        datatype: None,
+        // Nothing decoded, so nothing to say beyond "these bytes".
+        datatype: DataType::Bytes,
         value: None,
         raw: vec![],
         raw_group: 1,

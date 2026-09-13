@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use connector_modbus::ModbusConnector;
 use tedge_dot_sdk::{
-    Access, Connector, ConnectorConfig, DataType, Endianness, Mode, PointRef, Quality, Value,
+    Access, Connector, ConnectorConfig, DataType, Endianness, PointRef, Quality, Value,
     WordOrder,
 };
 use tokio::net::TcpListener;
@@ -75,10 +75,9 @@ fn read_regs(map: &HashMap<u16, u16>, addr: u16, cnt: u16) -> Result<Vec<u16>, E
     Ok(out)
 }
 
-fn pref(id: &str, mode: Mode, datatype: Option<DataType>, access: Access) -> PointRef {
+fn pref(id: &str, datatype: DataType, access: Access) -> PointRef {
     PointRef {
         id: id.to_string(),
-        mode,
         datatype,
         endianness: Endianness::Big,
         word_order: WordOrder::Big,
@@ -130,7 +129,6 @@ async fn tcp_read_and_write_roundtrip() {
         [[device]]
         name = "plc-1"
         protocol_address = {{ transport = "tcp", host = "{}", port = {}, unit_id = 1 }}
-        default_mode = "typed"
 
           [[device.point]]
           id = "boiler_temp"
@@ -139,7 +137,7 @@ async fn tcp_read_and_write_roundtrip() {
 
           [[device.point]]
           id = "status_word"
-          mode = "raw"
+          datatype = "bytes"
           address = {{ table = "holding", address = 0, count = 1 }}
 
           [[device.point]]
@@ -168,9 +166,9 @@ async fn tcp_read_and_write_roundtrip() {
 
     // Read the three points.
     let points = vec![
-        pref("boiler_temp", Mode::Typed, Some(DataType::Float32), Access::Read),
-        pref("status_word", Mode::Raw, None, Access::Read),
-        pref("run_state", Mode::Typed, Some(DataType::Bool), Access::Read),
+        pref("boiler_temp", DataType::Float32, Access::Read),
+        pref("status_word", DataType::Bytes, Access::Read),
+        pref("run_state", DataType::Bool, Access::Read),
     ];
     let samples = connector.read_points(&device, &points).await.unwrap();
     assert_eq!(samples.len(), 3);
@@ -179,12 +177,15 @@ async fn tcp_read_and_write_roundtrip() {
     assert_eq!(boiler.quality, Quality::Good);
     assert_eq!(boiler.value, Some(Value::Number(42.5)));
 
+    // `bytes` is the raw case (§1): the VALUE is the hex of the registers read, so a consumer
+    // needs nothing beyond the ordinary envelope to see it.
     let status = samples.iter().find(|s| s.point == "status_word").unwrap();
     assert_eq!(status.quality, Quality::Good);
-    assert!(status.value.is_none());
-    // raw envelope hex (grouped per 16-bit register); `raw` is opt-in (§5: sample_debug)
-    let env = status.to_envelope(true);
-    assert_eq!(env["raw"], "1234");
+    assert_eq!(status.datatype, DataType::Bytes);
+    assert_eq!(status.value, Some(Value::Text("1234".into())));
+    assert_eq!(status.to_envelope(false)["value"], "1234");
+    // `raw` still carries the same bytes, but only under sample_debug (§5).
+    assert_eq!(status.to_envelope(true)["raw"], "1234");
     assert!(status.to_envelope(false).get("raw").is_none());
 
     let run = samples.iter().find(|s| s.point == "run_state").unwrap();
@@ -202,7 +203,7 @@ async fn tcp_read_and_write_roundtrip() {
     let readback = connector
         .read_points(
             &device,
-            &[pref("setpoint", Mode::Typed, Some(DataType::Float32), Access::ReadWrite)],
+            &[pref("setpoint", DataType::Float32, Access::ReadWrite)],
         )
         .await
         .unwrap();
@@ -273,8 +274,8 @@ async fn silent_peer_fails_the_read_instead_of_hanging() {
 
     let device = "plc-1".to_string();
     let points = vec![
-        pref("first", Mode::Typed, Some(DataType::Uint16), Access::Read),
-        pref("second", Mode::Typed, Some(DataType::Uint16), Access::Read),
+        pref("first", DataType::Uint16, Access::Read),
+        pref("second", DataType::Uint16, Access::Read),
     ];
     let started = std::time::Instant::now();
     let samples = connector.read_points(&device, &points).await.unwrap();

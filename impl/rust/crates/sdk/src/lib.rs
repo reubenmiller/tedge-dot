@@ -23,4 +23,4 @@ pub use connector::{
 };
 pub use descriptor::{c8y_dtm_definitions, parameters, parameters_of, Parameter};
 pub use decode::{decode_primitive, encode_primitive, extract_bitfield, DecodeError, Endianness, WordOrder};
-pub use model::{DataType, DeviceId, Mode, PointId, Quality, Sample, Transform, Value};
+pub use model::{DataType, DeviceId, PointId, Quality, Sample, Transform, Value};

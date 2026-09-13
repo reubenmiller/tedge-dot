@@ -35,8 +35,7 @@ RFC 2119.
 | **Device** | A physical/logical field device the connector talks to (a PLC, a meter, an OPC-UA server). Maps to a thin-edge entity. |
 | **Point** | A single readable/writable datum on a device (a register, a coil, an OPC-UA node, a CAN signal). |
 | **Sample** | The result of reading a point once, published as a *sample envelope*. |
-| **Mode** | Per-point output selection: `raw` (bytes) or `typed` (decoded primitive). |
-| **Capability** | A declared feature a connector supports (a point kind, a mode, a command verb). |
+| **Capability** | A declared feature a connector supports (a point kind, a datatype, a command verb). |
 
 A connector manages **one or more devices**; each device has **one or more points**. The
 connector reads points (by polling and/or subscription), publishes **samples**, accepts
@@ -111,14 +110,12 @@ name     = "<device-name>"      # -> te/device/<device-name>
 type     = "<device-type>"      # optional; what this device IS (§3.1), else from its library
 protocol_address = { } # protocol-specific: how to reach this device. Shape per connector spec.
 poll_interval = "2s"            # optional per-device override
-default_mode  = "typed"         # optional; default output mode for this device's points
 points_from   = []              # optional; point libraries to inherit points from, in order (§3.4)
 enabled       = true            # optional; false keeps the definition but leaves the device out (§3.3)
 
   [[device.point]]
   id       = "<point-id>"       # unique within the device; appears in topics
-  mode     = "typed"            # "raw" | "typed" (inherits device.default_mode if omitted)
-  datatype = "float32"          # required when mode = "typed"; see §4
+  datatype = "float32"          # REQUIRED; `bytes` is the raw case (§4)
   endianness    = "big"         # byte order: "big" | "little" (typed only)
   word_order    = "big"         # multi-word order: "big" | "little" (typed only)
   poll_interval = "1s"          # optional per-point override
@@ -151,17 +148,15 @@ enabled       = true            # optional; false keeps the definition but leave
 > [[device]]
 > name     = "plc-1"
 > protocol_address = { transport = "tcp", host = "192.168.0.10", port = 502, unit_id = 1 }
-> default_mode = "typed"
 >
 >   [[device.point]]
 >   id       = "boiler_temp"
->   mode     = "typed"
 >   datatype = "float32"
 >   address  = { table = "holding", address = 7, count = 2 }
 >
 >   [[device.point]]
 >   id       = "run_command"
->   mode     = "raw"
+>   datatype = "bytes"
 >   access   = "read_write"
 >   address  = { table = "coil", address = 0, count = 1 }
 > ```
@@ -171,7 +166,6 @@ enabled       = true            # optional; false keeps the definition but leave
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `id` | string | yes | Unique within the device; used in `sample/<point>` and `cmd` topics. |
-| `mode` | `"raw"` \| `"typed"` | no | Inherits `device.default_mode`, else `"typed"`. |
 | `datatype` | string | when `typed` | One of §4's primitive types. |
 | `endianness` | `"big"` \| `"little"` | no | Byte order for `typed`; default `"big"`. |
 | `word_order` | `"big"` \| `"little"` | no | Word order for multi-word `typed`; default `"big"`. |
@@ -233,8 +227,8 @@ that they are objects and that each connector documents and schema-validates the
 
 ### 3.3 Validation rules
 
-- A point with `mode = "typed"` MUST declare a `datatype`.
-- A point with `mode = "raw"` MUST NOT be rejected for missing `datatype`; decoding fields
+- Every point MUST declare a `datatype` — there is no second type system to fall back on,
+  and `bytes` is how a point says "give me what was read". Decoding fields
   are ignored.
 - `id` MUST be unique within a device; `name` MUST be unique within a connector, and a
   connector MUST reject a repeated device name rather than let two definitions publish over
@@ -383,9 +377,10 @@ valid, so a configuration that legitimately uses the path form still accepts eve
 verb. A connector MUST therefore compare the patched document against the one it held, not
 scan the result as a whole.
 
-## 4. Datatypes (typed mode)
+## 4. Datatypes
 
-In `typed` mode the driver applies **only** primitive decoding. The contract defines this
+Every point declares exactly one `datatype`, and the driver applies **only** primitive
+decoding. The contract defines this
 closed set of primitive datatypes:
 
 | `datatype` | Meaning | JSON `value` type |
@@ -417,6 +412,23 @@ Decoding semantics:
   one decoding refinement allowed beyond whole-primitive decode, because doing it in JS is
   error-prone.
 
+### 4.0 `bytes`: the raw case
+
+`bytes` is not a primitive the driver decodes — it is the point saying *give me what was read*.
+The sample's `value` is the hex of those bytes, grouped per protocol word, and a write carries
+the same hex string in `value`. What "the bytes" are is defined per connector:
+
+| Connector | `bytes` on read | `bytes` on write |
+| --- | --- | --- |
+| Modbus | the registers or coils read; hex, space-grouped per 16-bit word | written verbatim to `count` registers/coils |
+| CAN bus | the **whole payload of the signal's frame** | the frame payload, sent as one frame |
+| CANopen | the SDO payload | the SDO payload |
+| PROFIBUS-DP | the bytes at `byte_offset`, to the end of the input image when no length is given | the bytes at `byte_offset` |
+| OPC UA | the best-effort encoding of the variant the node holds | **rejected at configuration time**: a variant cannot be built from bytes |
+
+A connector that cannot deliver bytes for a point kind refuses `bytes` for that kind at
+configuration time, exactly as it refuses any datatype it does not list in its capabilities.
+
 ### 4.1 64-bit integers
 
 `int64`/`uint64` values that exceed JavaScript's safe integer range (`2^53 - 1`) MUST be
@@ -443,7 +455,7 @@ out = (value * multiplier * 10^decimal_shift / divisor) + offset
 Rules:
 
 - The transform applies **only** to `number` values. `bool`, `string`, and `bytes` values pass
-  through unchanged, and it is a no-op in `raw` mode.
+  through unchanged.
 - The scaled value is what the sample's `value` carries; `raw` (under `sample_debug`) always
   remains the unmodified wire bytes.
 - The math is owned by the SDK so every connector scales identically. Connectors invoke the SDK
@@ -493,7 +505,6 @@ produces in a day. The envelope is protocol-neutral. The example below uses Modb
   "device": "plc-1",
   "protocol": "modbus",
   "point": "boiler_temp",
-  "mode": "typed",
   "datatype": "float32",
   "value": 42.5,
   "quality": "good",
@@ -507,7 +518,6 @@ produces in a day. The envelope is protocol-neutral. The example below uses Modb
 | `device` | string | yes | thin-edge device entity id segment. |
 | `protocol` | string | yes | Protocol module id — a fact about the sample's origin, and what `ot-measurement` groups by. |
 | `point` | string | yes | Point `id`. |
-| `mode` | `"raw"` \| `"typed"` | yes | Echoes the point mode. |
 | `datatype` | string | when `typed` | The primitive type decoded. With the JSON type of `value` this says everything a separate `value_repr` did — including that a `string`-typed `value` is an `int64` outside the JSON safe range (§4.1). |
 | `value` | number \| boolean \| string | when `quality = good` | Decoded value (`typed`) — absent for `raw`. |
 | `quality` | `"good"` \| `"bad"` \| `"stale"` | yes | See §5.1. |
@@ -533,12 +543,12 @@ What a 0.1 sample also carried, and where to find it now:
 
 | `quality` | Meaning | `value` present? |
 | --- | --- | --- |
-| `good` | Read succeeded; value is current. | yes (typed) / `raw` only (raw mode) |
+| `good` | Read succeeded; value is current. | yes (for `bytes`, the hex of what was read) |
 | `bad` | Read failed (timeout, exception, CRC). `error` set. | no |
 | `stale` | Last good value re-emitted because a refresh failed but cached data exists. | yes |
 
-- In `raw` mode there is no `value`; the payload is the `raw` hex. `quality` still applies
-  (a failed raw read is `bad` with no `raw`, or `raw` omitted).
+- A `bytes` point's `value` **is** the hex of what was read (§1), so a good sample always
+  carries a value whatever the datatype.
 - A connector MUST publish `bad` samples for failed reads rather than silently dropping
   them, so flows and operators can react. A connector MAY rate-limit repeated `bad` samples.
 
@@ -801,7 +811,6 @@ Request (`status: "init"`):
   "device": {
     "name": "plc-9",
     "protocol_address": { "transport": "tcp", "host": "10.0.0.9", "port": 502, "unit_id": 1 },
-    "default_mode": "typed",
     "point": [
       { "id": "temp", "datatype": "float32", "access": "read_write",
         "address": { "table": "holding", "address": 7, "count": 2 } }
@@ -921,7 +930,6 @@ same fields with its own values (and typically `"subscribe": true`):
 {
   "protocol": "modbus",
   "version": "0.1.0",
-  "modes": ["raw", "typed"],
   "datatypes": ["bool", "int16", "uint16", "int32", "uint32", "float32", "float64"],
   "point_kinds": ["coil", "discrete_input", "holding_register", "input_register"],
   "command_verbs": ["write", "set-config", "define-device", "remove-device"],
@@ -932,8 +940,7 @@ same fields with its own values (and typically `"subscribe": true`):
 
 | Field | Meaning |
 | --- | --- |
-| `modes` | Output modes supported. MUST include at least one of `raw`/`typed`. |
-| `datatypes` | Subset of §4 the connector can decode in `typed` mode. |
+| `datatypes` | Subset of §4 the connector can decode and encode. `bytes` in this list is what says the connector supports the raw case (§1); it replaced the separate `modes` list of 0.1. |
 | `point_kinds` | Protocol-specific kinds the connector understands (free strings, documented per spec). |
 | `command_verbs` | Verbs accepted on `cmd/<verb>`. MUST include `write` if any point is writable; SDK-based connectors also list `write-batch` (§6.4) and the management verbs (§6.3). |
 | `features` | Optional capability tags: `polling`, `subscribe`, `bitfield`, `string`, `bulk_read`, … |
@@ -1059,7 +1066,7 @@ accepts the connection and answers nothing (check B5, silent peer).
 
 A connector is **contract-conformant** when it:
 
-1. publishes valid samples (§5) for every configured point in its declared modes,
+1. publishes valid samples (§5) for every configured point in its declared datatypes,
 2. publishes a valid capability descriptor (§7) and health/status (§8),
 3. implements the `write` verb (§6) for all writable points (SDK-based connectors get
    `write-batch` for free),

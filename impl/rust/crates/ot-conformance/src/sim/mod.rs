@@ -11,15 +11,15 @@ pub mod modbus;
 pub mod opcua;
 pub mod proxy;
 
-use tedge_dot_sdk::{DataType, Mode};
+use tedge_dot_sdk::DataType;
 
 /// A point the harness asks the simulator about, resolved from the connector configuration.
 #[derive(Debug, Clone)]
 pub struct PointSpec {
     /// The point's protocol-specific `address` object (opaque to the contract).
     pub address: serde_json::Value,
-    pub datatype: Option<DataType>,
-    pub mode: Mode,
+    /// The point's datatype (§4). `bytes` is the raw case, so there is no separate mode.
+    pub datatype: DataType,
 }
 
 /// Ground-truth data for one point, as the connector should read it right now.

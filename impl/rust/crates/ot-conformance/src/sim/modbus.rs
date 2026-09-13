@@ -13,7 +13,7 @@ use std::future;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tedge_dot_sdk::{DataType, Mode};
+use tedge_dot_sdk::DataType;
 use tokio_modbus::server::tcp::{accept_tcp_connection, Server};
 use tokio_modbus::{ExceptionCode, Request, Response};
 use tracing::debug;
@@ -230,16 +230,14 @@ impl ModbusAddress {
 
     /// Register count the connector will read: explicit `count`, else derived from the
     /// datatype (mirrors the Modbus connector spec).
-    fn register_count(&self, datatype: Option<DataType>, mode: Mode) -> u16 {
+    fn register_count(&self, datatype: DataType) -> u16 {
         if let Some(c) = self.count {
             return c;
         }
-        match mode {
-            Mode::Raw => 1,
-            Mode::Typed => datatype
-                .and_then(DataType::byte_len)
-                .map(|b| (b.div_ceil(2)).max(1) as u16)
-                .unwrap_or(1),
+        match datatype.byte_len() {
+            // `bytes` (and `string`) have no fixed width: one register, as raw mode read.
+            None => 1,
+            Some(b) => (b.div_ceil(2)).max(1) as u16,
         }
     }
 }
@@ -321,7 +319,7 @@ impl Simulator for ModbusSim {
                 raw_group: 1,
             })
         } else {
-            let cnt = addr.register_count(point.datatype, point.mode);
+            let cnt = addr.register_count(point.datatype);
             let regs = state
                 .read_registers(addr.table_key(), addr.address, cnt)
                 .map_err(|e| format!("seeded invalid: {e:?}"))?;
@@ -339,7 +337,7 @@ impl Simulator for ModbusSim {
         let cnt = if addr.is_bit_table() {
             addr.count.unwrap_or(1)
         } else {
-            addr.register_count(point.datatype, point.mode)
+            addr.register_count(point.datatype)
         };
         let state = self.state.lock().unwrap();
         (0..cnt).any(|i| {
@@ -445,8 +443,7 @@ mod tests {
         ctx.write_single_register(3, 999).await.unwrap().unwrap();
         let spec = PointSpec {
             address: serde_json::json!({ "table": "holding", "address": 3, "count": 1 }),
-            datatype: Some(DataType::Uint16),
-            mode: Mode::Typed,
+            datatype: DataType::Uint16,
         };
         assert_eq!(sim.write_count(&spec).unwrap(), 1);
         assert_eq!(sim.point_data(&spec).unwrap().bytes, vec![0x03, 0xe7]);
@@ -469,8 +466,8 @@ mod tests {
             address: 6,
             count: None,
         };
-        assert_eq!(addr.register_count(Some(DataType::Float32), Mode::Typed), 2);
-        assert_eq!(addr.register_count(Some(DataType::Float64), Mode::Typed), 4);
-        assert_eq!(addr.register_count(None, Mode::Raw), 1);
+        assert_eq!(addr.register_count(DataType::Float32), 2);
+        assert_eq!(addr.register_count(DataType::Float64), 4);
+        assert_eq!(addr.register_count(DataType::Bytes), 1);
     }
 }

@@ -140,7 +140,6 @@ def coil_point:
      then { transport: "tcp", host: $ip, port: 502, unit_id: ($address | tonumber) }
      else { transport: "rtu", serial_port: $serial_port, unit_id: ($address | tonumber) }
      end),
-  default_mode: "typed",
   point: (((.c8y_Registers // []) | map(reg_point))
           + ((.c8y_Coils // []) | map(coil_point)))
 }

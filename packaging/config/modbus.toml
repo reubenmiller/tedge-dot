@@ -45,7 +45,6 @@ databits = 8
 #
 #   [[device.point]]
 #   id       = "boiler_temp"
-#   mode     = "typed"
 #   datatype = "float32"
 #   address  = { table = "holding", address = 7, count = 2 }
 #   # Optional human-readable labels. The id stays an identifier (it is a topic

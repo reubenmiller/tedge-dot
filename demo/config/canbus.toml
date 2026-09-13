@@ -19,7 +19,6 @@ port = 1883
 [[device]]
 name             = "engine"
 protocol_address = { interface = "vcan0", dbc_file = "/usr/share/tedge-dot/demo/can/test.dbc" }
-default_mode     = "typed"
 points_from      = ["demo-sim"]
 
   # The points come from the packaged point library

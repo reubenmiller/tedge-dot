@@ -8,7 +8,7 @@ use crate::connector::{
     PointRef, SampleSink,
 };
 use crate::decode::{Endianness, WordOrder};
-use crate::model::{format_rfc3339_ms, Mode, Sample};
+use crate::model::{format_rfc3339_ms, Sample};
 use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, Packet, QoS};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -988,7 +988,7 @@ fn build_schedule(
                 .as_deref()
                 .and_then(parse_duration)
                 .unwrap_or(device_default);
-            let mut point = point_ref(point, device.default_mode);
+            let mut point = point_ref(point);
             point.interval = Some(interval);
             schedule.push(ScheduleEntry {
                 device_index,
@@ -1059,7 +1059,7 @@ async fn subscribe_device(
             .iter()
             .filter(|p| p.subscribe.unwrap_or(true))
             .map(|p| {
-                let mut r = point_ref(p, device.default_mode);
+                let mut r = point_ref(p);
                 r.interval = Some(
                     p.poll_interval
                         .as_deref()
@@ -1314,22 +1314,20 @@ pub fn wire_value(
     else {
         return Ok(value.clone());
     };
-    let mut integral = false;
-    if let Some(datatype) = point.datatype {
-        if datatype.is_integer() {
-            wire = wire.round();
-            integral = true;
-        }
-        if let Some((min, max)) = datatype.value_range() {
-            if !wire.is_finite() || wire < min || wire > max {
-                return Err(format!(
-                    "value {engineering} does not fit {} after transform (wire value {wire})",
-                    serde_json::to_value(datatype)
-                        .ok()
-                        .and_then(|v| v.as_str().map(str::to_string))
-                        .unwrap_or_default(),
-                ));
-            }
+    let datatype = point.datatype;
+    let integral = datatype.is_integer();
+    if integral {
+        wire = wire.round();
+    }
+    if let Some((min, max)) = datatype.value_range() {
+        if !wire.is_finite() || wire < min || wire > max {
+            return Err(format!(
+                "value {engineering} does not fit {} after transform (wire value {wire})",
+                serde_json::to_value(datatype)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default(),
+            ));
         }
     }
     // An integer datatype gets a JSON integer, not `12345.0`: a module builds a typed value
@@ -1359,10 +1357,9 @@ fn configured_point<'a>(
 
 /// Build a resolved [`PointRef`] from a configured point. Shared by the scheduler and by callers
 /// (e.g. a CLI) that drive a connector's `read_points`/`execute` directly.
-pub fn point_ref(point: &crate::config::PointConfig, device_default: Option<Mode>) -> PointRef {
+pub fn point_ref(point: &crate::config::PointConfig) -> PointRef {
     PointRef {
         id: point.id.clone(),
-        mode: point.resolved_mode(device_default),
         datatype: point.datatype,
         endianness: Endianness::parse(point.endianness.as_deref()),
         word_order: WordOrder::parse(point.word_order.as_deref()),
@@ -2375,12 +2372,6 @@ async fn publish_retained(client: &Mqtt, topic: &str, payload: String) -> Result
     }
 }
 
-/// Resolve the effective output mode of a point ignoring device default; small helper used by
-/// modules that want the same logic without the SDK config types.
-pub fn resolve_mode(mode: Option<Mode>, device_default: Option<Mode>) -> Mode {
-    mode.or(device_default).unwrap_or(Mode::Typed)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2404,7 +2395,6 @@ databits = 8
 [[device]]
 name = "plc-1"
 protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id = 1 }
-default_mode = "typed"
 
   [[device.point]]
   id = "temp"
@@ -2645,7 +2635,6 @@ default_mode = "typed"
             serde_json::json!({ "device": {
                 "name": "plc-9",
                 "protocol_address": { "transport": "tcp", "host": "10.0.0.9", "port": 502, "unit_id": 2 },
-                "default_mode": "typed",
                 "point": [
                     { "id": "level", "datatype": "uint16", "address": { "table": "holding", "address": 1, "count": 1 } }
                 ]
@@ -2819,8 +2808,7 @@ protocol_address = { host = "127.0.0.1" }
             device: "plc-1".into(),
             protocol: "modbus",
             point: "temp".into(),
-            mode: Mode::Typed,
-            datatype: None,
+            datatype: crate::model::DataType::Uint16,
             value: None,
             raw: vec![0x12, 0x34],
             raw_group: 2,
@@ -3023,8 +3011,7 @@ protocol_address = { host = "127.0.0.1" }
             device: "plc-1".into(),
             protocol: "modbus",
             point: point.into(),
-            mode: Mode::Typed,
-            datatype: None,
+            datatype: crate::model::DataType::Uint16,
             value: Some(crate::model::Value::Number(value)),
             raw: vec![],
             raw_group: 2,
@@ -3092,8 +3079,7 @@ protocol_address = { host = "127.0.0.1" }
             device: "plc-1".into(),
             protocol: "modbus",
             point: "b1".into(),
-            mode: Mode::Typed,
-            datatype: None,
+            datatype: crate::model::DataType::Uint16,
             value: Some(crate::model::Value::Number(value)),
             raw: vec![],
             raw_group: 2,
@@ -3208,7 +3194,6 @@ protocol_address = { host = "127.0.0.1" }
         let mut caps = Capabilities {
             protocol: "x",
             version: "0",
-            modes: vec![],
             datatypes: vec![],
             point_kinds: vec![],
             command_verbs: vec!["write".into()],
@@ -3230,7 +3215,6 @@ protocol_address = { host = "127.0.0.1" }
         let mut caps = Capabilities {
             protocol: "modbus",
             version: "0.0.0",
-            modes: vec![],
             datatypes: vec![],
             point_kinds: vec![],
             command_verbs: vec!["write".into()],

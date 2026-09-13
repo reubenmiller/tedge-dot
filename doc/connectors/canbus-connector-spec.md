@@ -55,8 +55,7 @@ The connector MUST publish:
 {
   "protocol": "canbus",
   "version": "0.1.0",
-  "modes": ["raw", "typed"],
-  "datatypes": ["bool", "uint8", "int8", "uint16", "int16", "uint32", "int32", "uint64", "int64", "float32", "float64"],
+  "datatypes": ["bool", "uint8", "int8", "uint16", "int16", "uint32", "int32", "uint64", "int64", "float32", "float64", "bytes"],
   "point_kinds": ["signal"],
   "command_verbs": ["write", "set-config", "define-device", "remove-device"],
   "features": ["subscribe", "management"],
@@ -119,7 +118,7 @@ memory and used on every received frame.
 
 ---
 
-## 4. Decoding rules (typed mode)
+## 4. Decoding rules
 
 ### 4.1 CAN signal bit extraction
 
@@ -173,11 +172,11 @@ per-point `transform` (multiplier/divisor/offset). The DBC `factor` and `offset`
 `int64`/`uint64` values outside the JS safe-integer range MUST be emitted as `Value::Text`,
 i.e. a string `value` (contract §4.1); the sample's `datatype` says it is an integer.
 
-### 4.3 Raw mode
+### 4.3 `bytes`: the raw case
 
-In `raw` mode the full frame payload (8 bytes classic / up to 64 bytes FD) is emitted as a
-lowercase hex string. No `value` is set. The `datatype` field is absent. The `addr` field
-echoes the CAN ID: `{ "can_id": "0x1A0" }`.
+With `datatype = "bytes"` (contract §1) the signal's `value` is the full frame payload — 8
+bytes classic, up to 64 bytes FD — as a lowercase hex string. The `addr` field echoes the CAN
+ID: `{ "can_id": "0x1A0" }`.
 
 ### 4.4 Boolean signals
 
@@ -197,8 +196,8 @@ The connector implements `subscribe()` (not `read_points()`).
    b. Look up which points subscribe to this frame's CAN ID.
    c. For each matching point:
       - Call `extract_can_signal(frame.data(), start_bit, bit_count, byte_order)`.
-      - In `typed` mode: interpret as datatype, apply `transform`, build `Sample { quality: Good, value, raw, addr: {"can_id": "0xNNN"}, ... }`.
-      - In `raw` mode: emit full payload as hex, no `value`.
+      - For a decoded datatype: interpret as that datatype, apply `transform`, build `Sample { quality: Good, value, raw, addr: {"can_id": "0xNNN"}, ... }`.
+      - For `datatype = bytes` (§1, the raw case): the value is the hex of the full frame payload.
    d. Push each `Sample` to the `SampleSink`.
 5. On `io::Error` from `recv_frame`: emit a `bad` sample with `error` for each subscribed point, update link status to `Degraded`, break.
 
@@ -428,7 +427,6 @@ Format: `bytes` is the 8-byte classic CAN frame payload as lowercase hex (no spa
 {
   "id": "canbus-raw-frame",
   "frame_bytes": "deadbeef01020304",
-  "mode": "raw",
   "expect": { "raw": "deadbeef01020304", "value": null }
 }
 ```

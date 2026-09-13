@@ -12,8 +12,7 @@
 
 [connector]
 protocol    = "canbus"
-modes       = ["raw", "typed"]
-datatypes   = ["bool", "int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64", "float32", "float64"]
+datatypes   = ["bool", "int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64", "float32", "float64", "bytes"]
 point_kinds = ["signal"]
 verbs       = ["write"]
 # CAN is entirely push-based; there is no polling.

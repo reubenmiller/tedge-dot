@@ -41,8 +41,7 @@ The connector MUST publish:
 {
   "protocol": "modbus",
   "version": "0.1.0",
-  "modes": ["raw", "typed"],
-  "datatypes": ["bool", "int16", "uint16", "int32", "uint32", "int64", "uint64", "float32", "float64"],
+  "datatypes": ["bool", "int16", "uint16", "int32", "uint32", "int64", "uint64", "float32", "float64", "bytes"],
   "point_kinds": ["coil", "discrete_input", "holding_register", "input_register"],
   "command_verbs": ["write", "set-config", "define-device", "remove-device"],
   "features": ["polling", "bitfield", "management"],
@@ -114,13 +113,13 @@ address = { table = "holding", address = 7, count = 2, start_bit = 0, bit_count 
 | --- | --- | --- |
 | `table` | yes | `"coil"`, `"discrete_input"`, `"holding"`, `"input"`. |
 | `address` | yes | 0-based register/coil address. |
-| `count` | typed/raw | Number of registers (holding/input) or coils to read. For `typed`, MUST be large enough for the datatype (see §4.2). Defaults: 1 for coils/bool, derived from datatype otherwise. |
+| `count` | sometimes | Number of registers (holding/input) or coils to read. MUST be large enough for the datatype (see §4.2). Defaults: 1 for coils/bool and for `bytes`, derived from the datatype otherwise. |
 | `start_bit` | no | For `bitfield` extraction within registers (0-based). |
 | `bit_count` | no | Width of the bit-field. Requires `bitfield` feature. |
 
-## 4. Decoding rules (typed mode)
+## 4. Decoding rules
 
-In `typed` mode the connector reads raw 16-bit registers (or coil bits), then calls the SDK
+The connector reads raw 16-bit registers (or coil bits), then calls the SDK
 helper `decode_primitive(bytes, datatype, endianness, word_order)`. The connector itself does
 **no** arithmetic beyond assembling bytes.
 
@@ -156,8 +155,8 @@ For `bool`, the connector reads from `coil` or `discrete_input` and maps `1→tr
   (per contract §4.1); the sample's `datatype` is what says it is an integer, not text.
 - `string` is decoded using the connector's declared text encoding (default ASCII/UTF-8,
   null-trimmed); emitted as a string `value`.
-- `bytes` always emits no `value`; the data is the `raw` hex (contract §5: visible in the
-  envelope only under `sample_debug`).
+- `bytes` is the raw case (contract §1): the `value` IS the hex of the registers or coils
+  read, space-grouped per 16-bit word, and a `bytes` write carries that same hex in `value`.
 
 ### 4.4 Bit-fields (optional `bitfield` feature)
 
@@ -172,9 +171,9 @@ bit extraction in JavaScript is error-prone.
    minimize Modbus transactions (mirrors today's `_build_query_model` batching).
 2. Issue the batched `tokio-modbus` reads for each range.
 3. For each point:
-   - `raw` mode → keep the bytes read; `quality = good`; no `value`.
-   - `typed` mode → assemble bytes per `endianness`/`word_order`, call `decode_primitive`,
-     set `value` + `datatype`; `quality = good`.
+   - `datatype = bytes` → the value is the hex of the bytes read; `quality = good`.
+   - any other datatype → assemble bytes per `endianness`/`word_order`, call
+     `decode_primitive`, set `value`; `quality = good`.
    - On a Modbus exception/timeout/CRC error for a range → emit `bad` samples for the
      affected points with `error` set and no `value`.
 4. Record the address in `addr`: `{ "table": ..., "address": ..., "unit_id": ... }`. The
@@ -238,13 +237,13 @@ lowercase, words space-separated per 16-bit register.
 ### 9.1 `uint16`, big-endian
 
 - Registers: `[0x1234]`
-- Point: `{ mode: typed, datatype: uint16, endianness: big, address: { table: holding, address: 0, count: 1 } }`
+- Point: `{ datatype: uint16, endianness: big, address: { table: holding, address: 0, count: 1 } }`
 - Expect: `value = 4660`, `value_repr = "number"`, `raw = "1234"`, `quality = "good"`.
 
 ### 9.2 `int16`, signed negative
 
 - Registers: `[0xfffe]`
-- Point: `{ mode: typed, datatype: int16, endianness: big }`
+- Point: `{ datatype: int16, endianness: big }`
 - Expect: `value = -2`, `raw = "fffe"`.
 
 ### 9.3 `uint16`, little byte order
@@ -302,7 +301,7 @@ lowercase, words space-separated per 16-bit register.
 ### 9.11 `raw` mode holding register
 
 - Registers: `[0x1234]`
-- Point: `{ mode: raw, address: { table: holding, address: 0, count: 1 } }`
+- Point: `{ datatype: bytes, address: { table: holding, address: 0, count: 1 } }`
 - Expect: no `value`, `raw = "1234"`, `quality = "good"`.
 
 ### 9.12 Bad read

@@ -147,8 +147,6 @@ serialize to the [sample](../contract/schemas/sample.schema.json) and
 [command](../contract/schemas/command.schema.json) schemas.
 
 ```rust
-pub enum Mode { Raw, Typed }
-
 pub enum DataType {
     Bool,
     Int8, Uint8, Int16, Uint16, Int32, Uint32, Int64, Uint64,
@@ -170,9 +168,8 @@ pub struct Sample {
     pub device: DeviceId,
     pub protocol: &'static str,
     pub point: PointId,
-    pub mode: Mode,
-    pub datatype: Option<DataType>,   // present when typed
-    pub value: Option<Value>,         // absent for raw and for bad
+    pub datatype: DataType,           // always: `bytes` is the raw case (§1)
+    pub value: Option<Value>,         // absent when quality = Bad
     pub raw: Vec<u8>,                 // serialized to space-grouped hex
     pub quality: Quality,
     pub unit: Option<String>,
@@ -184,8 +181,8 @@ pub struct Sample {
 
 ### 3.1 Shared decode helpers (`decode.rs`)
 
-`typed` mode must decode identically across connectors, so primitive decoding lives in the
-SDK, not in each module:
+Every connector must decode identically, so primitive decoding lives in the SDK, not in each
+module:
 
 ```rust
 pub fn decode_primitive(
@@ -344,7 +341,6 @@ impl Connector for MyConnector {
         Capabilities {
             protocol: "myproto",
             version: env!("CARGO_PKG_VERSION"),
-            modes: vec![Mode::Raw, Mode::Typed],
             datatypes: vec![DataType::Uint16, DataType::Float32],
             point_kinds: vec!["channel".into()],   // protocol-specific kind names
             command_verbs: vec!["write".into()],

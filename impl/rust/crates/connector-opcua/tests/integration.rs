@@ -13,7 +13,7 @@ use opcua::server::node_manager::memory::{simple_node_manager, SimpleNodeManager
 use opcua::server::{ServerBuilder, ServerHandle};
 use opcua::types::{DataTypeId, DataValue, DateTime, NodeId, ObjectId, StatusCode, Variant};
 use tedge_dot_sdk::{
-    Access, Connector, ConnectorConfig, DataType, Endianness, Mode, PointRef, Quality, Sample,
+    Access, Connector, ConnectorConfig, DataType, Endianness, PointRef, Quality, Sample,
     Value, WordOrder,
 };
 use tokio::net::TcpListener;
@@ -75,8 +75,7 @@ async fn start_server() -> (ServerHandle, Arc<SimpleNodeManager>, u16, u16) {
 fn pref(id: &str, datatype: DataType, interval_ms: u64) -> PointRef {
     PointRef {
         id: id.to_string(),
-        mode: Mode::Typed,
-        datatype: Some(datatype),
+        datatype,
         endianness: Endianness::Big,
         word_order: WordOrder::Big,
         access: Access::Read,
@@ -188,7 +187,7 @@ async fn subscription_pushes_data_changes() {
     })
     .await;
     assert_eq!(temp.quality, Quality::Good);
-    assert_eq!(temp.datatype, Some(DataType::Float64));
+    assert_eq!(temp.datatype, DataType::Float64);
     assert_eq!(temp.raw, 42.5f64.to_be_bytes().to_vec());
     // ts must come from the server's source timestamp, i.e. be a plausible recent instant.
     let age = time::OffsetDateTime::now_utc() - temp.ts;
@@ -207,7 +206,7 @@ async fn subscription_pushes_data_changes() {
     })
     .await;
     assert_eq!(counter.quality, Quality::Good);
-    assert_eq!(counter.datatype, Some(DataType::Uint16));
+    assert_eq!(counter.datatype, DataType::Uint16);
 
     // A bad status code on the server must surface as a `bad` quality sample.
     tokio::time::sleep(sampling_gap).await;

@@ -5,7 +5,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use tedge_dot_sdk::model::{DataType, Mode, Quality, Sample, Value};
+use tedge_dot_sdk::model::{DataType, Quality, Sample, Value};
 use time::OffsetDateTime;
 
 #[derive(Arbitrary, Debug)]

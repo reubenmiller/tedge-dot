@@ -350,7 +350,6 @@ fn variant_raw_bytes(v: &Variant) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tedge_dot_sdk::Mode;
 
     fn write_seed(name: &str, contents: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!("ot-conf-opcua-{}-{name}", std::process::id()));
@@ -361,8 +360,7 @@ mod tests {
     fn spec(identifier: &str, datatype: DataType) -> PointSpec {
         PointSpec {
             address: serde_json::json!({ "namespace": 2, "identifier": identifier }),
-            datatype: Some(datatype),
-            mode: Mode::Typed,
+            datatype,
         }
     }
 

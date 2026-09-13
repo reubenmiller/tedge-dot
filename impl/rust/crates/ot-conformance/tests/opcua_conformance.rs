@@ -41,7 +41,7 @@ async fn opcua_connector_is_conformant() {
         "B1-capabilities",
         "B2-sample-big_counter", // uint64 above the JS safe range -> string value
         "B2-sample-label",       // string datatype
-        "B3-raw",
+        "B3-bytes",
         "B4-bad-quality",
         "B5-drop",
         "B5-recovery",

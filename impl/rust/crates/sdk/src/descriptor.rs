@@ -231,7 +231,7 @@ pub fn parameters_of(point: &PointConfig, naming: &SetNaming) -> Vec<Parameter> 
         .map(|set| Parameter {
             point: point.id.clone(),
             set,
-            datatype: point.datatype,
+            datatype: Some(point.datatype),
             access,
             unit: point.unit.clone(),
             name: point.name.clone(),

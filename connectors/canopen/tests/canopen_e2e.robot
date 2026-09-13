@@ -82,18 +82,17 @@ B2 Reads Digital Out As Uint8
     ${value}=    Get Json Field    ${payload}    value
     Should Be Equal As Numbers    ${value}    1
 
-B3 Typed Mode Yields Value And Datatype
-    [Documentation]    Typed-mode samples carry 'value' and the point's 'datatype'. Together
-    ...                with the JSON type of 'value' these say everything the removed
-    ...                'value_repr' did (§5), and nothing static per point is echoed.
+B3 A Decoded Point Yields Value And Datatype
+    [Documentation]    A decoded point carries 'value' and the point's 'datatype'. Together with
+    ...                the JSON type of 'value' these say everything the removed 'value_repr'
+    ...                did (§5), and nothing static per point is echoed. `mode` is gone with
+    ...                §1: `datatype` is the only type system, and `bytes` is the raw case.
     ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/analog_in    timeout=${SAMPLE_TIMEOUT}
-    ${mode}=    Get Json Field    ${payload}    mode
-    Should Be Equal    ${mode}    typed
     ${datatype}=    Get Json Field    ${payload}    datatype
     Should Not Be Empty    ${datatype}
     ${sample}=    Evaluate    json.loads($payload)    modules=json
     Should Be True    isinstance($sample["value"], (int, float, bool, str))
-    FOR    ${gone}    IN    value_repr    ts_ms    unit    access    type    meta    raw    addr
+    FOR    ${gone}    IN    mode    value_repr    ts_ms    unit    access    type    meta    raw    addr
         Dictionary Should Not Contain Key    ${sample}    ${gone}
     END
 
@@ -140,5 +139,7 @@ Sample Should Be Good
     [Arguments]    ${payload}
     ${quality}=    Get Json Field    ${payload}    quality
     Should Be Equal    ${quality}    good
-    ${mode}=    Get Json Field    ${payload}    mode
-    Should Be Equal    ${mode}    typed
+    # `mode` is gone (§1): `datatype` is the only type system, and every sample carries one.
+    ${sample}=    Evaluate    json.loads($payload)    modules=json
+    Dictionary Should Not Contain Key    ${sample}    mode
+    Dictionary Should Contain Key    ${sample}    datatype
