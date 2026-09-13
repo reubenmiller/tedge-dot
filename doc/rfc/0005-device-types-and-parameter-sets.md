@@ -186,14 +186,16 @@ flow records its set when the write is acknowledged and never re-derives it (the
 no samples to correct it), so it keeps publishing to the pre-change set until the mapper
 restarts.
 
-The same applies when a `type` changes on a *running* connector (`set-config`, `define-device`):
-the sets are renamed from the next publish, the fragment under the old name stays retained until
-it is cleared the same way, and `ot-registration` — which registers a device once per mapper
-lifetime — keeps the entity type it first published until the mapper restarts.
+When a `type` changes on a *running* connector (`set-config`, `define-device`) the sets are
+renamed from the next publish. Each readable parameter's next sample names its new set, and
+`ot-parameter-state` drops it from the old one, so a fragment under the old name empties and is
+cleared on its own; one still holding a write-only parameter stays retained until it is cleared
+the same way. `ot-registration` — which registers a device once per mapper lifetime — keeps the
+entity type it first published until the mapper restarts.
 
-Dropping a point from one of several groups has the same consequence at a finer grain: the set
-it left keeps that point's key in its retained fragment until the fragment is cleared the same
-way.
+Dropping a point from one of several groups, or making it read-only, is handled the same way:
+its next sample drops it from the sets it left. A point removed from the configuration is dropped
+from every set as soon as the link status, which lists the configured points, is republished.
 
 `type` itself is optional everywhere, so no configuration fails to load.
 

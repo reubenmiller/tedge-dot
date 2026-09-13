@@ -63,7 +63,10 @@ command whose `service` is not a plain topic level is **not forwarded**: the flo
 **Device parameters** (see [RFC 0003](../doc/rfc/0003-parameter-writes.md)): writable points are
 parameters. `ot-parameter-state` keeps one retained twin fragment per *parameter set*
 (`te/device/<device>///twin/<set>`, keyed by point id) current from the samples (which echo each
-point's `access`) and from acknowledged writes. `ot-command-forward` reshapes a
+point's `access`) and from acknowledged writes. It also drops a point from the twin when the
+retained link status no longer lists it (a reload removed it) or its latest sample no longer
+names that set, and clears a set left empty: Cumulocity sends the whole fragment back with an
+edit, so a stale key would fail every update of the set. `ot-command-forward` reshapes a
 `parameter_update` command — the command type of the
 [tedge-parameter-plugin](https://github.com/thin-edge/tedge-parameter-plugin), whose
 `c8y_ParameterUpdate.template` maps the Cumulocity operation onto it — into ONE connector

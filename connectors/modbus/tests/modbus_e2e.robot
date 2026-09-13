@@ -386,6 +386,26 @@ A Config Edit Is Applied On Reload
         Should Not Contain    ${payload}    "down"    the connector restarted instead of reloading
     END
 
+A Parameter Removed On Reload Leaves The Twin
+    [Documentation]    (flows) A writable point removed from the configuration and another added in
+    ...                its place (twin_only_u16 renamed to renamed_u16) must not stay on the parameter
+    ...                twin fragment: Cumulocity sends the whole fragment back with an operator's
+    ...                edit, so the stale key would fail every update of the set. The reload
+    ...                republishes the link status with the configured points, and the flow drops
+    ...                the ones it no longer lists.
+    [Tags]    flows
+    Wait For Message Containing    ${PARAM_TWIN}    "twin_only_u16":    timeout=${FLOWS_TIMEOUT}
+    DeviceLibrary.Execute Command
+    ...    cmd=sed -i '/^ *id *= *"twin_only_u16"/s/twin_only_u16/renamed_u16/' /etc/connector.toml
+    Clear Messages
+    DeviceLibrary.Execute Command    cmd=kill -HUP 1
+    ${link}=    Wait For Message Containing    ${LINK_TOPIC}    "renamed_u16"    timeout=${SAMPLE_TIMEOUT}
+    Should Not Contain    ${link}    "twin_only_u16"
+    ${twin}=    Wait For Message Containing    ${PARAM_TWIN}    "renamed_u16":    timeout=${FLOWS_TIMEOUT}
+    ${values}=    Evaluate    json.loads($twin)    modules=json
+    Dictionary Should Not Contain Key    ${values}    twin_only_u16
+    Dictionary Should Contain Key    ${values}    temp_u16
+
 A Connector That Cannot Restart After A Reload Is Retried
     [Documentation]    A reload that needs the connector restarted (a new [mqtt] port), into a
     ...                configuration it cannot run with (nothing listens there), takes the connector

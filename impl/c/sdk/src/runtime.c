@@ -144,6 +144,12 @@ static void publish_link_status(rt_t *rt, tdot_device_t *dev) {
      * thin-edge entity type without reading the connector config. */
     if (dev->type)
         cJSON_AddStringToObject(obj, "type", dev->type);
+    /* Every point configured on the device, so a consumer keeping per-point
+     * state (the parameter twin) can drop the ones a reload removed: a
+     * write-only point never samples, so missing samples cannot tell it. */
+    cJSON *points = cJSON_AddArrayToObject(obj, "points");
+    for (size_t j = 0; points && j < dev->npoints; j++)
+        cJSON_AddItemToArray(points, cJSON_CreateString(dev->points[j].id));
     cJSON_AddStringToObject(obj, "since", ts);
     /* Optional device descriptor from the module (contract status schema
      * `info`); the registration flow forwards it into a twin fragment. */

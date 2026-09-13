@@ -535,6 +535,15 @@ fleet of several, and the reason `tedge-dot describe` warns about it. Consumers 
 name from the device `type` echoed in samples and on the link status, so the connector, the
 flows and the cloud-side definitions agree without sharing a configuration file.
 
+**Keeping a set current.** A fragment must hold exactly the parameters the device has now:
+Cumulocity sends the whole fragment back with an operator's edit, so a key for a point that is
+gone fails every update of that set. The flow therefore drops a point from every set when the
+link status (§8) no longer lists it, and from a set its latest sample no longer names (its
+group, its type or its access changed); a set left with no points is cleared with an empty
+retained message rather than published as `{}`. A fragment the flow no longer holds in memory —
+published before the mapper restarted, for a set with no configured point left — is the one
+case it cannot see, and is cleared by hand (see RFC 0005).
+
 See [RFC 0003](../rfc/0003-parameter-writes.md) and
 [RFC 0005](../rfc/0005-device-types-and-parameter-sets.md).
 
@@ -831,13 +840,25 @@ labels live here rather than in the sample envelope.
   `te/device/<device>/ot/<protocol>/status/link`:
 
   ```json
-  { "status": "connected", "type": "acme-meter-v2", "since": "2026-05-30T09:59:00.000Z" }
+  { "status": "connected", "type": "acme-meter-v2", "points": ["boiler_temp", "setpoint"],
+    "since": "2026-05-30T09:59:00.000Z" }
   ```
 
   `type` is the device's declared type (§3.1), present when it has one: the message is retained
   and published before any sample, which is what lets a consumer name the device's parameter
   sets (§5.2) and its thin-edge entity type from the start — including for a device whose
   parameters are all write-only and therefore never sampled.
+
+  `points` lists the id of every point configured on the device, in configuration order. The
+  link status is republished whenever the configuration changes (a management command, a
+  reload, a restart), so this is how a consumer keeping state per point — the parameter twin
+  (§5.2) — learns that a point was *removed*: missing samples cannot say it, since a write-only
+  point is never sampled. SDK runtimes always include it. A consumer MUST read a status without
+  it as saying nothing about the points, not as a device that has none. The list makes the
+  message grow with the device — roughly the length of each id plus three bytes, so a
+  few-hundred-point device passes 10 KiB — and an MQTT client with a small default packet limit
+  must have it raised (the Rust runtime allows 1 MiB). Device names are unique only within one
+  connector, so a consumer keeps the list per device *and* protocol.
 
   with `status` ∈ `{"connected","disconnected","degraded"}` and an optional `reason`.
 
