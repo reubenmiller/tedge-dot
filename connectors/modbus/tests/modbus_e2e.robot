@@ -333,6 +333,23 @@ Refuses A Point Library Path From A Management Command
     # The refusal must not leak what is at that path.
     Should Not Contain    ${reason}    parse
 
+A Config Edit Is Applied On Reload
+    [Documentation]    SIGHUP (`systemctl reload`) makes the connector re-read its config file and
+    ...                apply what changed in place, without a restart: a point added to the file is
+    ...                sampled, and the service health never goes down. reload_e2e.robot covers a
+    ...                directory of configs, with files added, removed and broken.
+    # Inserted into plc1's own point list, right after its `points_from`, so it lands on plc1
+    # whatever devices the file declares after it.
+    DeviceLibrary.Execute Command
+    ...    cmd=sed -i '/^points_from/a [[device.point]]\\nid = "reloaded_u16"\\ndatatype = "uint16"\\naddress = { table = "holding", address = 3, count = 1 }' /etc/connector.toml
+    Clear Messages
+    DeviceLibrary.Execute Command    cmd=kill -HUP 1
+    Wait For Sample    ${SAMPLE_PREFIX}/reloaded_u16    timeout=${SAMPLE_TIMEOUT}
+    ${health}=    Get Messages    ${HEALTH_TOPIC}
+    FOR    ${payload}    IN    @{health}
+        Should Not Contain    ${payload}    "down"    the connector restarted instead of reloading
+    END
+
 Defines A Device From A Point Library Alone
     [Documentation]    A define-device command carrying only connection information and a
     ...                points_from reference must bring up a working device: this is what lets a

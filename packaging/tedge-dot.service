@@ -15,6 +15,9 @@ AmbientCapabilities=CAP_NET_RAW
 # One process runs every connector config found in the directory, each in an
 # in-process restart loop (backoff via TEDGE_DOT_RESTART_DELAY, default 5s).
 ExecStart=/usr/bin/tedge-dot run /etc/tedge/plugins/ot
+# `systemctl reload tedge-dot` applies edited, added and removed configs (SIGHUP) without a
+# restart: a connector whose file is unchanged keeps running untouched.
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5
 TimeoutStopSec=15

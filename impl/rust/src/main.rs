@@ -248,7 +248,14 @@ async fn shutdown_or_deadline(duration: Option<Duration>) {
 }
 
 /// Run every discovered connector concurrently in this process (long-lived service).
+///
+/// SIGHUP reloads: the config paths are discovered again, a connector starts for each new file
+/// and stops for each file that is gone, and every other one re-reads its own file and applies
+/// what changed (see `runtime::run_until_reloadable`).
 async fn run(args: RunArgs) -> ExitCode {
+    // First of all, so a SIGHUP that arrives while the service is still starting is a reload
+    // request rather than the signal's default action, which terminates the process.
+    let mut hangups = hangup_signals();
     let config_args = combined_config_args(&args.configs, &args.config);
     let configs = match discover_configs(&config_args)
         .and_then(|configs| require_rereadable(&configs).map(|()| configs))
@@ -274,96 +281,222 @@ async fn run(args: RunArgs) -> ExitCode {
 
     if configs.is_empty() {
         warn!(
-            "no connector configs found in {:?} — idle; add configs and restart the service",
+            "no connector configs found in {:?} — idle; add configs, then reload (SIGHUP) or \
+             restart the service",
             config_args
         );
-        shutdown_or_deadline(args.duration).await;
-        return ExitCode::SUCCESS;
     }
 
     warn_duplicate_service_names(&configs);
     warn_duplicate_devices(&configs);
-    let restart_delay = restart_delay_from_env();
-
-    // One shutdown trigger shared by every connector: flipped on Ctrl-C / SIGTERM (or when
-    // --duration elapses).
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let mut tasks = tokio::task::JoinSet::new();
+    let mut connectors = Connectors::new(args.output, restart_delay_from_env());
     for path in configs {
+        connectors.start(path);
+    }
+
+    // Ctrl-C / SIGTERM, or --duration elapsing, stops every connector.
+    let stop = shutdown_or_deadline(args.duration);
+    tokio::pin!(stop);
+    loop {
+        tokio::select! {
+            _ = &mut stop => break,
+            Some(()) = next_hangup(&mut hangups) => {
+                info!("SIGHUP: reloading the connector configs");
+                match discover_configs(&config_args) {
+                    Ok(configs) => {
+                        warn_duplicate_service_names(&configs);
+                        warn_duplicate_devices(&configs);
+                        connectors.reconcile(configs).await;
+                    }
+                    Err(e) => error!("reload failed: {e}; the running connectors are unchanged"),
+                }
+            }
+        }
+    }
+    info!("shutdown requested; stopping all connectors");
+    connectors.stop_all().await;
+    ExitCode::SUCCESS
+}
+
+/// SIGHUP, the conventional "reload your configuration" signal (what `systemctl reload` sends
+/// through the unit's `ExecReload`), where it can be listened for.
+#[cfg(unix)]
+type Hangups = Option<tokio::signal::unix::Signal>;
+#[cfg(not(unix))]
+type Hangups = ();
+
+#[cfg(unix)]
+fn hangup_signals() -> Hangups {
+    use tokio::signal::unix::{signal, SignalKind};
+    signal(SignalKind::hangup())
+        .map_err(|e| eprintln!("warning: cannot listen for SIGHUP, so reloads are unavailable: {e}"))
+        .ok()
+}
+
+#[cfg(not(unix))]
+fn hangup_signals() -> Hangups {}
+
+/// Resolves on the next SIGHUP; never, where SIGHUP cannot be listened for.
+async fn next_hangup(hangups: &mut Hangups) -> Option<()> {
+    #[cfg(unix)]
+    if let Some(signal) = hangups {
+        return signal.recv().await;
+    }
+    #[cfg(not(unix))]
+    let _ = hangups;
+    std::future::pending().await
+}
+
+/// How long stopping connectors may take to disconnect and publish their final health status.
+const STOP_GRACE: Duration = Duration::from_secs(10);
+
+/// The connectors this process runs: one supervisor task per config file, by its path.
+struct Connectors {
+    output: Output,
+    restart_delay: Duration,
+    running: std::collections::BTreeMap<PathBuf, Supervised>,
+}
+
+/// One config file's supervisor, and the handles that steer it.
+struct Supervised {
+    stop: tokio::sync::watch::Sender<bool>,
+    reload: std::sync::Arc<tokio::sync::Notify>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Connectors {
+    fn new(output: Output, restart_delay: Duration) -> Self {
+        Connectors {
+            output,
+            restart_delay,
+            running: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn start(&mut self, path: PathBuf) {
         let name = path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
         let span = tracing::info_span!("connector", %name);
-        tasks.spawn(
-            supervise(path, args.output, restart_delay, shutdown_rx.clone()).instrument(span),
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let reload = std::sync::Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn(
+            supervise(path.clone(), self.output, self.restart_delay, stopped, reload.clone())
+                .instrument(span),
         );
+        self.running.insert(path, Supervised { stop, reload, task });
     }
 
-    shutdown_or_deadline(args.duration).await;
-    info!("shutdown requested; stopping all connectors");
-    let _ = shutdown_tx.send(true);
-
-    // Give the connectors a moment to disconnect and publish their final health status.
-    if tokio::time::timeout(Duration::from_secs(10), async {
-        while tasks.join_next().await.is_some() {}
-    })
-    .await
-    .is_err()
-    {
-        warn!("some connectors did not stop in time; exiting anyway");
+    /// Bring the running connectors in line with `configs`, the paths discovered again on a
+    /// reload: stop the connectors whose file is gone, ask each remaining one to re-read its
+    /// file, and start one for every new file.
+    async fn reconcile(&mut self, configs: Vec<PathBuf>) {
+        let gone: Vec<PathBuf> = self
+            .running
+            .keys()
+            .filter(|path| !configs.contains(*path))
+            .cloned()
+            .collect();
+        let mut stopping = Vec::new();
+        for path in gone {
+            if let Some(connector) = self.running.remove(&path) {
+                info!("{} is gone; stopping its connector", path.display());
+                let _ = connector.stop.send(true);
+                stopping.push(connector.task);
+            }
+        }
+        join_connectors(stopping).await;
+        for path in configs {
+            match self.running.get(&path) {
+                // A permit is kept when the supervisor is not waiting right now (it is between
+                // attempts, say), so the request is never lost.
+                Some(connector) => connector.reload.notify_one(),
+                None => {
+                    info!("new config {}; starting its connector", path.display());
+                    self.start(path);
+                }
+            }
+        }
     }
-    ExitCode::SUCCESS
+
+    async fn stop_all(self) {
+        for connector in self.running.values() {
+            let _ = connector.stop.send(true);
+        }
+        join_connectors(self.running.into_values().map(|c| c.task).collect()).await;
+    }
+}
+
+/// Wait for stopping connectors to disconnect and publish their final health, for up to
+/// [`STOP_GRACE`]; whatever has not finished by then is abandoned.
+async fn join_connectors(mut tasks: Vec<tokio::task::JoinHandle<()>>) {
+    let deadline = tokio::time::Instant::now() + STOP_GRACE;
+    for task in &mut tasks {
+        let _ = tokio::time::timeout_at(deadline, task).await;
+    }
+    if tasks.iter().any(|task| !task.is_finished()) {
+        warn!("some connectors did not stop in time; abandoning them");
+        for task in tasks {
+            task.abort();
+        }
+    }
 }
 
 /// Supervise one connector: (re)load its config, run it under the SDK runtime, and restart it
 /// with a backoff when it fails — the config file is re-read on every attempt, so fixing a bad
-/// config is picked up without restarting the service.
+/// config is picked up without restarting the service, and a reload (SIGHUP) cuts the backoff
+/// short.
 async fn supervise(
     path: PathBuf,
     output: Output,
     restart_delay: Duration,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+    reload: std::sync::Arc<tokio::sync::Notify>,
 ) {
     loop {
         info!("starting connector ({})", path.display());
         // Run each attempt on its own task so a panicking protocol module is contained and
         // restarted like any other failure instead of taking the whole service down.
         let attempt = tokio::spawn(
-            run_one(path.clone(), output, shutdown.clone()).in_current_span(),
+            run_one(path.clone(), output, stop.clone(), reload.clone()).in_current_span(),
         )
         .await
         .unwrap_or_else(|join_err| Err(format!("connector task panicked: {join_err}")));
 
-        if *shutdown.borrow() {
+        if *stop.borrow() {
             break;
         }
         match attempt {
-            Ok(()) => break, // clean stop
+            Ok(runtime::RunExit::Stopped) => break, // clean stop
+            // A reload changed what the running connector cannot adopt: start over with it.
+            Ok(runtime::RunExit::Restart) => continue,
             Err(e) => error!(
-                "connector failed: {e}; restarting in {}s",
+                "connector failed: {e}; restarting in {}s, or on reload",
                 restart_delay.as_secs()
             ),
         }
         tokio::select! {
             _ = tokio::time::sleep(restart_delay) => {}
-            _ = shutdown.changed() => break,
+            _ = reload.notified() => info!("reload requested; restarting the connector now"),
+            _ = stop.changed() => break,
         }
     }
 }
 
-/// One connector attempt: parse the config, build the protocol module, run it until it fails
-/// or the shared shutdown trigger fires.
+/// One connector attempt: parse the config, build the protocol module, and run it until it
+/// fails, is stopped, or a reload finds a change it has to be restarted for.
 async fn run_one(
     path: PathBuf,
     output: Output,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
-) -> Result<(), String> {
+    mut stop: tokio::sync::watch::Receiver<bool>,
+    reload: std::sync::Arc<tokio::sync::Notify>,
+) -> Result<runtime::RunExit, String> {
     let config = load_config(&path.display().to_string())?;
     let connector = build_connector(&config.connector.protocol)?;
     let stall = stall_timeout(&config);
-    let shutdown_fut = async move {
-        let _ = shutdown.wait_for(|stop| *stop).await;
+    let stop_fut = async move {
+        let _ = stop.wait_for(|stop| *stop).await;
     };
     match output {
         Output::Mqtt => {
@@ -376,14 +509,35 @@ async fn run_one(
             let progress = runtime::Progress::new();
             let watchdog = stall_watchdog(progress.clone(), stall);
             tokio::select! {
-                result = runtime::run_until_watched(connector, config, path, shutdown_fut, progress) =>
-                    result.map_err(|e| e.to_string()),
+                result = runtime::run_until_reloadable(
+                    connector, config, path, stop_fut, progress, reload,
+                ) => result.map_err(|e| e.to_string()),
                 reason = watchdog => Err(reason),
             }
         }
-        Output::Stdout => runtime::run_stdout_until(connector, config, shutdown_fut)
-            .await
-            .map_err(|e| e.to_string()),
+        // No broker session to keep up here, so a changed file simply restarts the connector
+        // with it; an unchanged or unusable one leaves it running, as in the MQTT runtime.
+        Output::Stdout => {
+            let running = config.clone();
+            let run = runtime::run_stdout_until(connector, config, stop_fut);
+            tokio::pin!(run);
+            loop {
+                tokio::select! {
+                    result = &mut run => {
+                        return result
+                            .map(|()| runtime::RunExit::Stopped)
+                            .map_err(|e| e.to_string());
+                    }
+                    _ = reload.notified() => match load_config(&path.display().to_string()) {
+                        Ok(new) if new == running => {
+                            info!("reload: {} is unchanged", path.display());
+                        }
+                        Ok(_) => return Ok(runtime::RunExit::Restart),
+                        Err(e) => error!("reload: {e}; keeping the running configuration"),
+                    },
+                }
+            }
+        }
     }
 }
 

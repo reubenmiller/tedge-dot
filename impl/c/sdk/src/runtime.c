@@ -62,6 +62,19 @@ static void on_signal(int sig) {
     atomic_store(&g_stop_threads, 1);
 }
 
+/* Bumped by SIGHUP, the conventional "reload your configuration" signal (what
+ * `systemctl reload` sends through the unit's ExecReload). A generation rather
+ * than a flag, because one signal has several readers that each act on it
+ * once: every connector thread re-reads its own file when the generation has
+ * moved past the one it last saw, and the supervisor lists the config paths
+ * again. A lock-free atomic, so the handler may update it. */
+static _Atomic unsigned g_reload_gen = 0;
+
+static void on_hangup(int sig) {
+    (void)sig;
+    atomic_fetch_add(&g_reload_gen, 1);
+}
+
 typedef struct {
     tdot_connector_t *conn;
     tdot_config_t *cfg;
@@ -1065,6 +1078,43 @@ static void publish_status(rt_t *rt, const char *topic, const char *status,
     cJSON_Delete(res);
 }
 
+/* Try `candidate` on the protocol module in place of the running
+ * configuration: release the running transports and connector state, then
+ * configure. On failure the candidate is freed, the running configuration is
+ * configured and connected again, and `reason` says why. Shared by management
+ * commands and reloads. */
+static int try_configure(rt_t *rt, tdot_config_t *candidate, char *reason,
+                         size_t rlen) {
+    tdot_config_t *cfg = rt->cfg;
+    for (size_t i = 0; i < cfg->ndevices; i++)
+        rt->conn->disconnect_device(rt->conn, &cfg->devices[i]);
+    tdot_config_release_protos(cfg);
+    char err[256];
+    if (rt->conn->configure(rt->conn, candidate, err, sizeof err) == 0)
+        return 0;
+    tdot_config_free(candidate);
+    snprintf(reason, rlen, "configure failed: %s", err);
+    char err2[256];
+    if (rt->conn->configure(rt->conn, cfg, err2, sizeof err2) != 0)
+        logmsg("error", "re-configure of the previous config failed: %s", err2);
+    for (size_t i = 0; i < cfg->ndevices; i++) {
+        cfg->devices[i].link = TDOT_LINK_UNKNOWN;
+        connect_device(rt, &cfg->devices[i]);
+    }
+    return -1;
+}
+
+/* Install a candidate the protocol module accepted (try_configure): replace
+ * the running configuration in place (the cfg pointer stays valid), republish
+ * the capability descriptor -- its point_labels follow the configuration (§7)
+ * -- and connect every device with it. */
+static void commit_config(rt_t *rt, tdot_config_t *candidate) {
+    tdot_config_replace(rt->cfg, candidate);
+    publish_capabilities(rt);
+    for (size_t i = 0; i < rt->cfg->ndevices; i++)
+        connect_device(rt, &rt->cfg->devices[i]);
+}
+
 /* Validate the candidate config end to end, persist it, and live-reload:
  * disconnect -> configure(new) -> replace in place -> reconnect. On any
  * failure the running configuration is kept (and re-configured). */
@@ -1121,35 +1171,92 @@ static void handle_management(rt_t *rt, const char *topic, const char *verb,
         return;
     }
 
-    /* Swap: release the running transports and connector state, try the
-     * candidate on the protocol module, fall back to the old config if the
-     * module rejects it. */
-    for (size_t i = 0; i < cfg->ndevices; i++)
-        rt->conn->disconnect_device(rt->conn, &cfg->devices[i]);
-    tdot_config_release_protos(cfg);
-    if (rt->conn->configure(rt->conn, candidate, err, sizeof err) != 0) {
-        tdot_config_free(candidate);
+    if (try_configure(rt, candidate, reason, sizeof reason) != 0) {
         unlink(tmp_path);
-        snprintf(reason, sizeof reason, "configure failed: %s", err);
-        char err2[256];
-        if (rt->conn->configure(rt->conn, cfg, err2, sizeof err2) != 0)
-            logmsg("error", "re-configure of the previous config failed: %s", err2);
-        for (size_t i = 0; i < cfg->ndevices; i++) {
-            cfg->devices[i].link = TDOT_LINK_UNKNOWN;
-            connect_device(rt, &cfg->devices[i]);
-        }
         publish_status(rt, topic, "failed", reason, req);
         logmsg("warn", "cmd %s: %s", verb, reason);
         return;
     }
     if (rename(tmp_path, cfg->path) != 0)
         logmsg("warn", "failed to persist config to %s: %s", cfg->path, strerror(errno));
-    tdot_config_replace(cfg, candidate); /* cfg pointer stays valid */
-    publish_capabilities(rt); /* point_labels follow the configuration (§7) */
-    for (size_t i = 0; i < cfg->ndevices; i++)
-        connect_device(rt, &cfg->devices[i]);
+    commit_config(rt, candidate);
     publish_status(rt, topic, "successful", NULL, req);
     logmsg("info", "cmd %s: applied and persisted to %s", verb, cfg->path);
+}
+
+/* ---- reload (SIGHUP) ------------------------------------------------------ */
+
+/* What a reload did (mirrors `Reloaded` in the Rust runtime). */
+typedef enum {
+    RELOAD_UNCHANGED, /* the file is the configuration already running */
+    RELOAD_KEPT,      /* the file could not be used; the running one is kept */
+    RELOAD_APPLIED,   /* the new configuration was applied in place */
+    RELOAD_RESTART,   /* the change needs the connector restarted with it */
+} reload_t;
+
+/* A change the running connector cannot adopt in place (mirrors
+ * `needs_restart` in the Rust runtime): its MQTT client id, last will and
+ * command subscriptions are named after the service and the protocol, the
+ * protocol selects the module, the client is connected to one broker, and the
+ * stall watchdog takes its limit when the connector starts. */
+static bool needs_restart(const tdot_config_t *running,
+                          const tdot_config_t *candidate) {
+    return strcmp(running->protocol, candidate->protocol) != 0 ||
+           strcmp(running->service_name, candidate->service_name) != 0 ||
+           strcmp(running->mqtt_host, candidate->mqtt_host) != 0 ||
+           running->mqtt_port != candidate->mqtt_port ||
+           running->stall_timeout_s != candidate->stall_timeout_s;
+}
+
+/* Re-read the connector's config file and apply what changed, keeping the
+ * running configuration when the file cannot be used. An unchanged file --
+ * same documents, point libraries included -- is left alone entirely, so a
+ * reload for another connector's file does not reconnect this one's devices. */
+static reload_t reload_from_file(rt_t *rt, bool can_restart) {
+    tdot_config_t *cfg = rt->cfg;
+    if (!cfg->path)
+        return RELOAD_UNCHANGED;
+    char err[256];
+    tdot_config_t *candidate = tdot_config_load(cfg->path, err, sizeof err);
+    if (!candidate) {
+        logmsg("error", "reload: %s; keeping the running configuration", err);
+        return RELOAD_KEPT;
+    }
+    if (needs_restart(cfg, candidate)) {
+        tdot_config_free(candidate);
+        if (!can_restart) {
+            logmsg("error",
+                   "reload: %s changes the service name, protocol, broker or "
+                   "stall timeout, which needs a restart; keeping the running "
+                   "configuration",
+                   cfg->path);
+            return RELOAD_KEPT;
+        }
+        logmsg("info",
+               "reload: %s changes the service name, protocol, broker or stall "
+               "timeout; restarting the connector",
+               cfg->path);
+        return RELOAD_RESTART;
+    }
+    char *before = tdot_config_fingerprint(cfg);
+    char *after = tdot_config_fingerprint(candidate);
+    bool unchanged = before && after && strcmp(before, after) == 0;
+    free(before);
+    free(after);
+    if (unchanged) {
+        logmsg("info", "reload: %s is unchanged", cfg->path);
+        tdot_config_free(candidate);
+        return RELOAD_UNCHANGED;
+    }
+    char reason[TDOT_ERR_MAX];
+    if (try_configure(rt, candidate, reason, sizeof reason) != 0) {
+        logmsg("error", "reload: %s: %s; keeping the running configuration",
+               cfg->path, reason);
+        return RELOAD_KEPT;
+    }
+    commit_config(rt, candidate);
+    logmsg("info", "reload: applied %s", cfg->path);
+    return RELOAD_APPLIED;
 }
 
 /* ---- main loop ------------------------------------------------------------ */
@@ -1172,12 +1279,29 @@ static void push_sink(void *ctx, tdot_device_t *dev, tdot_point_t *pt,
     emit_sample(c->rt, dev, pt, &local);
 }
 
+/* How run_connector ended. */
+#define RUN_STOPPED 0  /* asked to stop: a signal, the duration, the supervisor */
+#define RUN_FAILED -1  /* could not start: configure or the broker failed */
+#define RUN_RESTART 1  /* a reload needs the connector restarted from its file */
+
+/* The supervisor's controls over one running connector. */
+typedef struct {
+    _Atomic int stop; /* stop this connector: its config file is gone */
+    bool can_restart; /* whoever runs it restarts it on RUN_RESTART */
+} run_ctl_t;
+
+static bool stop_requested(const run_ctl_t *ctl) {
+    return g_stop || (ctl && atomic_load(&ctl->stop));
+}
+
 /* Run one connector to completion. Assumes the mosquitto library is already
- * initialised and the SIGINT/SIGTERM handlers are installed by the caller, so
- * it is safe to call from one of several worker threads (each owns its own
- * connector, config and mosquitto client). */
+ * initialised and the signal handlers are installed by the caller, so it is
+ * safe to call from one of several worker threads (each owns its own
+ * connector, config and mosquitto client). A SIGHUP makes it re-read its
+ * config file and apply what changed (reload_from_file). */
 static int run_connector(tdot_connector_t *conn, tdot_config_t *cfg,
-                         const tdot_run_opts_t *opts, progress_t *progress) {
+                         const tdot_run_opts_t *opts, progress_t *progress,
+                         run_ctl_t *ctl) {
     rt_t rt = {.conn = conn,
                .cfg = cfg,
                .output = opts->output,
@@ -1248,11 +1372,25 @@ static int run_connector(tdot_connector_t *conn, tdot_config_t *cfg,
 
     double deadline =
         opts->duration_s > 0 ? tdot_mono() + opts->duration_s : 0;
+    /* The reload generation this connector has acted on: the one current when
+     * it started, since it has just read its file. */
+    unsigned seen_gen = atomic_load(&g_reload_gen);
+    int result = RUN_STOPPED;
 
-    while (!g_stop) {
+    while (!stop_requested(ctl)) {
         double now = tdot_mono();
         if (deadline > 0 && now >= deadline)
             break;
+
+        unsigned gen = atomic_load(&g_reload_gen);
+        if (gen != seen_gen) {
+            seen_gen = gen;
+            if (reload_from_file(&rt, ctl && ctl->can_restart) == RELOAD_RESTART) {
+                result = RUN_RESTART;
+                break;
+            }
+            now = tdot_mono(); /* applying a reload reconnects the devices */
+        }
 
         /* Heartbeat for the stall watchdog: stamped at the top of every tick,
          * so it stops advancing exactly when a protocol call below does not
@@ -1260,7 +1398,7 @@ static int run_connector(tdot_connector_t *conn, tdot_config_t *cfg,
         if (rt.progress)
             atomic_store(&rt.progress->beat_ms, (long long)(now * 1000.0));
 
-        for (size_t i = 0; i < cfg->ndevices && !g_stop; i++) {
+        for (size_t i = 0; i < cfg->ndevices && !stop_requested(ctl); i++) {
             tdot_device_t *dev = &cfg->devices[i];
             if (dev->link == TDOT_LINK_DISCONNECTED) {
                 if (now < dev->reconnect_at)
@@ -1339,25 +1477,67 @@ static int run_connector(tdot_connector_t *conn, tdot_config_t *cfg,
         mosquitto_disconnect(rt.mosq);
         mosquitto_destroy(rt.mosq);
     }
-    return 0;
+    return result;
 }
 
 static void install_signal_handlers(void) {
     struct sigaction sa = {.sa_handler = on_signal};
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
+    struct sigaction hup = {.sa_handler = on_hangup};
+    sigaction(SIGHUP, &hup, NULL);
 }
 
 /* ---- stall watchdog ------------------------------------------------------- */
 
+/* The watchdog's view of the running connectors: the heartbeat slot of each.
+ * Connectors come and go on a reload, so the supervisor adds and removes slots
+ * while the watchdog thread reads them, under `lock`. */
 typedef struct {
-    progress_t *slots;
-    size_t n;
+    pthread_mutex_t lock;
+    progress_t **slots;
+    size_t n, cap;
 } watchdog_t;
 
 /* Exit code used when the watchdog fires, so an operator reading `systemctl
  * status` can tell a wedged connector from a config error (which exits 1). */
 #define TDOT_EXIT_STALLED 70
+
+static void watchdog_add(watchdog_t *wd, progress_t *slot) {
+    pthread_mutex_lock(&wd->lock);
+    if (wd->n == wd->cap) {
+        wd->cap = wd->cap ? wd->cap * 2 : 8;
+        wd->slots = realloc(wd->slots, wd->cap * sizeof *wd->slots);
+    }
+    wd->slots[wd->n++] = slot;
+    pthread_mutex_unlock(&wd->lock);
+}
+
+static void watchdog_remove(watchdog_t *wd, progress_t *slot) {
+    pthread_mutex_lock(&wd->lock);
+    for (size_t i = 0; i < wd->n; i++)
+        if (wd->slots[i] == slot) {
+            wd->slots[i] = wd->slots[--wd->n];
+            break;
+        }
+    pthread_mutex_unlock(&wd->lock);
+}
+
+/* Start a thread with SIGINT, SIGTERM and SIGHUP blocked in it, so those always
+ * land on the supervising thread: a signal handled on a connector thread would
+ * interrupt the protocol library's I/O there (a reload must not turn into a
+ * failed read). */
+static int start_thread(pthread_t *thread, void *(*fn)(void *), void *arg) {
+    sigset_t block, old;
+    sigemptyset(&block);
+    sigaddset(&block, SIGINT);
+    sigaddset(&block, SIGTERM);
+    sigaddset(&block, SIGHUP);
+    pthread_sigmask(SIG_BLOCK, &block, &old);
+    int rc = pthread_create(thread, NULL, fn, arg);
+    pthread_sigmask(SIG_SETMASK, &old, NULL);
+    return rc;
+}
 
 double tdot_runtime_stall_idle(long long beat_ms, long long now_ms,
                                double limit_s) {
@@ -1389,66 +1569,64 @@ double tdot_runtime_watchdog_period(const double *limits, size_t n) {
 
 static void *watchdog_main(void *arg) {
     watchdog_t *wd = arg;
-
-    double *limits = calloc(wd->n, sizeof *limits);
-    for (size_t i = 0; i < wd->n; i++)
-        limits[i] = wd->slots[i].limit_s;
-    double period = tdot_runtime_watchdog_period(limits, wd->n);
-    free(limits);
-    if (period <= 0)
-        return NULL; /* nothing armed; start_watchdog should have caught this */
-
+    double slept = 0;
     while (!atomic_load(&g_stop_threads)) {
         /* Sleep in short slices rather than one long nap: the check only needs
          * to happen every `period`, but shutdown must not wait for it. A single
          * nanosleep(period) would hold the process open for up to 10s after the
          * workers have finished. */
-        double slept = 0;
-        while (slept < period && !atomic_load(&g_stop_threads)) {
-            struct timespec ts = {.tv_sec = 0, .tv_nsec = TICK_MS * 1000000L};
-            nanosleep(&ts, NULL);
-            slept += TICK_MS / 1000.0;
+        struct timespec ts = {.tv_sec = 0, .tv_nsec = TICK_MS * 1000000L};
+        nanosleep(&ts, NULL);
+        slept += TICK_MS / 1000.0;
+
+        pthread_mutex_lock(&wd->lock);
+        /* The period follows the connectors running now: a reload starts and
+         * stops them. */
+        double *limits = calloc(wd->n ? wd->n : 1, sizeof *limits);
+        double period = 0;
+        if (limits) {
+            for (size_t i = 0; i < wd->n; i++)
+                limits[i] = wd->slots[i]->limit_s;
+            period = tdot_runtime_watchdog_period(limits, wd->n);
+            free(limits);
         }
-        if (atomic_load(&g_stop_threads))
-            break;
-        long long now_ms = (long long)(tdot_mono() * 1000.0);
-        for (size_t i = 0; i < wd->n; i++) {
-            progress_t *p = &wd->slots[i];
-            double idle_s = tdot_runtime_stall_idle(atomic_load(&p->beat_ms),
-                                                    now_ms, p->limit_s);
-            if (idle_s < 0)
-                continue;
-            logmsg("error",
-                   "%s: no progress for %.0fs (connector.stall_timeout %.0fs): "
-                   "a protocol call is not returning, restarting the process",
-                   p->name, idle_s, p->limit_s);
-            /* The loop cannot rescue itself -- the hang is inside it -- and a
-             * pthread blocked in a protocol library cannot be safely
-             * cancelled, so the whole process goes down and the service manager
-             * brings it back (Restart=always). Exiting also drops the MQTT
-             * connection, which makes the broker publish the retained last-will
-             * health "down" -- the same observable outcome as the Rust runtime
-             * cancelling the connector. _exit() rather than exit(): no atexit
-             * handler should run while another thread is wedged. */
-            fflush(NULL);
-            _exit(TDOT_EXIT_STALLED);
+        if (period > 0 && slept >= period) {
+            slept = 0;
+            long long now_ms = (long long)(tdot_mono() * 1000.0);
+            for (size_t i = 0; i < wd->n; i++) {
+                progress_t *p = wd->slots[i];
+                double idle_s = tdot_runtime_stall_idle(
+                    atomic_load(&p->beat_ms), now_ms, p->limit_s);
+                if (idle_s < 0)
+                    continue;
+                logmsg("error",
+                       "%s: no progress for %.0fs (connector.stall_timeout "
+                       "%.0fs): a protocol call is not returning, restarting "
+                       "the process",
+                       p->name, idle_s, p->limit_s);
+                /* The loop cannot rescue itself -- the hang is inside it -- and
+                 * a pthread blocked in a protocol library cannot be safely
+                 * cancelled, so the whole process goes down and the service
+                 * manager brings it back (Restart=always). Exiting also drops
+                 * the MQTT connection, which makes the broker publish the
+                 * retained last-will health "down" -- the same observable
+                 * outcome as the Rust runtime cancelling the connector. _exit()
+                 * rather than exit(): no atexit handler should run while
+                 * another thread is wedged. */
+                fflush(NULL);
+                _exit(TDOT_EXIT_STALLED);
+            }
         }
+        pthread_mutex_unlock(&wd->lock);
     }
     return NULL;
 }
 
-/* Start the watchdog thread when at least one connector arms it. Returns true
- * when a thread was created (and must be joined by the caller). */
-static bool start_watchdog(watchdog_t *wd, pthread_t *thread) {
-    bool armed = false;
-    for (size_t i = 0; i < wd->n; i++)
-        if (wd->slots[i].limit_s > 0)
-            armed = true;
-    if (!armed) {
-        logmsg("info", "stall watchdog disabled (connector.stall_timeout = 0)");
-        return false;
-    }
-    return pthread_create(thread, NULL, watchdog_main, wd) == 0;
+/* Whether the stall watchdog guards the connectors: only the long-running
+ * service. A `run --duration` or stdout invocation is a foreground one-shot
+ * whose caller is watching it. */
+static bool watchdog_wanted(const tdot_run_opts_t *opts) {
+    return opts->output == TDOT_OUTPUT_MQTT && opts->duration_s <= 0;
 }
 
 int tdot_runtime_run(tdot_connector_t *conn, tdot_config_t *cfg,
@@ -1457,104 +1635,161 @@ int tdot_runtime_run(tdot_connector_t *conn, tdot_config_t *cfg,
         mosquitto_lib_init();
     install_signal_handlers();
 
-    /* The watchdog only guards the long-running service. A `run --duration` or
-     * stdout invocation is a foreground one-shot whose caller is watching it. */
     progress_t slot = {.beat_ms = 0,
-                       .limit_s = opts->output == TDOT_OUTPUT_MQTT &&
-                                          opts->duration_s <= 0
-                                      ? cfg->stall_timeout_s
-                                      : 0,
+                       .limit_s = watchdog_wanted(opts) ? cfg->stall_timeout_s : 0,
                        .name = cfg->path ? cfg->path : cfg->protocol};
-    watchdog_t wd = {.slots = &slot, .n = 1};
+    watchdog_t wd = {.lock = PTHREAD_MUTEX_INITIALIZER};
     pthread_t wd_thread;
-    bool watching = start_watchdog(&wd, &wd_thread);
+    bool watching = false;
+    if (slot.limit_s > 0) {
+        watchdog_add(&wd, &slot);
+        watching = start_thread(&wd_thread, watchdog_main, &wd) == 0;
+    } else {
+        logmsg("info", "stall watchdog disabled (connector.stall_timeout = 0)");
+    }
 
-    int rc = run_connector(conn, cfg, opts, &slot);
+    /* The connector runs on this caller's thread, with the connector it was
+     * given, so a reload that needs a restart is reported, not applied. */
+    run_ctl_t ctl = {.can_restart = false};
+    int rc = run_connector(conn, cfg, opts, &slot, &ctl);
 
     if (watching) {
         atomic_store(&g_stop_threads, 1); /* wake the watchdog out of its sleep loop */
         pthread_join(wd_thread, NULL);
     }
+    free(wd.slots);
     if (opts->output == TDOT_OUTPUT_MQTT)
         mosquitto_lib_cleanup();
-    return rc;
+    return rc == RUN_FAILED ? -1 : 0;
 }
 
 /* ---- multi-connector supervisor ------------------------------------------- */
 
 /* One process runs every connector config found in a directory, each in its
- * own thread (mirrors the Rust runtime's single-service model). */
+ * own thread (mirrors the Rust runtime's single-service model). The calling
+ * thread supervises them: it restarts a connector whose reload needs it, and
+ * on a reload stops the connectors of files that are gone, starts one for each
+ * new file and tries the configs that could not start again. */
 
 typedef struct {
-    tdot_connector_t *conn;
-    tdot_config_t *cfg;
+    char *path;
     const tdot_run_opts_t *opts;
-    progress_t *progress;
-    int rc;
+    tdot_connector_t *conn; /* NULL while not running */
+    tdot_config_t *cfg;
+    /* One watchdog slot per connector, each with its own stall_timeout, so a
+     * slow serial bus and a fast TCP one can be bounded differently. */
+    progress_t progress;
+    run_ctl_t ctl;
+    pthread_t thread;
+    bool running;     /* a thread was started and has not been joined */
+    _Atomic int done; /* set by the thread once run_connector returned */
+    int rc;           /* run_connector's result, valid once done */
 } worker_t;
 
 static void *worker_main(void *arg) {
     worker_t *w = arg;
-    w->rc = run_connector(w->conn, w->cfg, w->opts, w->progress);
+    w->rc = run_connector(w->conn, w->cfg, w->opts, &w->progress, &w->ctl);
+    atomic_store(&w->done, 1);
     return NULL;
 }
 
-int tdot_runtime_run_configs(const char *const *paths, size_t npaths,
-                             const tdot_run_opts_t *opts) {
-    if (npaths == 0) {
-        logmsg("error", "no connector configs to run");
-        return -1;
-    }
+static worker_t *worker_new(const char *path, const tdot_run_opts_t *opts) {
+    worker_t *w = calloc(1, sizeof *w);
+    w->path = strdup(path);
+    w->opts = opts;
+    return w;
+}
 
-    worker_t *workers = calloc(npaths, sizeof *workers);
-    pthread_t *threads = calloc(npaths, sizeof *threads);
-    progress_t *slots = calloc(npaths, sizeof *slots);
-    size_t started = 0;
-
-    /* Load every config and build its connector up front, so a bad config is
-     * reported before anything starts publishing. */
-    for (size_t i = 0; i < npaths; i++) {
-        char err[256];
-        tdot_config_t *cfg = tdot_config_load(paths[i], err, sizeof err);
-        if (!cfg) {
-            logmsg("error", "%s", err);
-            continue;
-        }
-        tdot_connector_t *conn = tdot_connector_factory(cfg->protocol);
-        if (!conn) {
-            logmsg("error", "%s: unknown protocol '%s'", paths[i],
-                   cfg->protocol);
-            tdot_config_free(cfg);
-            continue;
-        }
-        workers[started].conn = conn;
-        workers[started].cfg = cfg;
-        workers[started].opts = opts;
-        /* One watchdog slot per connector, each with its own stall_timeout, so
-         * a slow serial bus and a fast TCP one can be bounded differently. */
-        slots[started].beat_ms = 0;
-        slots[started].limit_s =
-            opts->output == TDOT_OUTPUT_MQTT && opts->duration_s <= 0
-                ? cfg->stall_timeout_s
-                : 0;
-        slots[started].name = cfg->path ? cfg->path : paths[i];
-        workers[started].progress = &slots[started];
-        logmsg("info", "loaded %s (%s)", paths[i], cfg->protocol);
-        started++;
+/* Load the worker's config and start its connector thread. A config that
+ * cannot be used is logged and the worker left stopped, to be tried again on
+ * the next reload. */
+static bool worker_start(worker_t *w, watchdog_t *wd) {
+    char err[256];
+    tdot_config_t *cfg = tdot_config_load(w->path, err, sizeof err);
+    if (!cfg) {
+        logmsg("error", "%s", err);
+        return false;
     }
-    /* Mirrors the Rust supervisor's warnings: instances sharing a service_name
-     * take over each other's MQTT session, and two of one protocol defining the
-     * same device both own it -- both act on its commands, racing each other's
-     * results. */
-    for (size_t i = 0; i < started; i++) {
-        for (size_t j = i + 1; j < started; j++) {
-            tdot_config_t *a = workers[i].cfg, *b = workers[j].cfg;
+    tdot_connector_t *conn = tdot_connector_factory(cfg->protocol);
+    if (!conn) {
+        logmsg("error", "%s: unknown protocol '%s'", w->path, cfg->protocol);
+        tdot_config_free(cfg);
+        return false;
+    }
+    w->cfg = cfg;
+    w->conn = conn;
+    w->progress.beat_ms = 0;
+    w->progress.limit_s = watchdog_wanted(w->opts) ? cfg->stall_timeout_s : 0;
+    w->progress.name = w->path;
+    w->ctl.stop = 0;
+    w->ctl.can_restart = true;
+    w->done = 0;
+    if (start_thread(&w->thread, worker_main, w) != 0) {
+        logmsg("error", "%s: cannot start a connector thread", w->path);
+        conn->destroy(conn);
+        tdot_config_free(cfg);
+        w->conn = NULL;
+        w->cfg = NULL;
+        return false;
+    }
+    w->running = true;
+    watchdog_add(wd, &w->progress);
+    logmsg("info", "loaded %s (%s)", w->path, cfg->protocol);
+    return true;
+}
+
+/* Wait for the worker's thread (it has returned, or been asked to stop) and
+ * release its connector. */
+static void worker_join(worker_t *w, watchdog_t *wd) {
+    if (!w->running)
+        return;
+    pthread_join(w->thread, NULL);
+    w->running = false;
+    watchdog_remove(wd, &w->progress);
+    w->conn->destroy(w->conn);
+    tdot_config_free(w->cfg);
+    w->conn = NULL;
+    w->cfg = NULL;
+}
+
+static void worker_free(worker_t *w) {
+    free(w->path);
+    free(w);
+}
+
+typedef struct {
+    worker_t **items;
+    size_t n, cap;
+} workers_t;
+
+static void workers_push(workers_t *ws, worker_t *w) {
+    if (ws->n == ws->cap) {
+        ws->cap = ws->cap ? ws->cap * 2 : 8;
+        ws->items = realloc(ws->items, ws->cap * sizeof *ws->items);
+    }
+    ws->items[ws->n++] = w;
+}
+
+/* Mirrors the Rust supervisor's warnings: instances sharing a service_name
+ * take over each other's MQTT session, and two of one protocol defining the
+ * same device both own it -- both act on its commands, racing each other's
+ * results. Checked over the running connectors, at start and after a reload. */
+static void warn_duplicates(const workers_t *ws) {
+    for (size_t i = 0; i < ws->n; i++) {
+        const worker_t *wi = ws->items[i];
+        if (!wi->running)
+            continue;
+        for (size_t j = i + 1; j < ws->n; j++) {
+            const worker_t *wj = ws->items[j];
+            if (!wj->running)
+                continue;
+            tdot_config_t *a = wi->cfg, *b = wj->cfg;
             if (strcmp(a->service_name, b->service_name) == 0)
                 logmsg("warn",
                        "configs %s and %s share service_name '%s'; give each "
                        "connector a unique service_name or they will steal "
                        "each other's MQTT session",
-                       slots[i].name, slots[j].name, a->service_name);
+                       wi->path, wj->path, a->service_name);
             if (strcmp(a->protocol, b->protocol) != 0)
                 continue;
             for (size_t x = 0; x < a->ndevices; x++)
@@ -1563,47 +1798,168 @@ int tdot_runtime_run_configs(const char *const *paths, size_t npaths,
                            "configs %s and %s both define %s device '%s'; "
                            "define each device in one config only or both "
                            "will answer its commands",
-                           slots[i].name, slots[j].name, a->protocol,
-                           a->devices[x].name);
+                           wi->path, wj->path, a->protocol, a->devices[x].name);
+        }
+    }
+}
+
+/* A reload (SIGHUP), from the supervisor's side: list the config paths again
+ * (when the caller can), stop the connectors whose file is gone, try the
+ * configs that could not start again, and start a connector for every new
+ * file. The running connectors re-read their own files -- run_connector
+ * watches the same generation. */
+static void supervise_reload(workers_t *ws, const tdot_run_opts_t *opts,
+                             watchdog_t *wd) {
+    char **paths = NULL;
+    size_t npaths = 0;
+    bool listed = false;
+    if (opts->discover) {
+        if (opts->discover(opts->discover_ctx, &paths, &npaths) == 0)
+            listed = true;
+        else
+            logmsg("error", "reload: cannot list the config paths; the "
+                            "running connectors are unchanged");
+    }
+
+    if (listed) {
+        for (size_t i = 0; i < ws->n;) {
+            worker_t *w = ws->items[i];
+            bool wanted = false;
+            for (size_t j = 0; j < npaths && !wanted; j++)
+                wanted = strcmp(paths[j], w->path) == 0;
+            if (wanted) {
+                i++;
+                continue;
+            }
+            logmsg("info", "%s is gone; stopping its connector", w->path);
+            atomic_store(&w->ctl.stop, 1);
+            worker_join(w, wd);
+            worker_free(w);
+            memmove(&ws->items[i], &ws->items[i + 1],
+                    (ws->n - i - 1) * sizeof *ws->items);
+            ws->n--;
         }
     }
 
-    if (started == 0) {
-        free(workers);
-        free(threads);
-        free(slots);
-        logmsg("error", "no valid connector configs");
+    for (size_t i = 0; i < ws->n; i++)
+        if (!ws->items[i]->running)
+            worker_start(ws->items[i], wd);
+
+    if (listed) {
+        for (size_t j = 0; j < npaths; j++) {
+            bool known = false;
+            for (size_t i = 0; i < ws->n && !known; i++)
+                known = strcmp(ws->items[i]->path, paths[j]) == 0;
+            if (!known) {
+                logmsg("info", "new config %s; starting its connector", paths[j]);
+                worker_t *w = worker_new(paths[j], opts);
+                workers_push(ws, w);
+                worker_start(w, wd);
+            }
+        }
+        for (size_t j = 0; j < npaths; j++)
+            free(paths[j]);
+        free(paths);
+    }
+    warn_duplicates(ws);
+}
+
+int tdot_runtime_run_configs(const char *const *paths, size_t npaths,
+                             const tdot_run_opts_t *opts) {
+    if (npaths == 0) {
+        logmsg("error", "no connector configs to run");
         return -1;
     }
-
+    /* First of all, so a SIGHUP while starting up is a reload request rather
+     * than the signal's default action, which terminates the process. */
+    install_signal_handlers();
     if (opts->output == TDOT_OUTPUT_MQTT)
         mosquitto_lib_init();
-    install_signal_handlers();
 
-    watchdog_t wd = {.slots = slots, .n = started};
+    watchdog_t wd = {.lock = PTHREAD_MUTEX_INITIALIZER};
+    workers_t ws = {0};
+    size_t started = 0;
+    for (size_t i = 0; i < npaths; i++) {
+        worker_t *w = worker_new(paths[i], opts);
+        workers_push(&ws, w);
+        if (worker_start(w, &wd))
+            started++;
+    }
+    warn_duplicates(&ws);
+
+    int rc = 0;
     pthread_t wd_thread;
-    bool watching = start_watchdog(&wd, &wd_thread);
+    bool watching = false;
+    if (started == 0) {
+        logmsg("error", "no valid connector configs");
+        rc = -1;
+        goto out;
+    }
+    if (watchdog_wanted(opts))
+        watching = start_thread(&wd_thread, watchdog_main, &wd) == 0;
 
-    for (size_t i = 0; i < started; i++)
-        pthread_create(&threads[i], NULL, worker_main, &workers[i]);
-    for (size_t i = 0; i < started; i++)
-        pthread_join(threads[i], NULL);
+    unsigned seen_gen = atomic_load(&g_reload_gen);
+    while (!g_stop) {
+        struct timespec ts = {.tv_sec = 0, .tv_nsec = TICK_MS * 1000000L};
+        nanosleep(&ts, NULL);
+
+        /* Reap the connectors that returned: restart one whose reload needs
+         * it, and remember a failure. */
+        size_t alive = 0;
+        for (size_t i = 0; i < ws.n; i++) {
+            worker_t *w = ws.items[i];
+            if (w->running && atomic_load(&w->done)) {
+                int wrc = w->rc;
+                worker_join(w, &wd);
+                if (wrc == RUN_RESTART && !g_stop) {
+                    logmsg("info", "restarting the connector of %s", w->path);
+                    worker_start(w, &wd);
+                } else if (wrc == RUN_FAILED) {
+                    rc = -1;
+                }
+            }
+            if (w->running)
+                alive++;
+        }
+        /* Every connector has stopped -- the --duration elapsed, or none could
+         * keep running -- so this process has nothing left to do. Unless a
+         * reload removed every config: that idles until a reload adds one, as
+         * the Rust build does. */
+        if (alive == 0 && !(ws.n == 0 && opts->discover))
+            break;
+
+        unsigned gen = atomic_load(&g_reload_gen);
+        if (gen != seen_gen) {
+            seen_gen = gen;
+            supervise_reload(&ws, opts, &wd);
+        }
+    }
+
+out:
+    /* Stop whatever still runs (a signal already stopped every connector;
+     * this covers leaving the loop any other way) and wait for it. */
+    for (size_t i = 0; i < ws.n; i++)
+        atomic_store(&ws.items[i]->ctl.stop, 1);
+    for (size_t i = 0; i < ws.n; i++) {
+        worker_t *w = ws.items[i];
+        if (w->running) {
+            pthread_join(w->thread, NULL);
+            if (w->rc == RUN_FAILED)
+                rc = -1;
+            w->running = false;
+            watchdog_remove(&wd, &w->progress);
+            w->conn->destroy(w->conn);
+            tdot_config_free(w->cfg);
+        }
+        worker_free(w);
+    }
     if (watching) {
         atomic_store(&g_stop_threads, 1); /* wake the watchdog out of its sleep loop */
         pthread_join(wd_thread, NULL);
     }
-
-    int rc = 0;
-    for (size_t i = 0; i < started; i++) {
-        if (workers[i].rc != 0)
-            rc = -1;
-        workers[i].conn->destroy(workers[i].conn);
-        tdot_config_free(workers[i].cfg);
-    }
+    free(ws.items);
+    free(wd.slots);
     if (opts->output == TDOT_OUTPUT_MQTT)
         mosquitto_lib_cleanup();
-    free(workers);
-    free(threads);
-    free(slots);
     return rc;
 }

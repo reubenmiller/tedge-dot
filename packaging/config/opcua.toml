@@ -2,9 +2,9 @@
 #
 # No devices are configured out of the box, so the service starts and stays
 # active on a fresh install. Add `[[device]]` sections (see the demo configs in
-# /usr/share/tedge-dot/demo/ or the project README) and restart the service:
+# /usr/share/tedge-dot/demo/ or the project README) and reload the service:
 #
-#   sudo systemctl restart tedge-dot
+#   sudo systemctl reload tedge-dot
 
 [connector]
 protocol      = "opcua"

@@ -6,7 +6,7 @@ use crate::model::{DataType, Mode, Transform};
 use serde::Deserialize;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ConnectorConfig {
     pub connector: ConnectorSection,
     #[serde(default)]
@@ -18,7 +18,7 @@ pub struct ConnectorConfig {
     pub devices: Vec<DeviceConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ConnectorSection {
     pub protocol: String,
     /// The configured service name; read it through [`ConnectorSection::service_name`], which
@@ -50,7 +50,7 @@ pub struct ConnectorSection {
     pub point_library_path: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct MqttSection {
     #[serde(default = "default_mqtt_host")]
     pub host: String,
@@ -67,7 +67,7 @@ impl Default for MqttSection {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct DeviceConfig {
     pub name: String,
     /// Protocol-specific device address (opaque to the contract).
@@ -99,7 +99,7 @@ pub struct DeviceConfig {
     pub points: Vec<PointConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct PointConfig {
     pub id: String,
     #[serde(default)]

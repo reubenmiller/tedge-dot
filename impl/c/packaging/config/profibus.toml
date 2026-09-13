@@ -3,9 +3,9 @@
 # its serial dependency does not cross-compile.)
 #
 # No devices are configured out of the box, so the service starts and stays
-# active on a fresh install. Add `[[device]]` sections and restart the service:
+# active on a fresh install. Add `[[device]]` sections and reload the service:
 #
-#   sudo systemctl restart tedge-dot
+#   sudo systemctl reload tedge-dot
 
 [connector]
 protocol      = "profibus"

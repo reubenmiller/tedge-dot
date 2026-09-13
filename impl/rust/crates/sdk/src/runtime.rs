@@ -381,13 +381,46 @@ pub async fn run_until(
 /// Same as [`run_until`], but stamping `progress` on every loop iteration so a supervisor can
 /// tell a wedged connector from a quiet one and restart it (see [`Progress`]).
 pub async fn run_until_watched(
+    connector: Box<dyn Connector>,
+    config: ConnectorConfig,
+    config_path: PathBuf,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+    progress: Progress,
+) -> Result<(), BoxError> {
+    let never = Arc::new(tokio::sync::Notify::new());
+    run_until_reloadable(connector, config, config_path, shutdown, progress, never)
+        .await
+        .map(|_| ())
+}
+
+/// How [`run_until_reloadable`] ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunExit {
+    /// `shutdown` resolved.
+    Stopped,
+    /// A reload found a change the running connector cannot adopt in place — another service
+    /// name, protocol, broker or stall timeout: the caller restarts it from the file.
+    Restart,
+}
+
+/// Same as [`run_until_watched`], and re-reading `config_path` each time `reload` is notified.
+/// The host binary notifies it on SIGHUP, so an edited configuration takes effect without
+/// restarting the service.
+///
+/// A reload is applied in place, the way a management command's change is (§6.3): the protocol
+/// module is reconfigured, every device reconnected, and the retained capability descriptor and
+/// link status republished, while the MQTT session — and with it the service health — stays up.
+/// A file that no longer loads, or that the protocol module rejects, is reported and the running
+/// configuration kept; a file that resolves to the configuration already running changes nothing.
+pub async fn run_until_reloadable(
     mut connector: Box<dyn Connector>,
     mut config: ConnectorConfig,
     config_path: PathBuf,
     shutdown: impl std::future::Future<Output = ()> + Send,
     progress: Progress,
-) -> Result<(), BoxError> {
-    let limits = Limits::from_config(&config);
+    reload: Arc<tokio::sync::Notify>,
+) -> Result<RunExit, BoxError> {
+    let mut limits = Limits::from_config(&config);
     let protocol = config.connector.protocol.clone();
     let service = config.connector.service_name();
 
@@ -508,6 +541,9 @@ pub async fn run_until_watched(
     let mut tick = tokio::time::interval(Duration::from_millis(200));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     tokio::pin!(shutdown);
+    // Set inside the loop: acted on after the iteration (`rearm`), or once the loop ends (`exit`).
+    let mut rearm = false;
+    let mut exit = RunExit::Stopped;
 
     loop {
         tokio::select! {
@@ -623,37 +659,54 @@ pub async fn run_until_watched(
                 }
                 progress.mark();
             }
+            _ = reload.notified() => {
+                match reload_from_file(
+                    &mut connector, &client, &mut links, &mut config, &mut config_doc,
+                    &config_path, &cap_topic, limits,
+                ).await {
+                    Reloaded::Applied => rearm = true,
+                    Reloaded::Unchanged | Reloaded::Kept => {}
+                    Reloaded::Restart => {
+                        exit = RunExit::Restart;
+                        break;
+                    }
+                }
+                progress.mark();
+            }
             Some(p) = incoming_rx.recv() => {
                 match handle_command(
                     &mut connector, &client, &protocol, &service, &mut links,
                     &mut config, &mut config_doc, &config_path, &cap_topic,
                     &p.topic, &p.payload, limits,
                 ).await {
-                    // A management command changed the config: re-establish push
-                    // delivery (the reload disconnected the old subscriptions) and
-                    // rebuild the polling schedule.
-                    Ok(true) => {
-                        subscribed = setup_subscriptions(
-                            &mut connector, &config, caps.subscribe, &sample_tx, limits,
-                        ).await;
-                        schedule = build_schedule(&config, &subscribed);
-                        meta_index = build_meta_index(&config);
-                        seq_counters.clear();
-                        // the management path already reconnected every device
-                        reconnects.clear();
-                    }
+                    // A management command changed the config (see below).
+                    Ok(true) => rearm = true,
                     Ok(false) => {}
                     Err(e) => warn!("command handling error: {e}"),
                 }
                 progress.mark();
             }
         }
+        // A new configuration was applied — by a management command or a reload: re-establish
+        // push delivery (reconnecting dropped the old subscriptions), and rebuild the polling
+        // schedule and everything else derived from the configuration.
+        if std::mem::take(&mut rearm) {
+            limits = Limits::from_config(&config);
+            subscribed = setup_subscriptions(
+                &mut connector, &config, caps.subscribe, &sample_tx, limits,
+            ).await;
+            schedule = build_schedule(&config, &subscribed);
+            meta_index = build_meta_index(&config);
+            seq_counters.clear();
+            // applying the configuration already reconnected every device
+            reconnects.clear();
+        }
     }
 
     // 7. Clean shutdown.
     let _ = bounded(limits, "disconnect", connector.disconnect()).await;
     publish_health(&client, &health_topic, "down").await.ok();
-    Ok(())
+    Ok(exit)
 }
 
 /// Run the connector without a broker until `shutdown` resolves: every sample is printed to
@@ -1476,13 +1529,37 @@ async fn handle_management(
         warn!("failed to persist config to {}: {e}", config_path.display());
     }
     *config_doc = candidate;
+    commit_config(connector, client, links, config, new_config, cap_topic, limits).await?;
+
+    publish_retained(
+        client,
+        topic,
+        with_origin(serde_json::json!({ "status": "successful" }), origin).to_string(),
+    )
+    .await?;
+    info!(%verb, "management command applied");
+    Ok(true)
+}
+
+/// Install a configuration the protocol module has already accepted (`configure` succeeded):
+/// replace the running one, republish the capability descriptor, and reconnect every device with
+/// it, republishing their link status. Shared by management commands and reloads.
+async fn commit_config(
+    connector: &mut Box<dyn Connector>,
+    client: &AsyncClient,
+    links: &mut LinkTracker,
+    config: &mut ConnectorConfig,
+    new_config: ConnectorConfig,
+    cap_topic: &str,
+    limits: Limits,
+) -> Result<(), BoxError> {
     *config = new_config;
 
     // Republish the capability descriptor: its `point_labels` (§7) are derived from the
-    // configuration, which this verb just changed, and the retained message would otherwise
-    // describe the configuration as it was at startup — labels for points that are gone, none
-    // for a device just defined. Everything else in it is a property of the build and
-    // unchanged, so this is cheap and idempotent.
+    // configuration, which just changed, and the retained message would otherwise describe the
+    // configuration as it was at startup — labels for points that are gone, none for a device
+    // just defined. Everything else in it is a property of the build and unchanged, so this is
+    // cheap and idempotent.
     let mut caps = connector.capabilities();
     augment_management_caps(&mut caps);
     augment_batch_caps(&mut caps);
@@ -1494,15 +1571,94 @@ async fn handle_management(
         Ok(reports) => links.publish_reports(client, &reports, config).await?,
         Err(e) => warn!("reconnect after reconfigure failed: {e}"),
     }
+    Ok(())
+}
 
-    publish_retained(
-        client,
-        topic,
-        with_origin(serde_json::json!({ "status": "successful" }), origin).to_string(),
-    )
-    .await?;
-    info!(%verb, "management command applied");
-    Ok(true)
+/// What a reload ([`run_until_reloadable`]) did.
+#[derive(Debug, PartialEq, Eq)]
+enum Reloaded {
+    /// The file resolves to the configuration already running: nothing was touched.
+    Unchanged,
+    /// The file could not be used; the running configuration was kept.
+    Kept,
+    /// The new configuration was applied in place.
+    Applied,
+    /// The change needs the connector restarted with it (see [`needs_restart`]).
+    Restart,
+}
+
+/// A change the running connector cannot adopt in place: its MQTT client id, last will and
+/// command subscriptions are named after the service and the protocol, the protocol selects the
+/// module, the client is connected to one broker, and the host's stall watchdog takes its limit
+/// when the connector starts. The C runtime draws the same line (`needs_restart` in runtime.c).
+fn needs_restart(running: &ConnectorConfig, new: &ConnectorConfig) -> bool {
+    running.connector.protocol != new.connector.protocol
+        || running.connector.service_name() != new.connector.service_name()
+        || running.mqtt != new.mqtt
+        || running.connector.stall_timeout != new.connector.stall_timeout
+}
+
+/// Re-read the connector's config file and apply what changed, keeping the running configuration
+/// when the file cannot be used. A file that resolves to the running configuration — point
+/// libraries included — leaves everything untouched, so a reload meant for another connector's
+/// file does not reconnect this one's devices.
+#[allow(clippy::too_many_arguments)]
+async fn reload_from_file(
+    connector: &mut Box<dyn Connector>,
+    client: &AsyncClient,
+    links: &mut LinkTracker,
+    config: &mut ConnectorConfig,
+    config_doc: &mut DocumentMut,
+    config_path: &Path,
+    cap_topic: &str,
+    limits: Limits,
+) -> Reloaded {
+    let path = config_path.display();
+    let loaded = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("cannot read {path}: {e}"))
+        .and_then(|text| {
+            let doc = text
+                .parse::<DocumentMut>()
+                .map_err(|e| format!("{path}: {e}"))?;
+            let base_dir = crate::library::config_base_dir(config_path);
+            let new_config =
+                crate::library::resolve(&text, base_dir).map_err(|e| format!("{path}: {e}"))?;
+            Ok((doc, new_config))
+        });
+    let (doc, new_config) = match loaded {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            error!("reload: {e}; keeping the running configuration");
+            return Reloaded::Kept;
+        }
+    };
+    if needs_restart(config, &new_config) {
+        info!(
+            "reload: {path} changes the service name, protocol, broker or stall timeout; \
+             restarting the connector"
+        );
+        return Reloaded::Restart;
+    }
+    if new_config == *config {
+        // The document is still taken: a later management command patches and persists it, and
+        // must start from the file as it is now (its comments, say), not as it was loaded.
+        *config_doc = doc;
+        info!("reload: {path} is unchanged");
+        return Reloaded::Unchanged;
+    }
+    if let Err(e) = connector.configure(&new_config) {
+        let _ = connector.configure(config); // restore the running configuration
+        error!("reload: {path}: configure failed: {e}; keeping the running configuration");
+        return Reloaded::Kept;
+    }
+    *config_doc = doc;
+    if let Err(e) =
+        commit_config(connector, client, links, config, new_config, cap_topic, limits).await
+    {
+        warn!("reload: {path}: {e}");
+    }
+    info!("reload: applied {path}");
+    Reloaded::Applied
 }
 
 async fn publish_failed(
@@ -1980,6 +2136,43 @@ default_mode = "typed"
             assert!(err.contains(key), "{err}");
             assert_eq!(d.to_string(), BASE, "the document must be left untouched");
         }
+    }
+
+    /// A reload applies in place what the running connector can adopt, and restarts it only for
+    /// what it cannot: its MQTT identity (service name, protocol, broker) and the stall timeout
+    /// the host's watchdog took when it started.
+    #[test]
+    fn reload_restarts_only_for_what_cannot_change_in_place() {
+        let running: ConnectorConfig = toml::from_str(BASE).unwrap();
+        let edited = |from: &str, to: &str| -> ConnectorConfig {
+            assert!(BASE.contains(from), "fixture lacks {from}");
+            toml::from_str(&BASE.replace(from, to)).unwrap()
+        };
+        assert!(!needs_restart(&running, &running.clone()));
+        assert!(!needs_restart(&running, &edited("poll_interval = \"2s\"", "poll_interval = \"9s\"")));
+        assert!(!needs_restart(&running, &edited("address = 7", "address = 8")));
+        assert!(!needs_restart(&running, &edited("log_level = \"info\"", "log_level = \"debug\"")));
+
+        let service = edited("protocol = \"modbus\"", "protocol = \"modbus\"\nservice_name = \"plant\"");
+        assert!(needs_restart(&running, &service));
+        assert!(needs_restart(&running, &edited("protocol = \"modbus\"", "protocol = \"opcua\"")));
+        assert!(needs_restart(&running, &edited("port = 1883", "port = 1884")));
+        let stall = edited("log_level = \"info\"", "log_level = \"info\"\nstall_timeout = \"5m\"");
+        assert!(needs_restart(&running, &stall));
+    }
+
+    /// "Unchanged" is judged on the resolved configuration, so reloading after an edit that does
+    /// not change what the connector does — a comment, say — touches nothing, while any real
+    /// change does not compare equal.
+    #[test]
+    fn a_reload_sees_through_edits_that_change_nothing() {
+        let running: ConnectorConfig = toml::from_str(BASE).unwrap();
+        let commented: ConnectorConfig =
+            toml::from_str(&format!("# edited by the operator\n{BASE}")).unwrap();
+        assert_eq!(running, commented);
+        let moved: ConnectorConfig =
+            toml::from_str(&BASE.replace("address = 7", "address = 8")).unwrap();
+        assert_ne!(running, moved);
     }
 
     #[test]

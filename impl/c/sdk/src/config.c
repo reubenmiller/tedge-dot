@@ -1010,6 +1010,17 @@ char *tdot_config_root_json(const tdot_config_t *cfg) {
     return toml_table_to_json_string(cfg->root);
 }
 
+char *tdot_config_fingerprint(const tdot_config_t *cfg) {
+    cJSON *all = cJSON_CreateArray();
+    cJSON_AddItemToArray(all, cfg->root ? toml_to_json_table(cfg->root)
+                                        : cJSON_CreateObject());
+    for (size_t i = 0; i < cfg->nlibs; i++)
+        cJSON_AddItemToArray(all, toml_to_json_table(cfg->libs[i]));
+    char *text = cJSON_PrintUnformatted(all);
+    cJSON_Delete(all);
+    return text;
+}
+
 void tdot_config_free(tdot_config_t *cfg) {
     if (!cfg)
         return;

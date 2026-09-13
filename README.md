@@ -86,12 +86,21 @@ installs:
 - demo configs in `/usr/share/tedge-dot/demo/`, pre-wired to the Docker
   simulators in [demo/](demo/) — see there for the all-protocols demo.
 
-Add `[[device]]` sections to a config (each file documents the syntax), then:
+Add `[[device]]` sections to a config (each file documents the syntax), then reload the
+service — it applies edited, added and removed configs without restarting:
 
 ```sh
-sudo systemctl restart tedge-dot
+sudo systemctl reload tedge-dot    # SIGHUP; a restart works too
 tedge mqtt sub 'te/+/+/+/+/m/+'    # watch the measurements arrive
 ```
+
+A reload re-reads every config file and the point libraries they reference. A connector whose
+configuration is unchanged keeps running untouched; one whose file changed applies it in place,
+reconnecting its devices while its MQTT session and service health stay up; a file that cannot
+be used is logged and its connector keeps the configuration it has. A new file starts a
+connector and a removed file stops its connector. A change of `service_name`, `protocol`,
+`[mqtt]` or `stall_timeout` restarts that one connector, and `log_level` needs a service
+restart.
 
 ## One point list, many devices
 
