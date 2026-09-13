@@ -134,8 +134,8 @@ jobs:
           dpkg-deb -f "$deb" Conflicts | grep -q 'tedge-dot-c'
           contents=$(dpkg-deb -c "$deb")
           echo "$contents" | grep -q '/usr/bin/tedge-dot$'
-          for flow in ot-measurement ot-registration ot-command-forward \
-                      ot-command-result ot-parameter-state; do
+          for flow in ot-measurement ot-registration ot-parameter-update \
+                      ot-parameter-result ot-parameter-state; do
             echo "$contents" | grep -q "/etc/tedge/mappers/c8y/flows/$flow/flow.toml"
             echo "$contents" | grep -q "/etc/tedge/mappers/c8y/flows/$flow/main.js"
           done
@@ -263,8 +263,8 @@ jobs:
           # The connector is a dumb driver: without the flows nothing it publishes
           # reaches the cloud, so the package must deploy the core pipeline active.
           echo "== flows deployed =="
-          for flow in ot-measurement ot-registration ot-command-forward \
-                      ot-command-result ot-parameter-state; do
+          for flow in ot-measurement ot-registration ot-parameter-update \
+                      ot-parameter-result ot-parameter-state; do
             test -f "/etc/tedge/mappers/c8y/flows/$flow/flow.toml"
             test -f "/etc/tedge/mappers/c8y/flows/$flow/main.js"
           done

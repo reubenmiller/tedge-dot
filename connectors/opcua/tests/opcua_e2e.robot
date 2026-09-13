@@ -318,13 +318,33 @@ Write Batch Rejects An Empty Request
     ${reason}=    Get Json Field    ${result}    reason
     Should Contain    ${reason}    no writes
 
-Describe Renders The Parameter Set Definition
-    [Documentation]    `tedge-dot describe` renders this config's writable points as the
-    ...                Cumulocity DTM property definition a tenant admin registers once, with
-    ...                the same keys the parameter twin fragment carries. Runs against whichever
-    ...                implementation the stack was built with (IMPL=rust|c).
+The Manifest CLI Prints What The Service Publishes
+    [Documentation]    `tedge-dot manifest` (§8) prints the manifests a configuration would
+    ...                publish, off the same code, with no broker and no device. Compared field
+    ...                for field against the retained message, because the two drifting apart is
+    ...                the failure this command exists to prevent. `info` is the exception: it
+    ...                comes from a live `connect`, which a CLI that talks to nothing cannot
+    ...                have. Runs against whichever implementation the stack was built with
+    ...                (IMPL=rust|c).
+    ${retained}=    Wait For Retained    ${MANIFEST_TOPIC}    timeout=${READY_TIMEOUT}
+    ${printed}=    DeviceLibrary.Execute Command
+    ...    cmd=tedge-dot manifest -c /etc/connector.toml -d ${DEVICE}    strip=${True}
+    ${documents}=    Evaluate    json.loads($printed)    modules=json
+    Length Should Be    ${documents}    1    one device asked for, one manifest printed
+    Should Be Equal    ${documents}[0][device]    ${DEVICE}
+    ${actual}=    Evaluate
+    ...    {k: v for k, v in $documents[0].items() if k not in ("device", "info")}    modules=json
+    ${expected}=    Evaluate
+    ...    {k: v for k, v in json.loads($retained).items() if k != "info"}    modules=json
+    Should Be Equal    ${actual}    ${expected}
+
+The Manifest CLI Renders The Parameter Set Definition
+    [Documentation]    `tedge-dot manifest --format c8y-dtm` (§8.1) renders this config's
+    ...                writable points as the Cumulocity DTM property definition a tenant admin
+    ...                registers once, with the same keys the parameter twin fragment carries —
+    ...                from the device manifest, not from the configuration file.
     ${output}=    DeviceLibrary.Execute Command
-    ...    cmd=tedge-dot describe -c /etc/connector.toml --compact    strip=${True}
+    ...    cmd=tedge-dot manifest -c /etc/connector.toml --format c8y-dtm    strip=${True}
     # The first JSON line, not the first line: a warning on stderr (§5.2) can be interleaved.
     ${definition}=    Evaluate    json.loads([l for l in $output.splitlines() if l.startswith("{")][0])    modules=json
     Should Be Equal    ${definition}[identifier]    ${PARAM_SET}

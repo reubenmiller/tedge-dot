@@ -15,7 +15,8 @@ OPC-UA or BACnet samples, because every connector emits the same envelope.
 | [modbus-alarm](modbus-alarm/) | `mapper.py` alarm state machine | `m/<group>` | `a/<type>` alarm (with hysteresis) |
 | [device-registration](device-registration/) | `reader.py` child-device registration | `ot/<protocol>/status/link` | `te/device/<device>//` registration |
 
-Each package contains `flow.toml`, `main.js`, `params.toml.template`, and a `TEST.md` with a
+Each package contains `flow.toml`, `main.js`, a `params.toml.template` when it has settings,
+and a `TEST.md` with a
 runnable `tedge flows test` command and expected output, so correctness can be shown without a
 device or the cloud.
 

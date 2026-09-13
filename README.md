@@ -25,7 +25,7 @@ packages that both install `/usr/bin/tedge-dot`:
 The two are mutually exclusive — a host installs one or the other — and a
 config, a flow or a cloud integration built against one works unchanged against
 the other. They run the **same** e2e, cloud and conformance suites, share the
-same golden decode vectors, and are checked against each other for `describe`
+same golden decode vectors, and are checked against each other for `manifest`
 output; the remaining behavioural differences are listed, and enforced by test
 tags, in [impl/c/README.md](impl/c/README.md#parity-with-the-rust-implementation).
 
@@ -74,7 +74,7 @@ Grab a `.deb`/`.rpm`/`.apk` (or a plain binary archive) from the
 [releases page](https://github.com/thin-edge/tedge-dot/releases). The package
 installs:
 
-- `tedge-dot` — the connector binary (also a standalone `read`/`write`/`describe` CLI);
+- `tedge-dot` — the connector binary (also a standalone `read`/`write`/`manifest` CLI);
 - one default config per protocol in `/etc/tedge/plugins/ot/` (no devices
   configured, so the service starts and idles until you add some);
 - `tedge-dot.service` — a single systemd service: one `tedge-dot` process runs
@@ -173,19 +173,20 @@ thin-edge commands, never through a second protocol session:
 
 ```sh
 # one point (the contract `write` verb)
-tedge mqtt pub -r te/device/plc1/ot/modbus/cmd/write/w1 '{"status":"init","point":"temp_u16","value":4242}'
+tedge mqtt pub -r te/device/plc1///cmd/ot_write/w1 '{"status":"init","point":"temp_u16","value":4242}'
 # several points, in order, one result (the SDK `write-batch` verb)
-tedge mqtt pub -r te/device/plc1/ot/modbus/cmd/write-batch/b1 '{"status":"init","writes":[{"point":"temp_u16","value":4242},{"point":"coil_rw","value":true}]}'
+tedge mqtt pub -r te/device/plc1///cmd/ot_write_batch/b1 '{"status":"init","writes":[{"point":"temp_u16","value":4242},{"point":"coil_rw","value":true}]}'
 ```
 
 From Cumulocity, writable points are **device parameters**: the `ot-parameter-state` flow
-keeps one twin fragment per parameter set current, and the command flows turn a
+keeps one twin fragment per parameter set current, and the parameter flows turn a
 `c8y_ParameterUpdate` operation from the device's *Parameters* tab (mapped by the
 [tedge-parameter-plugin](https://github.com/thin-edge/tedge-parameter-plugin), which owns that
 operation) into one `write-batch`.
-A tenant admin declares the sets once with the definitions `tedge-dot describe` prints from
-the same configuration — by default every connector config in `/etc/tedge/plugins/ot`, with a
-set that several of them share rendered once. A set name is a tenant-wide identifier, so it is derived from the device's
+A tenant admin declares the sets once with the definitions
+`tedge-dot manifest --format c8y-dtm` renders from the device manifests — by default those of
+every connector config in `/etc/tedge/plugins/ot`, with a set that several of them share
+rendered once. A set name is a tenant-wide identifier, so it is derived from the device's
 **type** rather than from the protocol — `acme_meter_v2_control_parameters`, not
 `modbus_parameters` — which is what lets several device types on one protocol coexist in a
 tenant. See [RFC 0003](doc/rfc/0003-parameter-writes.md),
@@ -199,7 +200,7 @@ tenant. See [RFC 0003](doc/rfc/0003-parameter-writes.md),
 | [impl/rust/crates/sdk](impl/rust/crates/sdk/) | `tedge-dot-sdk` — runtime, `Connector` trait, config model, decode helpers |
 | [impl/rust/crates/connector-*](impl/rust/crates/) | one crate per protocol module |
 | [impl/rust/crates/ot-conformance](impl/rust/crates/ot-conformance/) | `ot-conformance` — the connector conformance harness (schema, decode vectors, behavioural checks) |
-| [impl/rust/src/](impl/rust/src/) | the Rust `tedge-dot` binary (run service, `read`/`write`/`describe` CLI) |
+| [impl/rust/src/](impl/rust/src/) | the Rust `tedge-dot` binary (run service, `read`/`write`/`manifest` CLI, and the `formats` renderers) |
 | [impl/c/](impl/c/) | the C implementation: SDK, connectors, binary, cross-build and packaging |
 | [flows/](flows/) | protocol-neutral thin-edge.io flows (sample→measurement, alarms, registration, commands) |
 | [operations/](operations/) | Cumulocity operation shims (legacy `c8y_*` operations and `c8y_ParameterUpdate` → generic OT commands) |
@@ -232,7 +233,7 @@ proven — and it has its own build and packaging recipes:
 
 ```sh
 just c-test               # build impl/c/ and run its unit tests (shared golden vectors)
-just c-describe-parity    # `tedge-dot describe` must agree between the two binaries
+just c-manifest-parity    # `tedge-dot manifest` must agree between the two binaries
 just conformance-c modbus # the contract conformance suite against the C build
 just test-e2e-c modbus    # the SAME e2e suite, C connector
 just test-cloud-c modbus  # the SAME cloud suite, C connector

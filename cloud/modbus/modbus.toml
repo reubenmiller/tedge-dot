@@ -12,8 +12,8 @@
 
 [connector]
 protocol      = "modbus"
-# The packaged name: ot-command-forward and c8y-fieldbus-import address management commands to
-# the tedge-dot-<protocol> service by default (contract §6.3).
+# The packaged name: c8y-fieldbus-import and the operation shims address management commands
+# to the tedge-dot-<protocol> service by default (contract §6.3/§6.6).
 service_name  = "tedge-dot-modbus"
 poll_interval = "2s"
 log_level     = "info"
@@ -35,8 +35,9 @@ type             = "modbus-plc-sim"
 protocol_address = { transport = "tcp", host = "simulator", port = 502, unit_id = 1 }
 
   # Writable points are device *parameters*: the ot-parameter-state flow publishes them as the
-  # modbus_plc_sim_control_parameters twin fragment and `tedge-dot describe` renders the
-  # matching Digital Twin Manager definition (`parameter` labels it, `range` bounds it).
+  # modbus_plc_sim_control_parameters twin fragment, and `tedge-dot manifest --format c8y-dtm`
+  # renders the matching Digital Twin Manager definition from that manifest (`parameter` labels
+  # it, `range` bounds it).
   [[device.point]]
   id       = "temp_u16"
   datatype = "uint16"

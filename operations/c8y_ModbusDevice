@@ -12,9 +12,9 @@
 #   2. A connector-shaped `device` object ({"device": {...[[device]] config entry...}}), passed
 #      through unchanged.
 #
-# Either way the script publishes one `ot_define_device` command; ot-command-forward bridges it
-# to the connector's `define-device` verb, the SDK runtime inserts/replaces the device by name,
-# persists the TOML, and live-reloads. Child-device registration in the cloud then happens via
+# Either way the script publishes one `ot_define_device` command, which the connector answers
+# itself (contract §6.6): the SDK runtime inserts/replaces the device by name, persists the
+# TOML, and live-reloads. Child-device registration in the cloud then happens via
 # the ot-registration flow when the link comes up.
 #
 # This is a `command` shim (the c8y mapper executes the script, legacy-plugin style) rather than

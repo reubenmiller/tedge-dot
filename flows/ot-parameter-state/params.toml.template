@@ -1,5 +1,0 @@
-# One parameter set name for EVERY parameter of every device, instead of the sets the connector
-# resolved on the device manifest (contract §8.2: "<device type, else protocol>_<group>_parameters",
-# or an absolute meta.parameter.set). A plain identifier ([A-Za-z0-9_]); it must match the
-# identifier registered in the cloud. Empty -> the manifest's sets.
-default_set = ""

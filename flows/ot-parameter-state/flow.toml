@@ -16,10 +16,6 @@ input.mqtt.topics = [
   "te/+/+/+/+/cmd/ot_write_batch/+",
 ]
 
-[config]
-# One parameter set for every parameter, instead of the sets the connector resolved on the
-# manifest ("<device type, else protocol>_<group>_parameters"). Empty -> the manifest's.
-default_set = "${params.default_set}"
 
 [[steps]]
 script = "main.js"

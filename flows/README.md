@@ -24,15 +24,17 @@ modules that run inside a mapper and are hot-reloaded without restarts.
 | [ot-alarm](ot-alarm/) | thin-edge → thin-edge | `m/<group>` | `a/<type>` alarm (hysteresis) |
 | [ot-event](ot-event/) | thin-edge → thin-edge | `m/<group>` | `e/<type>` event (on change) |
 | [ot-registration](ot-registration/) | OT → thin-edge | `ot/<protocol>/status/link` (trigger + type), `ot/<protocol>/manifest` (descriptor) | `te/device/<device>//` child registration (+ optional `twin/<fragment>`) |
-| [ot-command-forward](ot-command-forward/) | thin-edge → OT | `cmd/ot_<verb>/<id>` (incl. `parameter_update`) | `ot/<protocol>/cmd/<verb>/<id>`, or `service/<service>/ot/cmd/<verb>/<id>` for management verbs |
-| [ot-command-result](ot-command-result/) | OT → thin-edge | `ot/<protocol>/cmd/<verb>/<id>`, `service/<service>/ot/cmd/<verb>/<id>` | `cmd/ot_<verb>/<id>` (or the `origin.command`) |
+| [ot-parameter-update](ot-parameter-update/) | thin-edge → thin-edge | `cmd/parameter_update/<id>` | `cmd/ot_write_batch/<id>` |
+| [ot-parameter-result](ot-parameter-result/) | thin-edge → thin-edge | `cmd/ot_write_batch/<id>` | `cmd/parameter_update/<id>` (the batch's `origin.command`) |
 | [ot-parameter-state](ot-parameter-state/) | OT → thin-edge | `manifest` (which points are parameters, and their sets), `sample/<point>`, `cmd/write*/<id>` | `twin/<set>` |
 
-The two `ot-command-*` flows form a bidirectional, **verb-neutral** bridge: *forward* turns a
-thin-edge command into a connector command request; *result* mirrors the connector's `executing` →
-`successful`/`failed` transitions back so the thin-edge command (and any bound cloud operation)
-completes. They are split into two flows because a single flow may not both consume and produce
-on its own input topics (the mapper drops such outputs to prevent loops).
+There is no command *bridge* any more (RFC 0006 §7): the connector subscribes to the thin-edge
+command topics and drives them itself, so a write is one command on one topic with one state
+machine. The only pair left is the parameter bridge, which exists because
+`c8y_ParameterUpdate` is a *different* command — one cloud operation carrying a whole set — that
+has to be reshaped into one `ot_write_batch`: *update* sends the batch, *result* completes the
+operation from it. Two flows rather than one because a flow may not publish to a topic matching
+its own input filter (the mapper drops such outputs to prevent loops).
 
 The thin-edge command type maps to a connector verb by dropping the `ot_` prefix and turning `_`
 into `-`. The verbs cover the legacy Cumulocity operations (see the
@@ -45,41 +47,43 @@ into `-`. The verbs cover the legacy Cumulocity operations (see the
 | `ot_set_config` | `set-config` | `c8y_ModbusConfiguration`, `c8y_SerialConfiguration` |
 | `ot_define_device` | `define-device` | `c8y_ModbusDevice`, `c8y_Coils`, `c8y_Registers` |
 | `ot_remove_device` | `remove-device` | — |
-| `parameter_update` | `write-batch` (reshaped by `ot-command-forward`) | `c8y_ParameterUpdate` (device parameters; template owned by tedge-parameter-plugin) |
+| `ot_write_batch` | `write-batch` | `c8y_ParameterUpdate` (device parameters, via `ot-parameter-update`; template owned by tedge-parameter-plugin) |
 
 The `write` verb is implemented by the protocol module; the `set-config`/`define-device`/
 `remove-device` management verbs are implemented once by the SDK runtime (it owns the connector
-configuration), so every connector supports them. `ot-command-forward` subscribes to an explicit
-allow-list of `ot_*` command types (add a line to its `flow.toml` to support a new verb).
+configuration), so every connector supports them. A connector advertises the command types each
+device answers on its manifest (contract §8.2) and marks them retained on
+`te/device/<device>///cmd/<type>`, so nothing carries a hard-coded list.
 
-Management verbs change one connector instance's configuration, so `ot-command-forward` sends
-them to that instance's service topic (`te/device/main/service/<service>/ot/cmd/<verb>/<id>`,
-contract §6.3). The service is the command's `service` field, else `tedge-dot-<protocol>` — the
-default `service_name` of a connector config — so name the service whenever the connector's config
-sets its own `service_name`, e.g. when a gateway runs several connectors of one protocol. A
-command whose `service` is not a plain topic level is **not forwarded**: the flow cannot fail it
-(its output would match its own input), so it stays pending.
+Management verbs change one connector instance's configuration, so the instance is named in the
+command's `service` field (contract §6.6), defaulting to `tedge-dot-<protocol>` — the default
+`service_name` of a connector config. Name it whenever a config sets its own `service_name`,
+e.g. when a gateway runs several connectors of one protocol: the device segment cannot say
+which instance is meant, because a Cloud Fieldbus operation arrives on the gateway's topic and
+the gateway is nobody's configured device.
 
 **Device parameters** (see [RFC 0003](../doc/rfc/0003-parameter-writes.md)): writable points are
 parameters. `ot-parameter-state` keeps one retained twin fragment per *parameter set*
 (`te/device/<device>///twin/<set>`, keyed by point id) current from the samples (which echo each
-point's `access`) and from acknowledged writes. `ot-command-forward` reshapes a
+point's `access`) and from acknowledged writes. `ot-parameter-update` reshapes a
 `parameter_update` command — the command type of the
 [tedge-parameter-plugin](https://github.com/thin-edge/tedge-parameter-plugin), whose
-`c8y_ParameterUpdate.template` maps the Cumulocity operation onto it — into ONE connector
-`write-batch`, and `ot-command-result` completes it through the batch request's `origin.command`.
+`c8y_ParameterUpdate.template` maps the Cumulocity operation onto it — into ONE
+`ot_write_batch`, and `ot-parameter-result` completes it through the batch's `origin.command`.
 The plugin's own workflow only serves the main device (tedge-agent runs workflows for its own
 entity only), so on OT child devices the flows are the sole handler and no second template is
 needed: the c8y mapper binds templates per fragment name, so two templates for
 `c8y_ParameterUpdate` could never coexist.
 A set name is a tenant-wide identifier in the cloud, so it is derived from the **device type**
-(echoed in every sample and on the retained link status) rather than from the protocol:
-`<type, else protocol>_<meta.parameter.group, default "control">_parameters`, e.g.
-`acme_meter_v2_control_parameters`. Both `group` and `set` accept a list, so one point can be in
-several sets and its value is published to each of their fragments. `meta.parameter.set` still
-names a set outright, and the flow's `default_set` param forces one name for everything. `tedge-dot describe` derives the same
-names from the same configuration and renders them as Cumulocity DTM definitions for a tenant
-admin to register — see [RFC 0005](../doc/rfc/0005-device-types-and-parameter-sets.md).
+rather than from the protocol: `<type, else protocol>_<parameter.group, default "control">_parameters`,
+e.g. `acme_meter_v2_control_parameters`. Both `group` and `set` accept a list, so one point can
+be in several sets and its value is published to each of their fragments; `parameter.set` names
+a set outright, and `[connector] parameter_set` forces one name for everything.
+The flow derives none of this: the **connector** resolves the names and publishes them on the
+device manifest (contract §8.2), the flow reads them there, and
+`tedge-dot manifest --format c8y-dtm` renders the same manifests as Cumulocity DTM definitions
+for a tenant admin to register — see
+[RFC 0005](../doc/rfc/0005-device-types-and-parameter-sets.md).
 A parameter is still an ordinary signal otherwise, so by default its samples also become
 measurements through `ot-measurement`. To keep its value on the twin fragment only, and not also
 as a measurement series, set `meta.measurement = false` on the point: it stays a parameter and
@@ -122,18 +126,18 @@ manifest line first, as the broker replays the retained message on a restart.
                              ot/<protocol>/status/link      ──▶  ot-registration ─▶ te/device/x// ─▶ child device
                                                                  m/<group> ──▶ ot-alarm ──▶ a/<type> ──▶ alarm
 
- cloud operation  ──▶  cmd/ot_<verb>/<id>  ──▶ ot-command-forward ──▶ ot/<protocol>/cmd/<verb>/<id> ──▶ driver acts
- driver result    ──▶  ot/<protocol>/cmd/<verb>/<id> ─▶ ot-command-result ──▶ cmd/ot_<verb>/<id> (operation completes)
+ cloud operation  ──▶  cmd/ot_<verb>/<id>  ──────────────▶ the DRIVER answers it in place (no flow)
 
- c8y_ParameterUpdate ─▶ cmd/parameter_update/<id> ─▶ ot-command-forward ─▶ ot/<protocol>/cmd/write-batch/<id> ─▶ driver writes N points
- driver result       ─▶ ot/<protocol>/cmd/write-batch/<id> ─▶ ot-command-result ─▶ cmd/parameter_update/<id> (operation completes)
+ c8y_ParameterUpdate ─▶ cmd/parameter_update/<id> ─▶ ot-parameter-update ─▶ cmd/ot_write_batch/<id> ─▶ driver writes N points
+ batch result        ─▶ cmd/ot_write_batch/<id>   ─▶ ot-parameter-result ─▶ cmd/parameter_update/<id> (operation completes)
  samples + write results ─▶ ot-parameter-state ─▶ te/device/<device>///twin/<set> ─▶ Parameters tab
 ```
 
 ## Configure
 
-Each flow ships a `params.toml.template` documenting its settings. To customise, copy it to
-`params.toml` in the same directory and edit. With the defaults, `ot-measurement` maps every
+Each flow with settings ships a `params.toml.template` documenting them. To customise, copy it
+to `params.toml` in the same directory and edit. A flow with nothing to configure ships no
+template — `ot-parameter-state` reads everything it needs off the device manifest. With the defaults, `ot-measurement` maps every
 good numeric point into an `m/<protocol>` measurement whose series is the point id — zero config.
 
 ## Test (offline, no broker/device/cloud)
@@ -154,8 +158,8 @@ Cumulocity mapper's flows directory:
 ```
 /etc/tedge/mappers/c8y/flows/ot-measurement/
 /etc/tedge/mappers/c8y/flows/ot-registration/
-/etc/tedge/mappers/c8y/flows/ot-command-forward/
-/etc/tedge/mappers/c8y/flows/ot-command-result/
+/etc/tedge/mappers/c8y/flows/ot-parameter-update/
+/etc/tedge/mappers/c8y/flows/ot-parameter-result/
 /etc/tedge/mappers/c8y/flows/ot-parameter-state/
 ```
 

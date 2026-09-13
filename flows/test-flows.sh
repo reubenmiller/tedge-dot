@@ -104,7 +104,8 @@ check_multi() {
   for f in $flows; do
     mkdir -p "$tmp/$f"
     cp "$f"/*.js "$f"/flow.toml "$tmp/$f/"
-    cp "$f/params.toml.template" "$tmp/$f/params.toml"
+    # A flow with nothing to configure has no template (ot-parameter-state since RFC 0006 §8).
+    [[ -f "$f/params.toml.template" ]] && cp "$f/params.toml.template" "$tmp/$f/params.toml"
   done
   out="$(printf '%s\n' "$input" | tedge flows test --flows-dir "$tmp" 2>/dev/null)"
   rm -rf "$tmp"
@@ -387,27 +388,23 @@ check_empty "parameter-state: failed write leaves the twin alone" ot-parameter-s
   "$MF"$'\n''[te/device/plc1///cmd/ot_write/abc] {"status":"failed","point":"temp_u16","reason":"boom"}'
 check_empty "parameter-state: a write result before the manifest is left alone" ot-parameter-state \
   '[te/device/plc1///cmd/ot_write/abc] {"status":"successful","point":"temp_u16","value":4242}'
-check_params "parameter-state: default_set param renames every set" ot-parameter-state \
-  'default_set = "plc_settings"' \
-  "$MF"$'\n'"[te/device/plc1/ot/modbus/sample/pump_speed] $SP" \
+# `[connector] parameter_set` forces one set name for everything — and the connector applies it
+# BEFORE publishing (RFC 0006 §8.1), so the flow has no setting of its own to keep in step: it
+# reads the forced name off the manifest exactly as it reads a derived one. An unusable forced
+# name never reaches the flow either way, and is dropped here like any other (see `bad_set`).
+MF_FORCED='{"contract":"0.2","protocol":"modbus","service":"tedge-dot-modbus","points":{
+ "temp_u16":{"datatype":"uint16","access":"read_write","parameter":{"sets":["plc_settings"],"order":1}},
+ "pump_speed":{"datatype":"float32","access":"read_write","parameter":{"sets":["plc_settings"],"order":2}}
+}}'
+MF_FORCED="[$MANIFEST_TOPIC] $(printf '%s' "$MF_FORCED" | tr -d '\n')"
+check "parameter-state: a forced parameter_set arrives resolved on the manifest" ot-parameter-state \
+  "$MF_FORCED"$'\n'"[te/device/plc1/ot/modbus/sample/pump_speed] $SP" \
   '[te/device/plc1///twin/plc_settings] {"pump_speed":10.5}'
-# An unusable default_set (`/` would publish outside te/<device>///twin/) publishes nowhere.
-dstmp="$(flow_with_params ot-parameter-state 'default_set = "a/b"')"
-dsout="$(printf '%s\n' "$MF"$'\n'"[te/device/plc1/ot/modbus/sample/temp_u16] $ST" | tedge flows test --flows-dir "$dstmp" 2>/dev/null)"
-rm -rf "$dstmp"
-if [[ -z "$dsout" ]]; then
-  echo "ok   - parameter-state: an unusable default_set publishes nowhere"
-  pass=$((pass + 1))
-else
-  echo "FAIL - parameter-state: an unusable default_set publishes nowhere"
-  echo "       got: $dsout"
-  fail=$((fail + 1))
-fi
 check "parameter-state: opcua samples -> opcua_control_parameters (generic)" ot-parameter-state \
   "$MFO"$'\n''[te/device/opc1/ot/opcua/sample/setpoint] {"device":"opc1","protocol":"opcua","point":"setpoint","datatype":"int32","value":42,"quality":"good"}' \
   '[te/device/opc1///twin/opcua_control_parameters] {"setpoint":42}'
 # A DTM identifier is tenant-wide, so the connector qualifies the set by the *device type* on
-# the manifest — the flow publishes exactly the name `tedge-dot describe` renders.
+# the manifest — the flow publishes exactly the name `manifest --format c8y-dtm` registers.
 check "parameter-state: the device type qualifies the set name (from the manifest)" ot-parameter-state \
   "$MFT"$'\n'"[te/device/plc1/ot/modbus/sample/temp_u16] $ST" \
   '[te/device/plc1///twin/acme_boiler_v2_control_parameters] {"temp_u16":17001}'

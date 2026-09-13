@@ -13,7 +13,7 @@
 protocol    = "modbus"
 # The device *type* this list describes (§3.1). Every device referencing this
 # library inherits it, and its parameter sets are named after it -- so the
-# harness also checks that a type reaches `describe`, the samples, the link
+# harness also checks that a type reaches `manifest`, the samples, the link
 # status and the twin fragment names.
 type        = "modbus-plc-sim"
 description = "pymodbus simulator (connectors/modbus/sim/modbus.json)"

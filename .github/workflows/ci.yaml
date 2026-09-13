@@ -141,11 +141,12 @@ jobs:
       - name: Conformance suite against the C build
         if: matrix.protocol == 'modbus' || matrix.protocol == 'opcua'
         run: just conformance-c ${{ matrix.protocol }}
-      # `tedge-dot describe` must render the same Cumulocity DTM definitions in both builds;
-      # runs once (it covers every config in the repo) where the Rust toolchain is set up.
-      - name: Describe parity (Rust vs C)
+      # `tedge-dot manifest` must agree in both builds — the manifests and the Cumulocity DTM
+      # definitions rendered from them; runs once (it covers every config in the repo) where
+      # the Rust toolchain is set up.
+      - name: Manifest parity (Rust vs C)
         if: matrix.protocol == 'modbus'
-        run: just c-describe-parity
+        run: just c-manifest-parity
       - name: Connector log + simulator log on failure
         if: failure()
         run: docker compose -p tedge-dot-sim-${{ matrix.protocol }} -f connectors/${{ matrix.protocol }}/docker-compose.yaml logs simulator || true

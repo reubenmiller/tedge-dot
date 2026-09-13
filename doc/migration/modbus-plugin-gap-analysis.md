@@ -44,10 +44,13 @@ exists but a translation/behaviour piece is missing; **missing** — no equivale
 ### 1.2 Cumulocity operations
 
 The legacy operation templates live under `modbus-plugin/operations/`; the tedge-dot shims
-under [`operations/`](../../operations/) and are bridged by
-[`ot-command-forward`](../../flows/ot-command-forward/) /
-[`ot-command-result`](../../flows/ot-command-result/) (internal command ids carry the `ot--`
-marker so mapper-cleared retained commands are not re-forwarded).
+under [`operations/`](../../operations/). Since contract 0.2 (RFC 0006 §7) nothing bridges
+them: the connector subscribes to the thin-edge command topics and answers them in place.
+Only `c8y_ParameterUpdate` still passes through a flow pair
+([`ot-parameter-update`](../../flows/ot-parameter-update/) /
+[`ot-parameter-result`](../../flows/ot-parameter-result/)), because it carries a whole
+parameter set that has to be reshaped into one `ot_write_batch`; those internally created
+command ids carry the `ot--` marker so a mapper-cleared retained command is not re-sent.
 
 | Legacy operation | Legacy behaviour | tedge-dot equivalent | Status |
 | --- | --- | --- | --- |
@@ -57,7 +60,7 @@ marker so mapper-cleared retained commands are not re-forwarded).
 | `c8y_SerialConfiguration` | Writes `[serial]` into `modbus.toml`; publishes twin `c8y_SerialConfiguration` on main | Shim → `ot_set_config` patching `connection.serial`; **no twin echo** | partial |
 | `c8y_ModbusDevice` | Cloud Fieldbus flow: registers external id `<device.id>:device:<name>` (type `c8y_Serial`) for the **UI-created child MO** via the local c8y proxy, fetches the device-type MO from `payload.type` (an inventory path), translates `c8y_Registers[*]` (address, scaling, `measurementMapping.type/series`) into `devices.toml` | Shim → `ot_define_device`, but the payload must already be a connector-shaped `device` object (`protocol_address`, `point[]`). The stock Cloud Fieldbus payload (`protocol`, `address`, `ipAddress`, `type`, `id`, `name`) is **not understood**; no device-type fetch, no external-id linking | **missing** (biggest gap) |
 | `c8y_Registers` / `c8y_Coils` | Effectively stubs (dump the raw argument to a file; the data is consumed via `c8y_ModbusDevice`'s type fetch instead) | Intentionally dropped — points travel inside `ot_define_device` (`operations/README.md`) | covered (by design) |
-| Command status flow (`init`→`executing`→`successful`/`failed`, `reason`) | reader handles `modbus_SetRegister`/`modbus_SetCoil` thin-edge commands | contract command lifecycle + `ot-command-result` mirror | covered |
+| Command status flow (`init`→`executing`→`successful`/`failed`, `reason`) | reader handles `modbus_SetRegister`/`modbus_SetCoil` thin-edge commands | the contract command lifecycle, driven by the connector on the thin-edge command topic itself (§6) | covered |
 
 ### 1.3 Cloud Fieldbus device-type polling / translation
 
@@ -139,8 +142,8 @@ shim assumes a connector-shaped `device` object that no stock UI produces.
 Explicit-address payloads (asset-table widget, existing runbooks, the legacy Robot tests) and
 name-based `metrics[]` payloads fail against the new point-id shims.
 
-**Closure:** extend the two operation shims (or add a translation step in
-`ot-command-forward`) to accept all three shapes:
+**Closure:** extend the two operation shims (or add a translation step in the connector's
+write handling) to accept all three shapes:
 `{point,value}` (native), `{register|coil, address, ipAddress, startBit, noBits, value}`
 (resolve to a point by matching `point.address` against the connector config / twin
 descriptor; synthesise a raw bit-field write if no point matches), and
@@ -156,7 +159,7 @@ suite asserts them. The new `ot_set_config` path applies and persists the change
 reflects it back to the inventory.
 
 **Closure:** a small `ot-config-twin` flow subscribed to
-`te/device/main/service/+/ot/cmd/set-config/+` that, on `status: "successful"`, republishes the applied
+`te/device/main/service/+/cmd/ot_set_config/+` that, on `status: "successful"`, republishes the applied
 `config` object as the matching twin fragment(s). Alternatively the SDK runtime publishes an
 "effective config" descriptor after every reload (also serves RFC 0002's export path).
 `transmitRate` should be accepted and mapped to the `ot-measurement` `min_interval` param (or

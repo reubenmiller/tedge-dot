@@ -2,9 +2,9 @@
 #
 # Uses a distinct command type from c8y_SetRegister's `ot_write` to work around the thin-edge.io
 # limitation that two cloud operations cannot share the same workflow command name. The
-# `ot-command-forward` flow handles both `ot_write` and `ot_write_coil`; the generic stripping
-# logic maps `ot_write_coil` to the connector verb `write-coil`, which the connector accepts as an
-# alias for `write`. Will be mergeable back to `ot_write` once the limitation is lifted.
+# connector answers both command types: `[connector] command_aliases` maps `ot_write_coil` onto
+# `ot_write`, so the alias exists in configuration rather than in the runtime. Will be mergeable
+# back to `ot_write` once the limitation is lifted.
 [exec]
   topic = "c8y/devicecontrol/notifications"
   on_fragment = "c8y_SetCoil"

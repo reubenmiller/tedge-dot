@@ -5,8 +5,14 @@
 //! the `parameter` field (`parameter = false` opts a writable point out). Parameters are grouped
 //! into **sets**: one set is one twin fragment on the device (published by the
 //! `ot-parameter-state` flow with the current values) and one DTM property definition in the
-//! tenant (rendered by `tedge-dot describe`). The keys of a set are the point ids, so parameter
-//! ids must be plain identifiers (`[A-Za-z0-9_]`).
+//! tenant. The keys of a set are the point ids, so parameter ids must be plain identifiers
+//! (`[A-Za-z0-9_]`).
+//!
+//! What this module does NOT do is render any of that for a cloud. It decides which points are
+//! parameters and what their sets are called; the connector writes the answer onto the device
+//! manifest (§8.2), and a renderer — `tedge-dot manifest --format c8y-dtm`, in the binary crate
+//! — works from the manifest. That is what keeps the SDK, which "never talks to the DTM
+//! service", free of any cloud vendor's schema (RFC 0006 §8.1).
 //!
 //! ## Naming a set
 //!
@@ -48,7 +54,7 @@
 use crate::config::{ConnectorConfig, DeviceConfig, PointConfig};
 use crate::connector::Access;
 use crate::model::DataType;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 
 pub use crate::library::trim_c;
 
@@ -84,9 +90,10 @@ pub fn set_name(qualifier: &str, group: &str) -> String {
 /// How one device's parameter sets are named.
 ///
 /// Built per device, because the qualifier is the device's own type. `forced` is
-/// `tedge-dot describe --set <name>` and the `ot-parameter-state` flow's `default_set`: a
-/// single set name for everything that does not name its own, which is the escape hatch for a
-/// tenant identifier that predates this rule.
+/// `[connector] parameter_set`: a single set name for everything that does not name its own,
+/// which is the escape hatch for a tenant identifier that predates this rule. It was a CLI flag
+/// and a flow parameter that had to agree with each other; it is one configuration key now, and
+/// the connector resolves it onto the manifest for both of them (§8.1).
 #[derive(Clone, Debug)]
 pub struct SetNaming {
     forced: Option<String>,
@@ -242,13 +249,18 @@ pub fn parameters_of(point: &PointConfig, naming: &SetNaming) -> Vec<Parameter> 
         .collect()
 }
 
-/// Every parameter of every device in the config, in configuration order. `forced` is the
-/// `--set` override: one set name for every point that does not give an absolute one.
-pub fn parameters(config: &ConnectorConfig, forced: Option<&str>) -> Vec<Parameter> {
+/// Every parameter of every device in the config, in configuration order.
+///
+/// `[connector] parameter_set`, when the configuration sets it, is one set name for every point
+/// that does not give an absolute one. It is read off the configuration rather than passed in:
+/// the forcing used to be a CLI flag AND a flow parameter that had to agree with it, and the
+/// whole point of §8 is that the decision is written down once.
+pub fn parameters(config: &ConnectorConfig) -> Vec<Parameter> {
+    let forced = config.connector.parameter_set();
     config
         .devices
         .iter()
-        .flat_map(|device| {
+        .flat_map(move |device| {
             let naming = SetNaming::of(device, &config.connector.protocol, forced);
             device
                 .points
@@ -265,18 +277,15 @@ pub fn parameters(config: &ConnectorConfig, forced: Option<&str>) -> Vec<Paramet
 /// config in its directory, and a DTM identifier is tenant-wide: two files declaring the same
 /// device type share its sets, and two types that fold to one name collide no matter which files
 /// they are in.
-fn devices_across(configs: &[ConnectorConfig]) -> impl Iterator<Item = (&str, &DeviceConfig)> {
-    configs.iter().flat_map(|config| {
-        config
-            .devices
-            .iter()
-            .map(move |device| (config.connector.protocol.as_str(), device))
-    })
+fn devices_across(configs: &[ConnectorConfig]) -> impl Iterator<Item = (&ConnectorConfig, &DeviceConfig)> {
+    configs
+        .iter()
+        .flat_map(|config| config.devices.iter().map(move |device| (config, device)))
 }
 
 /// Devices that expose parameters without declaring a `type`, so their sets fall back to the
 /// protocol — which every other device of every other type on that protocol also falls back to.
-/// `describe` warns about them; it is not an error, because a fleet of one type is fine.
+/// `manifest` warns about them; it is not an error, because a fleet of one type is fine.
 pub fn devices_without_type(config: &ConnectorConfig) -> Vec<String> {
     untyped_devices_across(std::slice::from_ref(config), &config.connector.protocol)
 }
@@ -286,8 +295,14 @@ pub fn devices_without_type(config: &ConnectorConfig) -> Vec<String> {
 /// collides with — is named after it.
 pub fn untyped_devices_across(configs: &[ConnectorConfig], protocol: &str) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
-    for (p, device) in devices_across(configs) {
+    for (config, device) in devices_across(configs) {
+        let p = config.connector.protocol.as_str();
         if p != protocol || !device.device_type.as_deref().unwrap_or("").is_empty() {
+            continue;
+        }
+        // A configuration that forces one set name derives none, so its devices cannot collide
+        // over a name they never use — declaring a type would change nothing for them.
+        if config.connector.parameter_set().is_some() {
             continue;
         }
         let naming = SetNaming::of(device, p, None);
@@ -327,7 +342,13 @@ pub fn type_warnings_across(configs: &[ConnectorConfig]) -> Vec<String> {
     let mut warnings: Vec<String> = Vec::new();
     // representative set name -> the distinct raw types that derive it
     let mut folded: Vec<(String, Vec<String>)> = Vec::new();
-    for (protocol, device) in devices_across(configs) {
+    for (config, device) in devices_across(configs) {
+        let protocol = config.connector.protocol.as_str();
+        // As in `untyped_devices_across`: a forced set name is not derived from the type, so
+        // two types folding to one derived name is not this configuration's problem.
+        if config.connector.parameter_set().is_some() {
+            continue;
+        }
         let Some(declared) = device.device_type.as_deref().filter(|t| !t.is_empty()) else {
             continue;
         };
@@ -373,15 +394,15 @@ pub fn type_warnings_across(configs: &[ConnectorConfig]) -> Vec<String> {
 }
 
 /// Parameter ids (and set names) that cannot be used as fragment keys.
-pub fn invalid_keys(config: &ConnectorConfig, forced: Option<&str>) -> Vec<String> {
-    invalid_keys_across(std::slice::from_ref(config), forced)
+pub fn invalid_keys(config: &ConnectorConfig) -> Vec<String> {
+    invalid_keys_across(std::slice::from_ref(config))
 }
 
 /// [`invalid_keys`] over several configurations, in configuration order.
-pub fn invalid_keys_across(configs: &[ConnectorConfig], forced: Option<&str>) -> Vec<String> {
+pub fn invalid_keys_across(configs: &[ConnectorConfig]) -> Vec<String> {
     configs
         .iter()
-        .flat_map(|config| parameters(config, forced))
+        .flat_map(parameters)
         .flat_map(|p| {
             let mut bad = Vec::new();
             if !is_valid_key(&p.point) {
@@ -393,160 +414,6 @@ pub fn invalid_keys_across(configs: &[ConnectorConfig], forced: Option<&str>) ->
             bad
         })
         .collect()
-}
-
-/// Render Cumulocity Digital Twin Manager property definitions — one per parameter set — for
-/// every device in the config. The output is the request body of
-/// `POST /service/dtm/definitions/properties` (one element at a time), which a tenant admin
-/// registers once; the device never talks to the DTM service. Sets that appear on several
-/// devices are merged (the identifier is tenant-wide, so devices sharing a set must agree).
-pub fn c8y_dtm_definitions(config: &ConnectorConfig, forced_set: Option<&str>) -> Vec<Value> {
-    c8y_dtm_definitions_across(std::slice::from_ref(config), forced_set)
-}
-
-/// [`c8y_dtm_definitions`] over several configurations — every connector a service runs. A set
-/// declared in more than one of them is still ONE definition: keys merge across files (the first
-/// definition of a key wins), and the definition is described and tagged with the protocol of
-/// the configuration that declared the set first.
-pub fn c8y_dtm_definitions_across(
-    configs: &[ConnectorConfig],
-    forced_set: Option<&str>,
-) -> Vec<Value> {
-    // ordered (key, property schema)
-    type Properties = Vec<(String, Value)>;
-    // set -> (protocol of the config declaring it first, its properties)
-    let mut sets: Vec<(String, &str, Properties)> = Vec::new();
-    for config in configs {
-        let protocol = config.connector.protocol.as_str();
-        for param in parameters(config, forced_set) {
-            let index = match sets.iter().position(|(name, _, _)| *name == param.set) {
-                Some(index) => index,
-                None => {
-                    sets.push((param.set.clone(), protocol, Vec::new()));
-                    sets.len() - 1
-                }
-            };
-            let props = &mut sets[index].2;
-            if props.iter().any(|(k, _)| *k == param.point) {
-                continue; // same key on another device: first definition wins
-            }
-            let schema = property_schema(&param);
-            props.push((param.point.clone(), schema));
-        }
-    }
-    sets.into_iter()
-        .map(|(set, protocol, props)| {
-            let mut properties = Map::new();
-            for (i, (key, mut schema)) in props.into_iter().enumerate() {
-                if !schema.as_object().map(|o| o.contains_key("order")).unwrap_or(false) {
-                    schema["order"] = json!(i + 1);
-                }
-                properties.insert(key, schema);
-            }
-            json!({
-                "identifier": set,
-                "jsonSchema": {
-                    "$schema": "http://json-schema.org/draft-07/schema#",
-                    "title": title_from_key(&set),
-                    "description": format!(
-                        "Writable {protocol} points exposed by tedge-dot (generated from the connector configuration)",
-                    ),
-                    "type": "object",
-                    "properties": properties,
-                },
-                "contexts": ["asset", "event", "operation"],
-                "tags": ["tedge-dot", protocol],
-            })
-        })
-        .collect()
-}
-
-/// JSON-schema property for one parameter (type from the datatype, limits from the datatype
-/// range, everything else from `parameter`).
-pub fn property_schema(param: &Parameter) -> Value {
-    let mut schema = Map::new();
-    let (ty, min, max): (&str, Option<f64>, Option<f64>) = match param.datatype {
-        Some(DataType::Bool) => ("boolean", None, None),
-        Some(DataType::Int8) => ("integer", Some(i8::MIN as f64), Some(i8::MAX as f64)),
-        Some(DataType::Uint8) => ("integer", Some(0.0), Some(u8::MAX as f64)),
-        Some(DataType::Int16) => ("integer", Some(i16::MIN as f64), Some(i16::MAX as f64)),
-        Some(DataType::Uint16) => ("integer", Some(0.0), Some(u16::MAX as f64)),
-        Some(DataType::Int32) => ("integer", Some(i32::MIN as f64), Some(i32::MAX as f64)),
-        Some(DataType::Uint32) => ("integer", Some(0.0), Some(u32::MAX as f64)),
-        // 64-bit limits exceed the JS safe range; leave them unbounded.
-        Some(DataType::Int64) | Some(DataType::Uint64) => ("integer", None, None),
-        Some(DataType::Float32) | Some(DataType::Float64) => ("number", None, None),
-        Some(DataType::String) | Some(DataType::Bytes) | None => ("string", None, None),
-    };
-    schema.insert("type".into(), json!(ty));
-    let title = param
-        .options
-        .get("title")
-        .and_then(|t| t.as_str())
-        .map(String::from)
-        .or_else(|| param.name.clone())
-        .unwrap_or_else(|| param.point.clone());
-    schema.insert("title".into(), json!(title));
-    let mut description = param
-        .options
-        .get("description")
-        .and_then(|d| d.as_str())
-        .map(String::from)
-        .or_else(|| param.description.clone())
-        .unwrap_or_default();
-    if let Some(unit) = &param.unit {
-        if !description.is_empty() {
-            description.push(' ');
-        }
-        description.push_str(&format!("[{unit}]"));
-    }
-    if param.access == Access::Write {
-        if !description.is_empty() {
-            description.push(' ');
-        }
-        description.push_str("(write-only: shows the last value written)");
-    }
-    if !description.is_empty() {
-        schema.insert("description".into(), json!(description));
-    }
-    // The declared `range` (§5.3) narrows the datatype's own bounds. It is the same table the
-    // connector enforces on write, so the form and the driver cannot disagree about the limit.
-    let min = param.range.and_then(|r| r.min).or(min);
-    let max = param.range.and_then(|r| r.max).or(max);
-    if let Some(min) = min {
-        schema.insert("minimum".into(), json!(min));
-    }
-    if let Some(max) = max {
-        schema.insert("maximum".into(), json!(max));
-    }
-    for key in ["enum", "default", "order"] {
-        if let Some(v) = param.options.get(key) {
-            schema.insert(key.into(), v.clone());
-        }
-    }
-    if !param.access.can_write() {
-        schema.insert("readOnly".into(), json!(true));
-    }
-    Value::Object(schema)
-}
-
-fn title_from_key(key: &str) -> String {
-    let mut out = String::new();
-    for (i, part) in key.split('_').filter(|p| !p.is_empty()).enumerate() {
-        if i > 0 {
-            out.push(' ');
-        }
-        let mut chars = part.chars();
-        if let Some(first) = chars.next() {
-            if i == 0 {
-                out.extend(first.to_uppercase());
-            } else {
-                out.push(first);
-            }
-            out.push_str(chars.as_str());
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -638,13 +505,23 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id 
         toml::from_str(CONFIG).unwrap()
     }
 
+    /// The same configuration with `[connector] parameter_set` set: one name for every point
+    /// that does not give an absolute one.
+    fn cfg_forcing(set: &str) -> ConnectorConfig {
+        toml::from_str(&CONFIG.replace(
+            "protocol = \"modbus\"",
+            &format!("protocol = \"modbus\"\nparameter_set = \"{set}\""),
+        ))
+        .unwrap()
+    }
+
     /// A set name is qualified by the *device type*, because that is what decides which points
     /// exist; the protocol is only the fallback for a device that does not declare one. An
     /// absolute `parameter.set` is used verbatim, a `group` names a second set of the same
     /// device type.
     #[test]
     fn parameters_select_writable_and_opted_in_points() {
-        let params = parameters(&cfg(), None);
+        let params = parameters(&cfg());
         let names: Vec<(&str, &str)> = params
             .iter()
             .map(|p| (p.point.as_str(), p.set.as_str()))
@@ -661,7 +538,7 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id 
                 ("flow_limit", "acme_boiler_v2_control_parameters"),
                 ("flow_limit", "acme_boiler_v2_commissioning_parameters"),
                 // plc2 declares no type: back to the protocol, which is what collides across
-                // device types and is the reason `describe` warns about it.
+                // device types and is the reason `manifest` warns about it.
                 ("spare_rw", "modbus_control_parameters"),
             ]
         );
@@ -669,11 +546,11 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id 
         assert_eq!(devices_without_type(&cfg()), vec!["plc2".to_string()]);
     }
 
-    /// `--set` forces one name for every point that does not give an absolute one — the escape
-    /// hatch for a tenant identifier that predates the naming rule.
+    /// `[connector] parameter_set` forces one name for every point that does not give an
+    /// absolute one — the escape hatch for a tenant identifier that predates the naming rule.
     #[test]
     fn forced_set_overrides_the_derived_name() {
-        let params = parameters(&cfg(), Some("legacy_params"));
+        let params = parameters(&cfg_forcing("legacy_params"));
         let names: Vec<(&str, &str)> = params
             .iter()
             .map(|p| (p.point.as_str(), p.set.as_str()))
@@ -686,7 +563,7 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id 
                 ("pump_speed", "pump"),
                 ("status_word", "legacy_params"),
                 ("commission_code", "legacy_params"),
-                // --set collapses a multi-group point to the one forced name, once.
+                // The forced name collapses a multi-group point to one set, once.
                 ("flow_limit", "legacy_params"),
                 ("spare_rw", "legacy_params"),
             ]
@@ -752,7 +629,7 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id 
     }
 
     /// Two device types that differ only in punctuation fold to one qualifier, so their sets
-    /// collide exactly as two protocols' did before this feature — `describe` says so.
+    /// collide exactly as two protocols' did before this feature — `manifest` says so.
     #[test]
     fn device_type_problems_are_warned_about() {
         let mut c = cfg();
@@ -809,70 +686,22 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id 
         assert_eq!(set_name("wärmezähler", "control"), "w_rmez_hler_control_parameters");
         let mut c = cfg();
         c.devices[0].points[0].id = "Boiler.Temp".into();
-        let bad = invalid_keys(&c, None);
+        let bad = invalid_keys(&c);
         assert_eq!(bad, vec!["point id 'Boiler.Temp'"]);
-        assert!(invalid_keys(&cfg(), Some("plant.floor"))
+        // A forced name is a fragment key too, so it is refused by the same rule.
+        assert!(invalid_keys(&cfg_forcing("plant.floor"))
             .iter()
             .all(|b| b.contains("parameter set")));
+        // Blank is "unset", not a set called "": an unexpanded variable in a provisioning
+        // script must not rename every set to nothing.
+        assert!(cfg_forcing("  ").connector.parameter_set().is_none());
+        assert_eq!(cfg_forcing(" plant ").connector.parameter_set(), Some("plant"));
     }
 
+    /// Several configurations at once (`manifest -c <dir>`): device types folding together
+    /// collide across files, and the untyped-device warning is per protocol.
     #[test]
-    fn dtm_definitions_group_by_set_and_render_schema() {
-        let defs = c8y_dtm_definitions(&cfg(), None);
-        assert_eq!(defs.len(), 4);
-        // The two-group point is a property of BOTH its sets, so either screen can edit it.
-        assert!(defs[0]["jsonSchema"]["properties"]["flow_limit"].is_object());
-        assert!(defs[2]["jsonSchema"]["properties"]["flow_limit"].is_object());
-        let main = &defs[0];
-        assert_eq!(main["identifier"], "acme_boiler_v2_control_parameters");
-        assert_eq!(main["contexts"], json!(["asset", "event", "operation"]));
-        let props = &main["jsonSchema"]["properties"];
-        assert_eq!(props["temp_u16"]["type"], "integer");
-        assert_eq!(props["temp_u16"]["title"], "Temperature setpoint");
-        assert_eq!(props["temp_u16"]["minimum"], 0.0);
-        assert_eq!(props["temp_u16"]["maximum"], 100.0);
-        assert_eq!(props["temp_u16"]["order"], 7);
-        // parameter.title wins over the points `name`...
-        assert_eq!(props["temp_u16"]["title"], "Temperature setpoint");
-        // ...while the point's `description` is used (no parameter.description here) and
-        // still composes with the unit.
-        assert_eq!(
-            props["temp_u16"]["description"],
-            "Outlet temperature after the heat exchanger [°C]"
-        );
-        // With no meta at all, the point's `name` becomes the title.
-        assert_eq!(props["coil_rw"]["title"], "Pump enable");
-        assert_eq!(props["coil_rw"]["type"], "boolean");
-        assert_eq!(props["coil_rw"]["order"], 2);
-        assert_eq!(props["status_word"]["readOnly"], true);
-        assert_eq!(props["status_word"]["maximum"], 65535.0);
-        assert!(props.get("hidden_rw").is_none());
-        assert!(props.get("level_f32").is_none());
-
-        let pump = &defs[1];
-        assert_eq!(pump["identifier"], "pump");
-        assert_eq!(pump["jsonSchema"]["title"], "Pump");
-        let speed = &pump["jsonSchema"]["properties"]["pump_speed"];
-        assert_eq!(speed["type"], "number");
-        assert!(speed["description"].as_str().unwrap().contains("write-only"));
-
-        // One device type, two sets (the group), and one untyped device on the protocol name.
-        assert_eq!(defs[2]["identifier"], "acme_boiler_v2_commissioning_parameters");
-        assert_eq!(defs[3]["identifier"], "modbus_control_parameters");
-        assert!(defs[3]["jsonSchema"]["properties"]["spare_rw"].is_object());
-    }
-
-    #[test]
-    fn dtm_default_set_override() {
-        let defs = c8y_dtm_definitions(&cfg(), Some("plant_settings"));
-        assert_eq!(defs[0]["identifier"], "plant_settings");
-    }
-
-    /// Several configurations at once (`describe -c <dir>`): a set declared in two files is ONE
-    /// definition, device types folding together collide across files, and the untyped-device
-    /// warning is per protocol. Mirrors `check_across_configs` in impl/c/tests/describe.c.
-    #[test]
-    fn definitions_and_warnings_span_every_config() {
+    fn warnings_span_every_config() {
         let modbus: ConnectorConfig = toml::from_str(
             r#"
 [connector]
@@ -934,25 +763,6 @@ protocol_address = { endpoint = "opc.tcp://127.0.0.1:4841/" }
         .unwrap();
         let both = [modbus.clone(), opcua];
 
-        // The second file's "acme boiler v2" folds to the first file's "acme-boiler-v2", so the
-        // two share one definition (a key they both declare keeps the first file's schema), and
-        // each protocol's untyped device has its own fallback set.
-        let defs = c8y_dtm_definitions_across(&both, None);
-        let ids: Vec<&str> = defs.iter().map(|d| d["identifier"].as_str().unwrap()).collect();
-        assert_eq!(
-            ids,
-            [
-                "acme_boiler_v2_control_parameters",
-                "modbus_control_parameters",
-                "opcua_control_parameters"
-            ]
-        );
-        let shared = &defs[0]["jsonSchema"]["properties"];
-        assert_eq!(shared["temp_u16"]["title"], "Boiler temp", "the first definition of a key wins");
-        assert!(shared["Tank.Level"].is_object(), "the second file's extra key is merged in");
-        assert_eq!(defs[0]["tags"][1], "modbus", "tagged with the protocol that declared it first");
-        assert_eq!(defs[2]["tags"][1], "opcua");
-
         // Neither file collides on its own; together they do.
         assert!(type_warnings(&modbus).is_empty());
         let warnings = type_warnings_across(&both);
@@ -961,6 +771,6 @@ protocol_address = { endpoint = "opc.tcp://127.0.0.1:4841/" }
 
         assert_eq!(untyped_devices_across(&both, "modbus"), ["plc2"]);
         assert_eq!(untyped_devices_across(&both, "opcua"), ["opc1"]);
-        assert_eq!(invalid_keys_across(&both, None), ["point id 'Tank.Level'"]);
+        assert_eq!(invalid_keys_across(&both), ["point id 'Tank.Level'"]);
     }
 }

@@ -557,10 +557,11 @@ What a 0.1 sample also carried, and where to find it now:
 
 A point whose `access` permits writes is, to an operator, a *parameter*: a setting with a
 current value and a control to change it. The contract deliberately adds no mechanism for
-this beyond the manifest's `access`, `parameter.sets` and device `type` (§8.2): a flow
+this beyond the manifest's `access`, `parameter` and device `type` (§8.2): a flow
 (`ot-parameter-state`) derives one
 retained twin fragment per *parameter set* from the samples and acknowledged writes, and
-cloud-specific tooling (`tedge-dot describe`) renders the same sets as cloud-side definitions.
+cloud-specific tooling (`tedge-dot manifest --format c8y-dtm`) renders the same sets as
+cloud-side definitions — from the manifest, not from the configuration file.
 A read-only point can opt in with `parameter = true`, a writable point can opt out with
 `parameter = false`. Because point ids become the fragment keys, parameter ids SHOULD be
 plain identifiers (`[A-Za-z0-9_]`).
@@ -580,6 +581,12 @@ the default group gives `acme_meter_v2_control_parameters`. Two knobs refine it,
 | --- | --- |
 | `group` | A second set *of the same device type* (`commissioning` → `acme_meter_v2_commissioning_parameters`). |
 | `set` | An absolute name, used verbatim — the escape hatch for an identifier that predates this rule, or for a set deliberately shared by several device types. A bare string (`parameter = "pump"`) is this form. |
+| `title`, `description`, `order`, `enum`, `default` | How the parameter is *presented* — the label, the position in the set, the values it accepts. The connector does not act on them; it copies them to the manifest for whatever renders the set. |
+
+`[connector] parameter_set` forces one name for every point that does not name an absolute one
+— the same escape hatch one level up, for a whole connector whose tenant identifiers predate
+the rule. The connector applies it before publishing, so the manifest's `parameter.sets` is
+always the final answer and no consumer re-derives it.
 
 Either key MAY be a **list**, and the point then belongs to every set it names — operators group
 signals by what they are *for*, and one setpoint can belong on the commissioning screen and the
@@ -596,9 +603,9 @@ same set are not repeated, and an absolute `set` still wins over `group`.
 
 A device with no declared type falls back to `<protocol>_control_parameters`, which every other
 device type on that protocol also falls back to: fine for a fleet of one type, a collision for a
-fleet of several, and the reason `tedge-dot describe` warns about it. Consumers derive the same
-name from the device `type` on the manifest and on the link status, so the connector, the
-flows and the cloud-side definitions agree without sharing a configuration file.
+fleet of several, and the reason `tedge-dot manifest` warns about it. Consumers do not derive
+the name at all: they read `parameter.sets` off the manifest, so the connector, the flows and
+the cloud-side definitions cannot disagree about it.
 
 See [RFC 0003](../rfc/0003-parameter-writes.md) and
 [RFC 0005](../rfc/0005-device-types-and-parameter-sets.md).
@@ -1058,8 +1065,10 @@ JSON Schema: [schemas/manifest.schema.json](schemas/manifest.schema.json).
     },
     "setpoint": {
       "datatype": "uint16", "access": "read_write",
-      "meta": { "parameter": { "group": ["control", "commissioning"] } },
-      "parameter": { "sets": ["acme_meter_v2_control_parameters", "acme_meter_v2_commissioning_parameters"] }
+      "parameter": {
+        "sets": ["acme_meter_v2_control_parameters", "acme_meter_v2_commissioning_parameters"],
+        "title": "Temperature setpoint", "order": 2
+      }
     }
   }
 }
@@ -1071,7 +1080,8 @@ JSON Schema: [schemas/manifest.schema.json](schemas/manifest.schema.json).
 | `protocol`, `service` | The connector that serves the device: its protocol module id and its service name (§6.3). |
 | `type` | The device's declared type (§3.1), when it has one. |
 | `info` | The connector's device descriptor (transport and address details), when its `connect` reported one. A flow can forward it into a digital-twin fragment. |
-| `points` | Every configured point, **keyed by id**: `datatype` (when declared), `access` (always), `unit`, `name`, `description` (when declared), the free-form `meta` table verbatim (when declared), and `parameter.sets` — the parameter sets the point belongs to (§5.2), **resolved by the connector**: absent when the point is not a parameter. A consumer never derives a set name. |
+| `points` | Every configured point, **keyed by id**: `datatype` (when declared), `access` (always), `unit`, `name`, `description` (when declared), the free-form `meta` table verbatim (when declared), and `parameter` when the point is one (§5.2). |
+| `points[].parameter` | `sets` — the parameter sets the point belongs to, **resolved by the connector** — plus how it should be presented: `title`, `description`, `enum`, `default` as declared, and `order`, which is the declared `parameter.order` or else the point's position among the device's parameters. A consumer never derives a set name, and a renderer never opens the configuration file. |
 
 Rules:
 
@@ -1088,6 +1098,10 @@ Rules:
 - Consumers MUST tolerate seeing a sample before the device's manifest (retained delivery order
   across topics is undefined after a restart): the reference flows fall back to their defaults
   or wait for the next sample.
+- The manifest is the only input a *rendering* of the device needs. `tedge-dot manifest` prints
+  the same documents from a configuration, without a broker or a device, and
+  `--format c8y-dtm` renders them as Cumulocity property definitions — a CLI concern, outside
+  this contract and outside the SDK.
 
 ### 8.1 Liveness
 

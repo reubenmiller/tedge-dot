@@ -31,11 +31,14 @@ ${NEW_VALUE}            4343
 
 
 *** Test Cases ***
-Parameter Definitions Are Rendered From The Connector Config
-    [Documentation]    `tedge-dot describe` renders one DTM property definition per parameter
-    ...                set, with the writable points as properties (an admin registers it once).
+Parameter Definitions Are Rendered From The Device Manifest
+    [Documentation]    `tedge-dot manifest --format c8y-dtm` renders one DTM property definition
+    ...                per parameter set, with the writable points as properties (an admin
+    ...                registers it once). It renders them from the device MANIFESTS the
+    ...                connector publishes, not from the configuration file: the same document,
+    ...                the same sets, whatever produced it.
     ${output}=    Execute Shell Command And Get Output
-    ...    tedge-dot describe -c /etc/tedge/plugins/ot/modbus.toml --compact    timeout=${OP_TIMEOUT}
+    ...    tedge-dot manifest -c /etc/tedge/plugins/ot/modbus.toml --format c8y-dtm    timeout=${OP_TIMEOUT}
     # The first JSON line, not the first line: a warning on stderr (§5.2) can be interleaved.
     ${definition}=    Evaluate    json.loads([l for l in $output.splitlines() if l.startswith("{")][0])    modules=json
     Should Be Equal    ${definition}[identifier]    ${SET}

@@ -6,14 +6,17 @@
 //!   `*.toml`), and run every connector concurrently in this one process: each config gets its
 //!   own protocol module + SDK runtime instance, supervised with an in-process restart loop.
 //!   Samples go to the MQTT broker by default, or to stdout as JSON lines (`--output stdout`).
-//! * `describe` — render the Cumulocity Digital Twin Manager property definitions that declare
-//!   a configuration's writable points as editable device parameters (for a tenant admin to
-//!   register; the device itself never talks to the DTM service).
+//! * `manifest` — print the device manifests (contract §8.2) a configuration would publish:
+//!   the same documents, off the same code, without a broker or a device. `--format c8y-dtm`
+//!   renders them as Cumulocity Digital Twin Manager property definitions instead, for a tenant
+//!   admin to register (the device itself never talks to the DTM service).
 //! * `read` / `write` — connect directly to configured devices and read or write points, then
 //!   exit. Devices and points accept `*`/`?` wildcards, and `read` can keep polling
 //!   (`--poll` / `--interval` / `--count`). These need no broker or running connector; they
 //!   reuse the exact same protocol module code path the runtime uses, which makes them handy
 //!   for experimenting and debugging.
+
+mod formats;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
@@ -54,46 +57,42 @@ enum Command {
     Read(ReadArgs),
     /// Write a value to a point directly on a device, then exit (no broker required).
     Write(WriteArgs),
-    /// Render the Cumulocity DTM property definitions for a configuration's parameter sets
+    /// Print the device manifests a configuration publishes, or a rendering of them
     /// (no device or broker required).
-    Describe(DescribeArgs),
+    Manifest(ManifestArgs),
 }
 
-/// Output format of `describe`.
+/// What `manifest` prints.
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum DescribeFormat {
-    /// Cumulocity Digital Twin Manager property definitions, one per parameter set
-    /// (writable points grouped by meta.parameter.set). A tenant admin posts each element
-    /// to POST /service/dtm/definitions/properties once to make the set editable in the
-    /// device "Parameters" tab.
+enum ManifestFormat {
+    /// The device manifests themselves (contract §8.2), pretty-printed as a JSON array — the
+    /// same documents the running connector retains on te/device/<device>/ot/<protocol>/manifest,
+    /// each with the `device` name the topic carries.
+    Json,
+    /// Cumulocity Digital Twin Manager property definitions rendered from those manifests, one
+    /// per parameter set, one compact document per line. A tenant admin posts each of them to
+    /// POST /service/dtm/definitions/properties once to make the set editable in the device's
+    /// "Parameters" tab.
     C8yDtm,
 }
 
 #[derive(Args)]
-struct DescribeArgs {
+struct ManifestArgs {
     /// Connector configuration files and/or directories to scan for `*.toml` configs, as for
-    /// `run`. The definitions cover every config found, with a set shared by several of them
-    /// rendered once.
+    /// `run`. The output covers every config found, with a parameter set shared by several of
+    /// them rendered once.
     configs: Vec<String>,
     /// Connector configuration file or directory (same as the positional argument; repeat
     /// for several). Defaults to /etc/tedge/plugins/ot when neither is given.
     #[arg(short, long = "config", value_name = "PATH")]
     config: Vec<String>,
     /// What to print.
-    #[arg(short, long, value_enum, default_value_t = DescribeFormat::C8yDtm)]
-    format: DescribeFormat,
+    #[arg(short, long, value_enum, default_value_t = ManifestFormat::Json)]
+    format: ManifestFormat,
     /// Device name or wildcard pattern to restrict the output to; it must match at least one
     /// device. Default: every device.
     #[arg(short, long)]
     device: Option<String>,
-    /// One parameter set for every point that does not name an absolute one, instead of the
-    /// derived <type-or-protocol>_<group>_parameters. Must match the ot-parameter-state flow
-    /// setting.
-    #[arg(long, value_name = "NAME")]
-    set: Option<String>,
-    /// Print compact JSON (one document per line) instead of pretty-printed.
-    #[arg(long)]
-    compact: bool,
 }
 
 /// Where the `run` command publishes samples.
@@ -191,7 +190,7 @@ async fn main() -> ExitCode {
         Command::Run(args) => run(args).await,
         Command::Read(args) => report(cmd_read(args).await),
         Command::Write(args) => report(cmd_write(args).await),
-        Command::Describe(args) => report(cmd_describe(args)),
+        Command::Manifest(args) => report(cmd_manifest(args)),
     }
 }
 
@@ -211,7 +210,7 @@ fn report(result: Result<(), String>) -> ExitCode {
 /// flag (`-h`/`--help`/`-V`/`--version`).
 fn normalized_args() -> Vec<String> {
     let mut args: Vec<String> = std::env::args().collect();
-    const SUBCOMMANDS: &[&str] = &["run", "read", "write", "describe", "help"];
+    const SUBCOMMANDS: &[&str] = &["run", "read", "write", "manifest", "help"];
     let needs_run = match args.get(1) {
         None => true,
         Some(a) => !(SUBCOMMANDS.contains(&a.as_str()) || a.starts_with('-')),
@@ -223,7 +222,7 @@ fn normalized_args() -> Vec<String> {
 }
 
 /// Combine the positional config paths with the `--config` flag values, falling back to the
-/// default config directory when neither is given. Shared by `run` and `describe`.
+/// default config directory when neither is given. Shared by `run` and `manifest`.
 fn combined_config_args(positional: &[String], flagged: &[String]) -> Vec<String> {
     let mut paths = positional.to_vec();
     paths.extend(flagged.iter().cloned());
@@ -1141,12 +1140,13 @@ async fn cmd_write(args: WriteArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// Print the Cumulocity DTM definitions derived from every connector configuration found.
+/// Print the device manifests every connector configuration found would publish, or a
+/// rendering of them.
 ///
-/// One service runs every config in its directory and a DTM identifier is tenant-wide, so the
-/// definitions — and the warnings about them — are computed across all of the configs rather
-/// than per file: a set declared in several files is rendered once.
-fn cmd_describe(args: DescribeArgs) -> Result<(), String> {
+/// One service runs every config in its directory and a parameter set identifier is
+/// tenant-wide, so the manifests — and the warnings about them — are computed across all of the
+/// configs rather than per file: a set declared in several files is rendered once.
+fn cmd_manifest(args: ManifestArgs) -> Result<(), String> {
     let paths = combined_config_args(&args.configs, &args.config);
     let files = discover_configs(&paths)?;
     if files.is_empty() {
@@ -1159,16 +1159,8 @@ fn cmd_describe(args: DescribeArgs) -> Result<(), String> {
         .iter()
         .map(|path| load_config(&path.display().to_string()))
         .collect::<Result<Vec<_>, _>>()?;
-    // A blank `--set` means "none given", as an empty `default_set` does in the flow: an unset
-    // variable in a provisioning script (`--set "$PARAM_SET"`) must not force every point into
-    // a nameless set. The C build applies the same rule.
-    let forced = args
-        .set
-        .as_deref()
-        .map(tedge_dot_sdk::descriptor::trim_c)
-        .filter(|s| !s.is_empty());
-    // A pattern that was given must match a device somewhere — `*` included, as in the C build:
-    // what decides is whether `-d` was given, not what it says.
+    // A pattern that was given must match a device somewhere — `*` included: what decides is
+    // whether `-d` was given, not what it says.
     if let Some(pattern) = &args.device {
         for config in &mut configs {
             config.devices.retain(|d| wildcard_match(pattern, &d.name));
@@ -1178,56 +1170,91 @@ fn cmd_describe(args: DescribeArgs) -> Result<(), String> {
         }
     }
     // Parameter ids become fragment keys on the device twin, so they must be plain identifiers.
-    let bad = tedge_dot_sdk::descriptor::invalid_keys_across(&configs, forced);
+    // Refused here and not merely warned about: a manifest that named such a set would send the
+    // flow and the cloud after a fragment key neither can use.
+    let bad = tedge_dot_sdk::descriptor::invalid_keys_across(&configs);
     if !bad.is_empty() {
         return Err(format!(
             "parameter keys must match [A-Za-z0-9_]: {}",
             bad.join(", ")
         ));
     }
-    // A DTM identifier is tenant-wide, so a set named after the protocol is shared with every
+    // A set identifier is tenant-wide, so a set named after the protocol is shared with every
     // other device type that speaks it. Declaring the device type is what keeps them apart.
-    if forced.is_none() {
-        // Worded and shaped exactly like the C build's warning (impl/c/src/main.c): the two
-        // CLIs are meant to be interchangeable, and `describe-parity.sh` compares stderr.
-        for warning in tedge_dot_sdk::descriptor::type_warnings_across(&configs) {
-            eprintln!("{warning}");
-        }
-        // One untyped-device warning per protocol, in the order the protocols first appear:
-        // such a device's sets are named after its protocol, so that is what it collides with.
-        let mut protocols: Vec<&str> = Vec::new();
-        for config in &configs {
-            if !protocols.contains(&config.connector.protocol.as_str()) {
-                protocols.push(&config.connector.protocol);
-            }
-        }
-        for protocol in protocols {
-            let untyped = tedge_dot_sdk::descriptor::untyped_devices_across(&configs, protocol);
-            if !untyped.is_empty() {
-                eprintln!(
-                    "warning: device(s) {} declare no `type`, so their parameter sets are named \
-                     after the protocol ('{protocol}_...') and collide with every other \
-                     {protocol} device type in the tenant; set `type` on the device or in its \
-                     point library",
-                    untyped.join(", "),
-                );
-            }
+    // (Configurations that force one name with `[connector] parameter_set` derive none, and the
+    // warnings skip them.)
+    for warning in tedge_dot_sdk::descriptor::type_warnings_across(&configs) {
+        eprintln!("{warning}");
+    }
+    // One untyped-device warning per protocol, in the order the protocols first appear: such a
+    // device's sets are named after its protocol, so that is what it collides with.
+    let mut protocols: Vec<&str> = Vec::new();
+    for config in &configs {
+        if !protocols.contains(&config.connector.protocol.as_str()) {
+            protocols.push(&config.connector.protocol);
         }
     }
-    let docs: Vec<serde_json::Value> = match args.format {
-        DescribeFormat::C8yDtm => {
-            tedge_dot_sdk::descriptor::c8y_dtm_definitions_across(&configs, forced)
+    for protocol in protocols {
+        let untyped = tedge_dot_sdk::descriptor::untyped_devices_across(&configs, protocol);
+        if !untyped.is_empty() {
+            eprintln!(
+                "warning: device(s) {} declare no `type`, so their parameter sets are named \
+                 after the protocol ('{protocol}_...') and collide with every other \
+                 {protocol} device type in the tenant; set `type` on the device or in its \
+                 point library",
+                untyped.join(", "),
+            );
         }
-    };
-    if args.compact {
-        for doc in &docs {
-            println!("{doc}");
+    }
+    let manifests = device_manifests(&configs);
+    match args.format {
+        ManifestFormat::Json => {
+            let docs: Vec<serde_json::Value> = manifests.iter().map(|m| m.to_json()).collect();
+            let out = serde_json::to_string_pretty(&docs).map_err(|e| e.to_string())?;
+            println!("{out}");
         }
-    } else {
-        let out = serde_json::to_string_pretty(&docs).map_err(|e| e.to_string())?;
-        println!("{out}");
+        // One document per line: each is posted to the DTM service on its own, so a line is the
+        // unit a provisioning script loops over.
+        ManifestFormat::C8yDtm => {
+            for definition in formats::c8y_dtm::definitions(&manifests) {
+                println!("{definition}");
+            }
+        }
     }
     Ok(())
+}
+
+/// The manifest of every device of every configuration, in configuration order.
+///
+/// The command types a device answers come from the protocol module's capabilities, exactly as
+/// the runtime takes them, so the printed manifest is the one the service would publish. A
+/// protocol that is not compiled into this build cannot report them: the manifests are printed
+/// without `commands` rather than not at all, since a build without (say) profibus is still the
+/// right place to inspect a profibus configuration.
+fn device_manifests(configs: &[ConnectorConfig]) -> Vec<formats::DeviceManifest> {
+    let mut out = Vec::new();
+    for config in configs {
+        let commands = match build_connector(&config.connector.protocol) {
+            // The RUNTIME's capabilities, not the module's: the runtime adds `write-batch` over
+            // a module that can write, so asking the module alone would advertise a command
+            // type fewer than the running service does.
+            Ok(connector) => tedge_dot_sdk::commands::device_command_types(
+                &runtime::effective_capabilities(&connector.capabilities()).command_verbs,
+                &config.connector.command_aliases,
+            ),
+            Err(reason) => {
+                eprintln!("warning: {reason}; manifests are printed without `commands`");
+                Vec::new()
+            }
+        };
+        for device in &config.devices {
+            out.push(formats::DeviceManifest {
+                device: device.name.clone(),
+                manifest: tedge_dot_sdk::manifest::device_manifest(config, device, None, &commands),
+            });
+        }
+    }
+    out
 }
 
 /// Print one successful write result (JSON envelope or friendly line). The `device` field
@@ -1727,27 +1754,35 @@ protocol_address = { host = "127.0.0.2" }
         assert_eq!(combined_config_args(&[], &[]), vec![DEFAULT_CONFIG_DIR]);
     }
 
-    /// `describe` takes the same paths as `run` and defaults to the same directory: the one the
-    /// packaged service runs, so its definitions cover every connector of that service.
+    /// `manifest` takes the same paths as `run` and defaults to the same directory: the one the
+    /// packaged service runs, so its output covers every connector of that service.
     #[test]
-    fn describe_takes_the_config_paths_run_does() {
-        let cli = Cli::parse_from(["tedge-dot", "describe", "a.toml", "-c", "dir", "-c", "b.toml"]);
-        let Command::Describe(args) = cli.command else {
-            panic!("not parsed as describe");
+    fn manifest_takes_the_config_paths_run_does() {
+        let cli = Cli::parse_from(["tedge-dot", "manifest", "a.toml", "-c", "dir", "-c", "b.toml"]);
+        let Command::Manifest(args) = cli.command else {
+            panic!("not parsed as manifest");
         };
         assert_eq!(
             combined_config_args(&args.configs, &args.config),
             vec!["a.toml", "dir", "b.toml"]
         );
+        assert!(args.format == ManifestFormat::Json, "the manifest itself is the default");
 
-        let cli = Cli::parse_from(["tedge-dot", "describe"]);
-        let Command::Describe(args) = cli.command else {
-            panic!("not parsed as describe");
+        let cli = Cli::parse_from(["tedge-dot", "manifest"]);
+        let Command::Manifest(args) = cli.command else {
+            panic!("not parsed as manifest");
         };
         assert_eq!(
             combined_config_args(&args.configs, &args.config),
             vec![DEFAULT_CONFIG_DIR]
         );
+
+        // The cloud rendering is one format among others, reachable but never the default.
+        let cli = Cli::parse_from(["tedge-dot", "manifest", "--format", "c8y-dtm"]);
+        let Command::Manifest(args) = cli.command else {
+            panic!("not parsed as manifest");
+        };
+        assert!(args.format == ManifestFormat::C8yDtm);
     }
 
     #[test]

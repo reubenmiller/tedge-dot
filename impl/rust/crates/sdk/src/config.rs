@@ -57,6 +57,19 @@ pub struct ConnectorSection {
     /// baked into a protocol-neutral runtime.
     #[serde(default)]
     pub command_aliases: std::collections::BTreeMap<String, String>,
+    /// One parameter set name for every point that does not name an absolute one, instead of
+    /// the derived `<device type, else protocol>_<group>_parameters` (RFC 0005, §5.2).
+    ///
+    /// This was `describe --set` plus the `ot-parameter-state` flow's `default_set`: the same
+    /// decision written down twice, in two places that had to agree or the twin fragment and
+    /// the registered definition would carry different names. The connector resolves the sets
+    /// once, onto the manifest, so the flow and the CLI both read the answer instead of
+    /// recomputing it.
+    ///
+    /// Blank is "unset", as an empty `default_set` was: an unexpanded variable in a
+    /// provisioning script must not force every point into a nameless set.
+    #[serde(rename = "parameter_set", default)]
+    pub(crate) configured_parameter_set: Option<String>,
     /// Directories searched for the point libraries devices name in `points_from`
     /// ([`crate::library`]). Unset means the built-in path: the site directory
     /// `/etc/tedge/plugins/ot/points.d` first, then the packaged
@@ -256,6 +269,19 @@ impl ConnectorSection {
         self.configured_service_name
             .clone()
             .unwrap_or_else(|| format!("tedge-dot-{}", self.protocol))
+    }
+
+    /// The configured `parameter_set`, or `None` when it is absent or blank.
+    ///
+    /// Trimmed with the C definition of whitespace, the one both loaders share, so an
+    /// unexpanded `parameter_set = "$PARAM_SET"` in a provisioning script does not become a
+    /// set called `"$PARAM_SET"` and a padded one does not become a different set from the
+    /// same name written without the padding.
+    pub fn parameter_set(&self) -> Option<&str> {
+        self.configured_parameter_set
+            .as_deref()
+            .map(crate::library::trim_c)
+            .filter(|s| !s.is_empty())
     }
 }
 fn default_poll_interval() -> String {

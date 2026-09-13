@@ -11,7 +11,7 @@
 // entry: the connector derives the sets once — a point whose `access` permits writes, or that
 // opts in via its `parameter` field, grouped by the RFC 0005 naming rule — and publishes the result,
 // so this flow never re-derives a name and never needs the connector's configuration file.
-// Each set is one twin fragment keyed by point id: the same sets `tedge-dot describe` declares
+// Each set is one twin fragment keyed by point id: the same sets the DTM definitions declare
 // in the cloud.
 //
 // Where values come from:
@@ -37,18 +37,11 @@
 const decoder = new TextDecoder();
 
 // A set name becomes BOTH a twin fragment key and a segment of the topic it is published on,
-// so it must be a plain identifier — the same rule `tedge-dot describe` refuses to render
-// without. The manifest applies it before publishing; checked again here because `default_set`
-// is free text from a params file, and `#` or `+` would make an illegal PUBLISH topic.
+// so it must be a plain identifier. The connector refuses to name a set that is not one, but a
+// manifest is a message from another process: `#` or `+` here would make an illegal PUBLISH
+// topic, so it is checked again before use.
 function isValidSet(name) {
   return typeof name === "string" && /^[A-Za-z0-9_]+$/.test(name);
-}
-
-// Trimmed with the SDKs' definition of whitespace (C's isspace, which `tedge-dot describe`
-// applies to --set) rather than JS's Unicode-aware trim, so the flow and the CLI agree on what
-// a blank `default_set` is, and on the exact spelling of a padded one.
-function trimC(s) {
-  return String(s).replace(/^[ \t\n\v\f\r]+|[ \t\n\v\f\r]+$/g, "");
 }
 
 // Remember (or forget, on a clearing message) a device's manifest.
@@ -65,17 +58,19 @@ function rememberManifest(context, device, payloadBytes) {
   context.mapper.set(`ot-manifest:${device}`, manifest);
 }
 
-// The sets a point belongs to: what the manifest resolved, or — with `default_set` — that one
-// name for every parameter. `null` when the manifest has not been seen; `false` when the point
-// is not a parameter (or does not exist).
+// The sets a point belongs to, as the manifest resolved them. `null` when the manifest has not
+// been seen; `false` when the point is not a parameter (or does not exist).
+//
+// There is no `default_set` here any more (RFC 0006 §8.1). Forcing one name for every parameter
+// is `[connector] parameter_set` on the connector, which resolves it INTO the manifest — the
+// same decision used to be written here and in `tedge-dot describe --set`, and a twin fragment
+// named differently from the registered definition is what happened when the two drifted.
 function setsOf(context, device, point) {
   const manifest = context.mapper.get(`ot-manifest:${device}`);
   if (!manifest) return null;
   const entry = manifest.points?.[point];
   const sets = entry?.parameter?.sets;
   if (!Array.isArray(sets) || sets.length === 0) return false;
-  const forced = trimC(context.config?.default_set || "");
-  if (forced) return isValidSet(forced) ? [forced] : false;
   const usable = sets.filter(isValidSet);
   return usable.length ? usable : false;
 }

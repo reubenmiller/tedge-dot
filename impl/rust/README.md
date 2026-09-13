@@ -9,7 +9,8 @@ per protocol module, the conformance harness, and the `tedge-dot` binary.
 | [crates/sdk](crates/sdk/) | `tedge-dot-sdk` — runtime, `Connector` trait, config model, decode helpers, golden vectors |
 | [crates/connector-*](crates/) | one crate per protocol module (modbus, opcua, canbus, canopen, profibus) |
 | [crates/ot-conformance](crates/ot-conformance/) | the contract conformance harness (schema, decode vectors, behavioural checks) |
-| [src/main.rs](src/main.rs) | the binary: `run` service plus the `read`/`write`/`describe` CLI |
+| [src/main.rs](src/main.rs) | the binary: `run` service plus the `read`/`write`/`manifest` CLI |
+| [src/formats/](src/formats/) | renderings of the device manifest for something other than the contract (`--format c8y-dtm`) — here and not in the SDK, so the SDK stays cloud-agnostic |
 | [vendor/](vendor/) | patched copies of upstream crates (see the `TEDGE-DOT-PATCH.md` in each) |
 
 The [C implementation](../c/) is its maintained peer: same contract, same

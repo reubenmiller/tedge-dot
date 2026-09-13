@@ -17,6 +17,16 @@ use serde_json::{json, Map, Value};
 /// The contract version a manifest declares.
 pub const CONTRACT_VERSION: &str = "0.2";
 
+/// The `parameter` keys that say how a point should be *presented* as an editable setting, as
+/// opposed to which sets it is in.
+///
+/// They are on the manifest because a renderer works over the manifest and not over the
+/// configuration (RFC 0006 §8.1): a Cumulocity DTM definition, an MCP tool schema or a
+/// commissioning form all need the label and the ordering, and none of them should have to
+/// read `/etc/tedge/plugins/ot`. `group` and `set` are not here — they are already spent, on
+/// `sets`.
+const PRESENTATION_KEYS: &[&str] = &["title", "description", "enum", "default", "order"];
+
 /// The retained manifest topic of one device.
 pub fn topic(device: &str, protocol: &str) -> String {
     format!("te/device/{device}/ot/{protocol}/manifest")
@@ -31,8 +41,16 @@ pub fn device_manifest(
     commands: &[String],
 ) -> Value {
     let protocol = config.connector.protocol.as_str();
-    let naming = SetNaming::of(device, protocol, None);
+    // `[connector] parameter_set` forces one set name for every point that does not name an
+    // absolute one (§5.2). It is applied HERE, once, so the twin flow and the CLI renderer
+    // read one answer instead of each re-deriving it from the configuration.
+    let naming = SetNaming::of(device, protocol, config.connector.parameter_set());
     let mut points = Map::new();
+    // The position of each parameter in the CONFIGURATION, which is the order an integrator
+    // chose to write them in. The manifest's `points` object is keyed by id, and a JSON object
+    // has no order to preserve it in, so it is written down here or it is lost — and then a
+    // form rendered from the manifest could only fall back to alphabetical.
+    let mut parameter_order = 0u64;
     for point in &device.points {
         let mut entry = Map::new();
         entry.insert(
@@ -95,13 +113,31 @@ pub fn device_manifest(
         // Resolved once, here: the RFC 0005 naming rule used to be applied by the SDK, the C
         // SDK and the parameter-state flow alike, byte for byte. Now the flow reads the result.
         let mut sets: Vec<String> = Vec::new();
+        let mut options = Map::new();
         for parameter in parameters_of(point, &naming) {
             if !sets.contains(&parameter.set) {
                 sets.push(parameter.set);
             }
+            // How the point should be PRESENTED as a parameter, verbatim from its `parameter`
+            // table. It is the same for every set the point is in, so the first one settles it.
+            if options.is_empty() {
+                for key in PRESENTATION_KEYS {
+                    if let Some(value) = parameter.options.get(*key) {
+                        options.insert((*key).into(), value.clone());
+                    }
+                }
+            }
         }
         if !sets.is_empty() {
-            entry.insert("parameter".into(), json!({ "sets": sets }));
+            parameter_order += 1;
+            let mut parameter = Map::new();
+            parameter.insert("sets".into(), json!(sets));
+            // A point that declares no `order` gets its configuration position, so the relative
+            // order survives into whatever renders the set. A declared one is left alone: it is
+            // the integrator overriding exactly this.
+            options.entry("order").or_insert_with(|| json!(parameter_order));
+            parameter.append(&mut options);
+            entry.insert("parameter".into(), Value::Object(parameter));
         }
         points.insert(point.id.clone(), Value::Object(entry));
     }

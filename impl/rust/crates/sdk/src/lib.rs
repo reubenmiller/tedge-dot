@@ -22,6 +22,6 @@ pub use connector::{
     Access, Capabilities, CommandRequest, CommandResult, ConfigError, Connector, ConnectorError,
     LinkReport, LinkStatus, PointRef, SampleSink,
 };
-pub use descriptor::{c8y_dtm_definitions, parameters, parameters_of, Parameter};
+pub use descriptor::{parameters, parameters_of, Parameter};
 pub use decode::{decode_primitive, encode_primitive, extract_bitfield, DecodeError, Endianness, WordOrder};
 pub use model::{DataType, DeviceId, PointId, Quality, Sample, Transform, Value};

@@ -71,8 +71,8 @@ RUN chmod 0755 /usr/bin/tedge-dot \
 # alarm/event flows parked in /usr/share for the operator. Same split as nfpm.yaml.
 COPY flows/ot-measurement       /etc/tedge/mappers/c8y/flows/ot-measurement
 COPY flows/ot-registration      /etc/tedge/mappers/c8y/flows/ot-registration
-COPY flows/ot-command-forward   /etc/tedge/mappers/c8y/flows/ot-command-forward
-COPY flows/ot-command-result    /etc/tedge/mappers/c8y/flows/ot-command-result
+COPY flows/ot-parameter-update  /etc/tedge/mappers/c8y/flows/ot-parameter-update
+COPY flows/ot-parameter-result  /etc/tedge/mappers/c8y/flows/ot-parameter-result
 COPY flows/ot-parameter-state   /etc/tedge/mappers/c8y/flows/ot-parameter-state
 COPY flows/ot-alarm             /usr/share/tedge-dot/flows/ot-alarm
 COPY flows/ot-event             /usr/share/tedge-dot/flows/ot-event
