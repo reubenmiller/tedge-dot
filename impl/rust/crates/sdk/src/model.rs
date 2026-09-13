@@ -191,7 +191,9 @@ impl Value {
         }
     }
 
-    fn to_json(&self) -> serde_json::Value {
+    /// The value as it appears in a sample envelope's `value`, and as the publish gate (§5.4)
+    /// compares one reading with the last published one.
+    pub fn to_json(&self) -> serde_json::Value {
         match self {
             Value::Bool(b) => serde_json::Value::Bool(*b),
             Value::Number(n) => serde_json::json!(n),

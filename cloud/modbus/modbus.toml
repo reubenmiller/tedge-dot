@@ -33,13 +33,14 @@ default_mode     = "typed"
 
   # Writable points are device *parameters*: the ot-parameter-state flow publishes them as the
   # modbus_plc_sim_control_parameters twin fragment and `tedge-dot describe` renders the
-  # matching Digital Twin Manager definition (meta.parameter enriches the schema).
+  # matching Digital Twin Manager definition (`parameter` labels it, `range` bounds it).
   [[device.point]]
   id       = "temp_u16"
   datatype = "uint16"
   access   = "read_write"
   address  = { table = "holding", address = 3, count = 1 }
-  meta     = { parameter = { title = "Temperature setpoint", min = 0, max = 30000 } }
+  parameter = { title = "Temperature setpoint" }
+  range     = { min = 0, max = 30000 }
 
   [[device.point]]
   id       = "count_u32"

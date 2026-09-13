@@ -137,15 +137,106 @@ pub struct PointConfig {
     /// Optional per-point linear transform applied by the connector after decode.
     #[serde(default)]
     pub transform: Option<Transform>,
-    /// Free-form signal metadata, echoed verbatim as `meta` in every sample envelope for this
-    /// point. Flows read it for per-signal behaviour (e.g. `on_change`, `min_interval`,
-    /// `deadband`); the connector and runtime never interpret it.
+    /// Engineering-unit bounds of the signal (§5.3). Enforced by the runtime on **write**: a
+    /// value outside them fails before the device is touched. Reads are not altered — a
+    /// reading outside `range` is still `good`, because the device really says so.
+    #[serde(default)]
+    pub range: Option<Range>,
+    /// Per-signal publish policy (§5.4), applied by the runtime to this point's sample stream:
+    /// publish only on change, outside a deadband, no more often than `min_interval`, and only
+    /// once the value has been stable for `debounce`.
+    #[serde(default)]
+    pub publish: Option<PublishPolicy>,
+    /// Where the signal lands as a measurement (§5.5): `false` to keep it out of the
+    /// measurements altogether, or a table with `group` / `series`. Kept as a raw value
+    /// because both a boolean and a table are legal; the loader validates the table's keys.
+    #[serde(default)]
+    pub measurement: Option<serde_json::Value>,
+    /// Exposure of the signal as an operator-editable setting (§5.2): `false`, `true`, a string
+    /// naming the set, or a table (`group`, `set`, `title`, `description`, `enum`, `default`,
+    /// `order`). Kept as a raw value because all four shapes are legal; the loader validates
+    /// the table's keys, and `min`/`max` now live in `range`.
+    #[serde(default)]
+    pub parameter: Option<serde_json::Value>,
+    /// Free-form signal metadata — *yours*. Published verbatim on the device manifest (§8.2)
+    /// so a site's own flow can find it; never interpreted by the connector or the runtime.
+    ///
+    /// The conventions that used to live here — `on_change`, `deadband`, `min_interval`,
+    /// `debounce`, `measurement` and `parameter` — are the typed fields above since 0.2, and
+    /// the loader warns for one release when it finds them here (§5).
     #[serde(default)]
     pub meta: Option<serde_json::Value>,
     /// Set to `false` to keep this point on the polling schedule even when the connector
     /// supports push delivery (`subscribe`). Defaults to push when available.
     #[serde(default)]
     pub subscribe: Option<bool>,
+}
+
+/// Engineering-unit bounds of a signal (§5.3). Either end may be omitted, which leaves that
+/// side unbounded — a setpoint with a floor and no ceiling is an ordinary thing to declare.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Range {
+    #[serde(default)]
+    pub min: Option<f64>,
+    #[serde(default)]
+    pub max: Option<f64>,
+}
+
+impl Range {
+    /// Why `value` is not allowed, or `None` when it is. The message names the point, so it
+    /// reads as a reason on a failed command.
+    pub fn reject(&self, point: &str, value: f64) -> Option<String> {
+        let below = self.min.is_some_and(|min| value < min);
+        let above = self.max.is_some_and(|max| value > max);
+        if !below && !above {
+            return None;
+        }
+        let bounds = match (self.min, self.max) {
+            (Some(min), Some(max)) => format!("[{min}, {max}]"),
+            (Some(min), None) => format!("[{min}, ∞)"),
+            (None, Some(max)) => format!("(-∞, {max}]"),
+            (None, None) => return None,
+        };
+        Some(format!("value {value} outside range {bounds} of {point}"))
+    }
+}
+
+/// Per-signal publish policy (§5.4). Every field is optional; an undeclared one means the
+/// point is published on every read, which is the 0.1 behaviour and the default.
+#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct PublishPolicy {
+    /// Publish only when the value differs from the last published one.
+    #[serde(default)]
+    pub on_change: Option<bool>,
+    /// How much a numeric value must differ to count as changed. Implies `on_change`.
+    #[serde(default)]
+    pub deadband: Option<f64>,
+    /// Never publish more often than this (duration string).
+    #[serde(default)]
+    pub min_interval: Option<String>,
+    /// Publish a new value only once it has been stable for this long. Implies `on_change`.
+    #[serde(default)]
+    pub debounce: Option<String>,
+}
+
+impl PublishPolicy {
+    /// True when the policy asks for nothing, so the point is published on every read.
+    pub fn is_noop(&self) -> bool {
+        self.deadband.unwrap_or(0.0) <= 0.0
+            && !self.on_change.unwrap_or(false)
+            && self.min_interval.as_deref().and_then(parse_duration).is_none()
+            && self.debounce.as_deref().and_then(parse_duration).is_none()
+    }
+
+    /// Change detection is on when it is asked for directly, or implied by a deadband or a
+    /// debounce — both of which are meaningless without it.
+    pub fn on_change(&self) -> bool {
+        self.on_change.unwrap_or(false)
+            || self.deadband.unwrap_or(0.0) > 0.0
+            || self.debounce.as_deref().and_then(parse_duration).is_some()
+    }
 }
 
 impl PointConfig {

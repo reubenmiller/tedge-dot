@@ -97,8 +97,16 @@ Device Manifest Describes The Device And Its Points
     Dictionary Should Not Contain Key    ${points}[level_f32]    parameter
     # The inline device override wins over the library ("packaged" -> "m").
     Should Be Equal    ${points}[level_f32][unit]    m
-    # The free-form meta table is on the manifest verbatim, not in every sample.
-    Should Be Equal    ${points}[twin_only_u16][meta]    ${{ {"measurement": False} }}
+    # The typed signal metadata of §5 is on the manifest: `measurement` names (or refuses)
+    # the series, `range` is the bound the connector enforces on write, `publish` is the
+    # policy the runtime has already applied to the stream.
+    Should Be Equal    ${points}[twin_only_u16][measurement]    ${False}
+    Should Be Equal    ${points}[temp_scaled][unit]    kV
+    Should Be Equal    ${points}[bounded_u16][range]    ${{ {"min": 10, "max": 500} }}
+    Should Be Equal    ${points}[quiet_u16][publish][on_change]    ${True}
+    Should Be Equal    ${points}[bounded_u16][measurement][series]    Bounded
+    # `meta` is free-form again: the site's own tags, published verbatim and read by nobody.
+    Should Be Equal    ${points}[bounded_u16][meta]    ${{ {"asset_tag": "B-17"} }}
 
 Capability Descriptor Describes The Build Only
     [Documentation]    What the configuration says about a device is on its manifest; the
@@ -220,6 +228,70 @@ Writes A Scaled Register In Engineering Units
     ${raw}=    Wait For Sample    ${SAMPLE_PREFIX}/temp_u16    timeout=${SAMPLE_TIMEOUT}
     ${wire}=    Get Json Field    ${raw}    value
     Should Be Equal As Numbers    ${wire}    20000
+
+The Runtime Applies A Point's Publish Policy
+    [Documentation]    §5.4 / RFC 0006 §5.1 option A: `publish` is applied by the CONNECTOR to
+    ...                the sample stream, not by each flow that wants it. quiet_u16 reads a
+    ...                register whose value never changes and declares publish.on_change, so
+    ...                after its first sample the connector goes quiet — while the points
+    ...                around it keep publishing every poll, which is what proves the polling
+    ...                loop is still running and only the publishing was suppressed.
+    # Make the value change, so there is a sample to catch deterministically: a point that
+    # publishes only once, at startup, races the test client's subscription.
+    Publish Message    ${CMD_PREFIX}/quiet-1    {"status":"init","point":"quiet_u16","value":1234}    retain=True
+    Wait For Message Containing    ${CMD_PREFIX}/quiet-1    "status":"successful"    timeout=${SAMPLE_TIMEOUT}
+    # The change passes the gate...
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/quiet_u16    timeout=${SAMPLE_TIMEOUT}
+    Sample Should Be Good    ${payload}
+    ${value}=    Get Json Field    ${payload}    value
+    Should Be Equal As Numbers    ${value}    1234
+    # ...and every identical re-read after it is suppressed. (`No New Messages` ignores
+    # history, so the retained traffic other tests rely on is left alone.)
+    No New Messages On Topic    ${SAMPLE_PREFIX}/quiet_u16    timeout=5
+    # Meanwhile a point with no policy kept publishing right through that window, which is what
+    # shows the poll loop never stopped and only the publishing was suppressed.
+    Wait For Sample    ${SAMPLE_PREFIX}/count_u32    timeout=${SAMPLE_TIMEOUT}
+
+A Write Outside The Declared Range Fails Before The Device Is Touched
+    [Documentation]    `range` (§5.3) is enforced by the connector, not only by the cloud form:
+    ...                a write outside it fails with a reason and never reaches the device, so a
+    ...                script or a typo in an operation meets the same bound an operator does.
+    ...                bounded_u16 declares range = { min = 10, max = 500 }.
+    Publish Message    ${CMD_PREFIX}/ok-1    {"status":"init","point":"bounded_u16","value":400}    retain=True
+    Wait For Message Containing    ${CMD_PREFIX}/ok-1    "status":"successful"    timeout=${SAMPLE_TIMEOUT}
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/bounded_u16    timeout=${SAMPLE_TIMEOUT}
+    ${value}=    Get Json Field    ${payload}    value
+    Should Be Equal As Numbers    ${value}    400
+    # Above the ceiling: refused, with the range named, and the register keeps the old value.
+    Publish Message    ${CMD_PREFIX}/hi-1    {"status":"init","point":"bounded_u16","value":501}    retain=True
+    ${result}=    Wait For Message Containing    ${CMD_PREFIX}/hi-1    "status":"failed"    timeout=${SAMPLE_TIMEOUT}
+    ${reason}=    Get Json Field    ${result}    reason
+    Should Contain    ${reason}    outside range [10, 500] of bounded_u16
+    # Below the floor: likewise.
+    Publish Message    ${CMD_PREFIX}/lo-1    {"status":"init","point":"bounded_u16","value":9}    retain=True
+    ${result}=    Wait For Message Containing    ${CMD_PREFIX}/lo-1    "status":"failed"    timeout=${SAMPLE_TIMEOUT}
+    ${reason}=    Get Json Field    ${result}    reason
+    Should Contain    ${reason}    outside range
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/bounded_u16    timeout=${SAMPLE_TIMEOUT}
+    ${value}=    Get Json Field    ${payload}    value
+    Should Be Equal As Numbers    ${value}    400    nothing was applied
+
+A Batch With One Out-Of-Range Entry Applies Nothing
+    [Documentation]    In a write-batch the range check runs for EVERY entry before the first
+    ...                write is executed (§5.3), so an out-of-range value fails the batch with
+    ...                nothing applied — the only failure mode guaranteed to have left the
+    ...                device untouched, which is what lets an operator retry it safely.
+    Publish Message    ${BATCH_PREFIX}/range-1
+    ...    {"status":"init","writes":[{"point":"coil_rw","value":true},{"point":"bounded_u16","value":9999}]}    retain=True
+    ${result}=    Wait For Message Containing    ${BATCH_PREFIX}/range-1    "status":"failed"    timeout=${SAMPLE_TIMEOUT}
+    ${reason}=    Get Json Field    ${result}    reason
+    Should Contain    ${reason}    outside range
+    # The first entry was legal, but nothing ran: the batch never started.
+    ${results}=    Get Json Field    ${result}    results
+    Should Be Empty    ${results}
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/bounded_u16    timeout=${SAMPLE_TIMEOUT}
+    ${value}=    Get Json Field    ${payload}    value
+    Should Be Equal As Numbers    ${value}    400
 
 A Write Outside The Datatype Fails Before The Device Is Touched
     [Documentation]    70 on temp_scaled inverts to 70000, which a uint16 register cannot hold,

@@ -39,6 +39,10 @@ struct Point {
     unit: Option<String>,
     transform: Transform,
     meta: Option<serde_json::Value>,
+    /// The typed signal metadata of §5, as the manifest must publish it.
+    range: Option<tedge_dot_sdk::config::Range>,
+    publish: Option<tedge_dot_sdk::config::PublishPolicy>,
+    measurement: Option<serde_json::Value>,
     address: serde_json::Value,
     /// `start_bit`/`bit_count` from the address object, when the point is a bit-field.
     bitfield: Option<(u32, u32)>,
@@ -90,6 +94,9 @@ fn resolve_points(config: &ConnectorConfig) -> Vec<Point> {
                 unit: p.unit.clone(),
                 transform: p.transform.unwrap_or_default(),
                 meta: p.meta.clone(),
+                range: p.range,
+                publish: p.publish.clone(),
+                measurement: p.measurement.clone(),
                 address: p.address.clone(),
                 bitfield,
             });
@@ -296,6 +303,7 @@ pub async fn run(manifest: &Manifest, schemas: &Schemas) -> Result<Vec<Layer>, S
     check_b2_seq_monotonic(&ctx, &mut layer, start_mark).await;
     check_b6_write_roundtrip(&ctx, &mut layer).await;
     check_b7_access_control(&ctx, &mut layer).await;
+    check_b7_range(&ctx, &mut layer).await;
     check_b8_hot_reload(&ctx, &mut layer, &config_path).await;
     check_b11_unowned_device_ignored(&ctx, &mut layer).await;
     check_b5_link_drop_and_recovery(&ctx, &mut layer).await;
@@ -441,6 +449,59 @@ async fn check_b1_manifest(ctx: &Ctx<'_>, layer: &mut Layer, from: usize) {
                                         "points.{}.meta: expected {meta}, got {:?}",
                                         point.id,
                                         entry.get("meta")
+                                    ));
+                                }
+                            }
+                            // The typed signal metadata of §5: `range` because it is the
+                            // limit the cloud form renders and the connector enforces,
+                            // `publish` because a consumer needs it to tell "nothing
+                            // changed" from "nothing was read", `measurement` because a
+                            // flow names the series from it.
+                            if let Some(range) = &point.range {
+                                let got = entry.get("range").and_then(|r| r.as_object());
+                                let min = got.and_then(|r| r.get("min")).and_then(|v| v.as_f64());
+                                let max = got.and_then(|r| r.get("max")).and_then(|v| v.as_f64());
+                                if min != range.min || max != range.max {
+                                    errors.push(format!(
+                                        "points.{}.range: expected {:?}..{:?}, got {:?}",
+                                        point.id,
+                                        range.min,
+                                        range.max,
+                                        entry.get("range")
+                                    ));
+                                }
+                            }
+                            if let Some(publish) = &point.publish {
+                                let got = entry.get("publish").and_then(|p| p.as_object());
+                                let declared = [
+                                    ("on_change", publish.on_change.map(serde_json::Value::from)),
+                                    ("deadband", publish.deadband.map(serde_json::Value::from)),
+                                    (
+                                        "min_interval",
+                                        publish.min_interval.clone().map(serde_json::Value::from),
+                                    ),
+                                    (
+                                        "debounce",
+                                        publish.debounce.clone().map(serde_json::Value::from),
+                                    ),
+                                ];
+                                for (key, want) in declared {
+                                    let Some(want) = want else { continue };
+                                    if got.and_then(|p| p.get(key)) != Some(&want) {
+                                        errors.push(format!(
+                                            "points.{}.publish.{key}: expected {want}, got {:?}",
+                                            point.id,
+                                            got.and_then(|p| p.get(key))
+                                        ));
+                                    }
+                                }
+                            }
+                            if let Some(measurement) = &point.measurement {
+                                if entry.get("measurement") != Some(measurement) {
+                                    errors.push(format!(
+                                        "points.{}.measurement: expected {measurement}, got {:?}",
+                                        point.id,
+                                        entry.get("measurement")
                                     ));
                                 }
                             }
@@ -891,7 +952,16 @@ fn write_probe(point: &Point) -> Option<(serde_json::Value, &'static str, SdkVal
     };
     // What a read of that wire value reports — and therefore what a write of the same signal
     // must carry, and what the result and the next sample must say.
-    let engineering = point.transform.apply(wire);
+    let mut engineering = point.transform.apply(wire);
+    // ...clamped into the point's declared bounds (§5.3), because B6 is the round-trip check
+    // and a probe outside the range would be refused before it ever reached the device. B7-range
+    // is the check that a value outside the bounds IS refused.
+    if let (Some(range), SdkValue::Number(n)) = (point.range, &engineering) {
+        let clamped = n
+            .max(range.min.unwrap_or(f64::NEG_INFINITY))
+            .min(range.max.unwrap_or(f64::INFINITY));
+        engineering = SdkValue::Number(clamped);
+    }
     Some((probe_json(&engineering), repr, engineering))
 }
 
@@ -1094,6 +1164,68 @@ async fn check_b7_access_control(ctx: &Ctx<'_>, layer: &mut Layer) {
         &format!("write to read-only point '{}' fails and never reaches the device", point.id),
         result,
     );
+}
+
+/// B7 (range) — a write outside a point's declared `range` (§5.3) fails with a reason, in
+/// engineering units, and never reaches the device.
+///
+/// This is the limit the cloud form renders, enforced by the driver: a write that bypasses the
+/// form — a script, another flow, a typo in an operation — must meet the same bound.
+async fn check_b7_range(ctx: &Ctx<'_>, layer: &mut Layer) {
+    let id = "B7-range";
+    let what = "a write outside the point's range fails and never reaches the device";
+    let Some(point) = ctx.points.iter().find(|p| {
+        p.access.can_write() && p.mode == Mode::Typed && p.bitfield.is_none() && p.range.is_some()
+    }) else {
+        layer.skip(id, what, "the conformance config declares no writable point with a range".into());
+        return;
+    };
+    let range = point.range.unwrap();
+    // Pick a value the range certainly excludes, on whichever side is bounded.
+    let outside = match (range.min, range.max) {
+        (_, Some(max)) => max + 1.0,
+        (Some(min), None) => min - 1.0,
+        (None, None) => {
+            layer.skip(id, what, "the point's range bounds nothing".into());
+            return;
+        }
+    };
+    let topic = point.cmd_topic(&ctx.protocol, "write", "conf-range");
+    let mark = ctx.broker.mark();
+    let before = ctx.sim.write_count(&point.spec()).unwrap_or(0);
+    ctx.broker.publish(
+        &topic,
+        serde_json::json!({ "status": "init", "point": point.id, "value": outside })
+            .to_string()
+            .as_bytes(),
+        true,
+    );
+
+    let result = async {
+        let failed = ctx
+            .wait_connector_record(mark, COMMAND_TIMEOUT, "status 'failed'", |r| {
+                r.topic == topic
+                    && r.json().ok().map(|j| j["status"] == "failed").unwrap_or(false)
+            })
+            .await?;
+        let json = failed.json()?;
+        let reason = json.get("reason").and_then(|r| r.as_str()).unwrap_or_default();
+        if !reason.contains("range") {
+            return Err(format!(
+                "the failure reason must name the range that rejected the write, got {reason:?}"
+            ));
+        }
+        let after = ctx.sim.write_count(&point.spec())?;
+        if after != before {
+            return Err(format!(
+                "the simulator observed {} write(s) despite the range check",
+                after - before
+            ));
+        }
+        Ok(None)
+    }
+    .await;
+    layer.check(id, &format!("{what} ('{}')", point.id), result);
 }
 
 /// B8 — adding a point through the management interface is picked up without a restart:

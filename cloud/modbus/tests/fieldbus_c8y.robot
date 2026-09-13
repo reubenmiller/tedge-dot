@@ -85,7 +85,7 @@ Child Is Registered With A Device-Owned Managed Object
 Imported Points Produce Mapped Measurements
     [Documentation]    Samples from the imported points surface as the measurement type/series
     ...                declared in the device type's measurementMapping (carried through the
-    ...                point's meta.measurement, honoured by ot-measurement).
+    ...                point's typed `measurement` field, honoured by ot-measurement).
     Set Device    ${DEVICE_ID}:device:${FB_CHILD}
     Device Should Have Measurements
     ...    minimum=1    type=modbus    timeout=${MEAS_TIMEOUT}

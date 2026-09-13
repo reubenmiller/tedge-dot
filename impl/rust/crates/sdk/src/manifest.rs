@@ -50,6 +50,43 @@ pub fn device_manifest(
         if let Some(description) = &point.description {
             entry.insert("description".into(), Value::String(description.clone()));
         }
+        // The typed signal metadata of §5, verbatim: `range` is what the cloud form renders
+        // and the runtime enforces on write, `publish` is what the runtime already applied to
+        // this point's stream (a consumer needs it to know why a reading did not arrive), and
+        // `measurement` is how a flow names the series.
+        if let Some(range) = &point.range {
+            let mut bounds = Map::new();
+            if let Some(min) = range.min {
+                bounds.insert("min".into(), json!(min));
+            }
+            if let Some(max) = range.max {
+                bounds.insert("max".into(), json!(max));
+            }
+            if !bounds.is_empty() {
+                entry.insert("range".into(), Value::Object(bounds));
+            }
+        }
+        if let Some(publish) = &point.publish {
+            let mut policy = Map::new();
+            if let Some(on_change) = publish.on_change {
+                policy.insert("on_change".into(), Value::Bool(on_change));
+            }
+            if let Some(deadband) = publish.deadband {
+                policy.insert("deadband".into(), json!(deadband));
+            }
+            if let Some(min_interval) = &publish.min_interval {
+                policy.insert("min_interval".into(), Value::String(min_interval.clone()));
+            }
+            if let Some(debounce) = &publish.debounce {
+                policy.insert("debounce".into(), Value::String(debounce.clone()));
+            }
+            if !policy.is_empty() {
+                entry.insert("publish".into(), Value::Object(policy));
+            }
+        }
+        if let Some(measurement) = &point.measurement {
+            entry.insert("measurement".into(), measurement.clone());
+        }
         if let Some(meta) = &point.meta {
             entry.insert("meta".into(), meta.clone());
         }
@@ -106,21 +143,24 @@ protocol_address = { host = "127.0.0.1" }
   name = "Temperature setpoint"
   description = "Target temperature"
   address = { table = "holding", address = 3, count = 1 }
-  meta = { parameter = { group = ["control", "commissioning"], min = 0, max = 30000 } }
+  parameter = { group = ["control", "commissioning"] }
+  range = { min = 0, max = 30000 }
+  meta = { asset_tag = "B-17" }
 
   [[device.point]]
   id = "temp"
   datatype = "float32"
   unit = "°C"
   address = { table = "holding", address = 7, count = 2 }
-  meta = { on_change = true, deadband = 0.5 }
+  publish = { on_change = true, deadband = 0.5 }
+  measurement = { group = "Environment", series = "Temperature" }
 
   [[device.point]]
   id = "hidden_rw"
   datatype = "bool"
   access = "read_write"
   address = { table = "coil", address = 0, count = 1 }
-  meta = { parameter = false }
+  parameter = false
 
   [[device.point]]
   id = "raw_only"
@@ -155,7 +195,10 @@ protocol_address = { host = "127.0.0.1" }
         assert_eq!(setpoint["access"], json!("read_write"));
         assert_eq!(setpoint["name"], json!("Temperature setpoint"));
         assert_eq!(setpoint["description"], json!("Target temperature"));
-        assert_eq!(setpoint["meta"]["parameter"]["min"], json!(0), "meta is verbatim");
+        assert_eq!(setpoint["meta"], json!({ "asset_tag": "B-17" }), "meta is verbatim");
+        // `range` (§5.3) is on the manifest: it is what the cloud form renders AND what the
+        // connector enforces on write, so both read one table.
+        assert_eq!(setpoint["range"], json!({ "min": 0.0, "max": 30000.0 }));
         assert_eq!(
             setpoint["parameter"]["sets"],
             json!(["acme_meter_v2_control_parameters", "acme_meter_v2_commissioning_parameters"]),
@@ -165,13 +208,20 @@ protocol_address = { host = "127.0.0.1" }
         let temp = &points["temp"];
         assert_eq!(temp["access"], json!("read"));
         assert_eq!(temp["unit"], json!("°C"));
-        assert_eq!(temp["meta"], json!({ "on_change": true, "deadband": 0.5 }));
+        // The typed signal metadata of §5, verbatim — `publish` so a consumer knows why a
+        // reading did not arrive, `measurement` so a flow can name the series.
+        assert_eq!(temp["publish"], json!({ "on_change": true, "deadband": 0.5 }));
+        assert_eq!(
+            temp["measurement"],
+            json!({ "group": "Environment", "series": "Temperature" })
+        );
+        assert!(temp.get("meta").is_none(), "no meta declared, none published");
         assert!(temp.get("parameter").is_none(), "a read-only point is no parameter");
         assert!(temp.get("name").is_none(), "only declared fields appear");
 
         assert!(
             points["hidden_rw"].get("parameter").is_none(),
-            "meta.parameter = false opts a writable point out"
+            "parameter = false opts a writable point out"
         );
         assert!(points["raw_only"].get("datatype").is_none());
     }

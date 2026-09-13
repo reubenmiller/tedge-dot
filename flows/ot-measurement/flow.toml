@@ -1,5 +1,6 @@
 # ot-measurement: connector sample -> thin-edge measurement
-# The device manifest (contract §8.2) carries each point's `meta`; a sample no longer needs to.
+# The device manifest (contract §8.2) carries each point's typed `measurement` naming; a sample
+# carries only what changes per read (§5).
 input.mqtt.topics = ["te/+/+/ot/+/sample/+", "te/+/+/ot/+/manifest"]
 
 [config]
@@ -7,18 +8,22 @@ input.mqtt.topics = ["te/+/+/ot/+/sample/+", "te/+/+/ot/+/manifest"]
 point        = "${params.point}"
 # Convert boolean (coil) samples to 1/0 measurements. "true" or "false".
 include_boolean = "${params.include_boolean}"
+#
+# The four settings below are FLOW-WIDE: they apply to every signal this instance sees. The
+# per-signal policy is the point's `publish` table in the connector config, which the connector
+# runtime now applies to the sample stream itself (contract §5.4) — so a signal that declares
+# its own arrives here already filtered, and these act on top of it.
+#
 # Only emit when the scaled value changes since the last emitted reading. "true" or "false".
 on_change    = "${params.on_change}"
 # Minimum absolute change (vs the last emitted value) required to emit. 0 = disabled.
 deadband     = "${params.deadband}"
-# Per-signal rate limit: drop readings arriving within this interval of the last emitted one.
+# Rate limit: drop readings arriving within this interval of the last emitted one.
 min_interval = "${params.min_interval}"
 # A changed value must stay stable this long (by sample timestamps) before it is emitted.
 debounce     = "${params.debounce}"
-# Every setting above can also be overridden per signal via the point's `meta` table in the
-# connector config (read from the device manifest): meta.on_change / deadband / min_interval /
-# debounce.
-# Naming too: meta.measurement.group / meta.measurement.series name that signal's measurement
+# Naming is per signal: the point's `measurement.group` / `measurement.series` (on the manifest)
+# name that signal's measurement, and `measurement = false` keeps it out of the measurements
 # (written e.g. by the Cloud Fieldbus import from a device type's measurementMapping).
 # Batch every series of a device into one measurement, flushed on the step interval below.
 # "true" or "false".

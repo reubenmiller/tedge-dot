@@ -7,23 +7,27 @@
 // Protocol-neutral: it consumes the generic OT Connector Contract sample, so the same flow maps
 // modbus, opcua or any other connector. The connector is the "dumb" driver plus the per-point
 // engineering transform (multiplier/divisor/decimal_shift/offset is declared on the point and
-// applied by the connector via the SDK), so the sample already carries the scaled value. This
-// flow owns naming (group/series), units, change-detection (on_change/deadband), debounce,
-// rate limiting (min_interval) and optional batching of a device's series into one
-// measurement (combine).
+// applied by the connector via the SDK), so the sample already carries the scaled value.
 //
-// Per-signal overrides: the connector publishes each point's free-form `meta` table once, on
-// the device's retained manifest (te/device/<device>/ot/<protocol>/manifest, contract §8.2),
-// which this flow keeps in context.mapper under "ot-manifest:<device>". When present,
-// meta.on_change / meta.deadband / meta.min_interval / meta.debounce override the flow-wide
-// params for that signal only — so one flow instance can serve a whole plant while individual
-// signals opt into their own behaviour, declared next to the signal's address in the connector
-// config. Naming works the same way: meta.measurement.group / meta.measurement.series name the
-// signal's measurement per point (e.g. written by the Cloud Fieldbus import from a device type's
-// measurementMapping), and meta.measurement = false keeps the signal out of the measurements
-// altogether (e.g. a parameter whose value should reach the cloud only through its twin
-// fragment). A sample carries none of this: it is a time series row (contract §5), and a
-// signal whose manifest has not been seen yet falls back to the flow-wide params.
+// PER-SIGNAL PUBLISH POLICY IS NOT THIS FLOW'S JOB ANY MORE (contract §5.4, RFC 0006 §5.1).
+// A point's `publish` table — on_change, deadband, min_interval, debounce — is applied by the
+// connector runtime to the sample stream itself, so every consumer (this flow, the parameter
+// twin, a historian) sees one stream with the policy already applied and none of them carries
+// the per-signal lookup. What remains here are the FLOW-WIDE params of the same names, which
+// apply to every signal this instance sees: a second, coarser filter for a deployment that
+// wants one, and the only filter for points that declare no `publish` of their own.
+//
+// What this flow still owns: naming (group/series), the measurement opt-out, boolean handling,
+// and optional batching of a device's series into one measurement (combine).
+//
+// Naming comes from the device's retained manifest (te/device/<device>/ot/<protocol>/manifest,
+// contract §8.2), which this flow keeps in context.mapper under "ot-manifest:<device>": a
+// point's typed `measurement` field names its group and series (e.g. written by the Cloud
+// Fieldbus import from a device type's measurementMapping), and `measurement = false` keeps the
+// signal out of the measurements altogether (e.g. a parameter whose value should reach the
+// cloud only through its twin fragment). A sample carries none of this — it is a time series
+// row (contract §5) — and a signal whose manifest has not been seen yet falls back to the
+// flow-wide params.
 
 const decoder = new TextDecoder();
 
@@ -40,17 +44,15 @@ function durationMs(v) {
   return n * scale;
 }
 
-// Resolve a boolean setting: sample.meta value (real bool or string) wins over the flow param.
-function boolSetting(metaValue, cfgValue, dflt) {
-  const v = metaValue !== undefined ? metaValue : cfgValue;
-  if (v === undefined || v === null || v === "") return dflt;
-  return String(v) === "true";
+// Resolve a flow-wide boolean param.
+function boolSetting(cfgValue, dflt) {
+  if (cfgValue === undefined || cfgValue === null || cfgValue === "") return dflt;
+  return String(cfgValue) === "true";
 }
 
-// Resolve a numeric setting: sample.meta value wins over the flow param.
-function numSetting(metaValue, cfgValue, dflt) {
-  const v = metaValue !== undefined ? metaValue : cfgValue;
-  const n = typeof v === "number" ? v : parseFloat(v);
+// Resolve a flow-wide numeric param.
+function numSetting(cfgValue, dflt) {
+  const n = typeof cfgValue === "number" ? cfgValue : parseFloat(cfgValue);
   return isFinite(n) ? n : dflt;
 }
 
@@ -86,13 +88,13 @@ function rememberManifest(context, device, payloadBytes) {
   context.mapper.set(`ot-manifest:${device}`, manifest);
 }
 
-// The point's `meta` table, from the device manifest. Empty when the manifest has not been
-// seen yet (or does not list the point), which makes the flow-wide params apply — the same
-// fallback as a point that declares no meta at all.
-function metaOf(context, device, point) {
+// The point's typed `measurement` field (contract §5.5), from the device manifest: `false`,
+// a { group, series } table, or undefined when the manifest has not been seen yet (or does not
+// list the point) — which makes the flow-wide naming apply, the same fallback as a point that
+// declares no `measurement` at all.
+function measurementOf(context, device, point) {
   const manifest = context.mapper.get(`ot-manifest:${device}`);
-  const entry = manifest?.points?.[point];
-  return entry && typeof entry.meta === "object" && entry.meta !== null ? entry.meta : {};
+  return manifest?.points?.[point]?.measurement;
 }
 
 // Shape the measurement body (without the time field) from a scaled value:
@@ -101,28 +103,27 @@ function metaOf(context, device, point) {
 // silently drops any object-shaped series value ({ value } and { value, unit } alike), so
 // embedding the unit here would strand the measurement on the device. The unit remains
 // available to consumers on the device manifest.
-function shapeBody(cfg, sample, meta, scaled) {
-  const { group, series } = resolveNaming(cfg, sample, meta);
+function shapeBody(cfg, sample, measurement, scaled) {
+  const { group, series } = resolveNaming(cfg, sample, measurement);
   return { [group]: { [series]: scaled } };
 }
 
 // Resolve the measurement group + series for a sample. Precedence:
-//   1. per-signal meta.measurement.group / .series (the connector point's `meta` table, from
-//      the device manifest — e.g. written by the Cloud Fieldbus import from a device type's
-//      measurementMapping.type/series) — meta wins over the flow params, consistent with the
-//      other per-signal meta overrides,
+//   1. the point's typed `measurement.group` / `.series` (from the device manifest — e.g.
+//      written by the Cloud Fieldbus import from a device type's measurementMapping.type /
+//      series): per-signal wins over the flow params,
 //   2. explicit cfg.group / cfg.series (flow-wide overrides),
 //   3. point-id convention: when point_separator is set and the point id contains it, the id is
 //      split once into "<group><sep><series>" (e.g. "." maps "Environment.Temperature" ->
 //      group "Environment", series "Temperature"). This lets ONE flow instance remap many
 //      signals just by how their point ids are named on the connector.
 //   4. defaults: group = sample protocol, series = point id.
-function resolveNaming(cfg, sample, meta) {
+function resolveNaming(cfg, sample, measurement) {
   const mm =
-    (meta &&
-      typeof meta.measurement === "object" &&
-      !Array.isArray(meta.measurement) &&
-      meta.measurement) ||
+    (measurement &&
+      typeof measurement === "object" &&
+      !Array.isArray(measurement) &&
+      measurement) ||
     {};
   let group = mm.group || cfg.group || "";
   let series = mm.series || cfg.series || "";
@@ -140,11 +141,10 @@ function resolveNaming(cfg, sample, meta) {
   return { group, series };
 }
 
-// True when the signal opted out of measurements: `meta.measurement = false`, a boolean. Same
-// shape as the `meta.parameter = false` opt-out (ot-parameter-state), and like it a string is not
-// a switch.
-function measurementDisabled(meta) {
-  return meta ? meta.measurement === false : false;
+// True when the signal opted out of measurements: `measurement = false`, a boolean. Same shape
+// as the `parameter = false` opt-out (ot-parameter-state), and like it a string is not a switch.
+function measurementDisabled(measurement) {
+  return measurement === false;
 }
 
 export function onMessage(message, context) {
@@ -158,18 +158,18 @@ export function onMessage(message, context) {
   }
   const sample = JSON.parse(decoder.decode(message.payload));
   const cfg = context.config || {};
-  const meta = metaOf(context, device, sample.point);
+  const measurement = measurementOf(context, device, sample.point);
 
   // Optionally restrict this flow instance to a single point id.
   const point = cfg.point || "";
   if (point && sample.point !== point) return [];
 
-  // Opt-out: `meta.measurement = false` keeps the signal out of the measurements entirely —
+  // Opt-out: `measurement = false` keeps the signal out of the measurements entirely —
   // typically a parameter (contract §5.2) whose value belongs on its twin fragment only, rather
   // than also being sent to the cloud as a time series. Checked before any change-detection or
   // combine state is touched. The connector still publishes the sample, so ot-parameter-state
   // (and every other flow) sees it as usual.
-  if (measurementDisabled(meta)) return [];
+  if (measurementDisabled(measurement)) return [];
 
   // Only forward good-quality readings.
   if (sample.quality !== "good") return [];
@@ -188,17 +188,15 @@ export function onMessage(message, context) {
   }
   const scaled = value;
 
-  // Per-signal settings from the point's meta (the device manifest), falling back to the
-  // flow-wide params.
+  // Flow-wide policy only. The per-signal one (`publish`, contract §5.4) has already been
+  // applied by the connector to the stream this flow is reading, so a signal that declares its
+  // own policy arrives pre-filtered and these settings act on top of it.
   const ts = Date.parse(sample.ts);
   const now = isFinite(ts) ? ts : Date.now();
-  const debounceMs = durationMs(meta.debounce !== undefined ? meta.debounce : cfg.debounce);
-  const deadband = numSetting(meta.deadband, cfg.deadband, 0);
-  const onChange =
-    boolSetting(meta.on_change, cfg.on_change, false) || deadband > 0 || debounceMs > 0;
-  const minIntervalMs = durationMs(
-    meta.min_interval !== undefined ? meta.min_interval : cfg.min_interval
-  );
+  const debounceMs = durationMs(cfg.debounce);
+  const deadband = numSetting(cfg.deadband, 0);
+  const onChange = boolSetting(cfg.on_change, false) || deadband > 0 || debounceMs > 0;
+  const minIntervalMs = durationMs(cfg.min_interval);
 
   // Debounce: a changed value is only accepted once it has been observed stable for the
   // debounce period (by sample timestamps). Message-driven, so acceptance happens on the
@@ -231,9 +229,9 @@ export function onMessage(message, context) {
   context.script.set(`last:${sample.point}`, scaled);
   context.script.set(`lastts:${sample.point}`, now);
 
-  const { group } = resolveNaming(cfg, sample, meta);
+  const { group } = resolveNaming(cfg, sample, measurement);
   const targetTopic = cfg.target_topic || `te/device/${device}///m/${group}`;
-  const body = shapeBody(cfg, sample, meta, scaled);
+  const body = shapeBody(cfg, sample, measurement, scaled);
 
   // Combine mode: buffer each device's series and flush one merged measurement on interval.
   if (String(cfg.combine ?? "false") === "true") {

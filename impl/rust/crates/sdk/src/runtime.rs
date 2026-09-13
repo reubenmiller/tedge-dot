@@ -643,6 +643,8 @@ pub async fn run_until_reloadable(
         setup_subscriptions(&mut connector, &config, caps.subscribe, &sample_tx, limits).await;
     let mut schedule = build_schedule(&config, &subscribed);
     let mut sample_debug = config.connector.sample_debug;
+    // The per-point publish policy (§5.4) is applied here, once, for every consumer.
+    let mut publish_gate = PublishGate::new(&config);
     let mut seq_counters: HashMap<(String, String), u64> = HashMap::new();
     // Devices whose transport needs re-establishing, keyed by device name.
     let mut reconnects: HashMap<String, ReconnectEntry> = HashMap::new();
@@ -679,8 +681,11 @@ pub async fn run_until_reloadable(
                                 // connectors routinely leave `device` empty, and the sample
                                 // topic + meta lookup are keyed by the configured name.
                                 s.device = device.clone();
-                                publish_sample(&client, &protocol, s, &mut seq_counters, sample_debug)
-                                    .await;
+                                publish_sample(
+                                    &client, &protocol, s, &mut seq_counters,
+                                    &mut publish_gate, sample_debug,
+                                )
+                                .await;
                             }
                             // A batch where every point failed means the device itself is
                             // unreachable (a single bad point keeps the link healthy).
@@ -755,8 +760,11 @@ pub async fn run_until_reloadable(
                 }
             }
             Some(mut sample) = sample_rx.recv() => {
-                publish_sample(&client, &protocol, &mut sample, &mut seq_counters, sample_debug)
-                    .await;
+                publish_sample(
+                    &client, &protocol, &mut sample, &mut seq_counters,
+                    &mut publish_gate, sample_debug,
+                )
+                .await;
                 progress.mark();
             }
             _ = reconnected.notified() => {
@@ -806,6 +814,7 @@ pub async fn run_until_reloadable(
             ).await;
             schedule = build_schedule(&config, &subscribed);
             sample_debug = config.connector.sample_debug;
+            publish_gate.reload(&config);
             seq_counters.clear();
             // applying the configuration already reconnected every device
             reconnects.clear();
@@ -862,6 +871,7 @@ pub async fn run_stdout_until(
         setup_subscriptions(&mut connector, &config, caps.subscribe, &sample_tx, limits).await;
     let mut schedule = build_schedule(&config, &subscribed);
     let sample_debug = config.connector.sample_debug;
+    let mut publish_gate = PublishGate::new(&config);
     let mut seq_counters: HashMap<(String, String), u64> = HashMap::new();
     let mut reconnects: HashMap<String, ReconnectEntry> = HashMap::new();
 
@@ -887,7 +897,7 @@ pub async fn run_stdout_until(
                         Ok(mut samples) => {
                             for s in samples.iter_mut() {
                                 s.device = device.clone();
-                                print_sample(s, &mut seq_counters, sample_debug);
+                                print_sample(s, &mut seq_counters, &mut publish_gate, sample_debug);
                             }
                             let healthy = samples.is_empty()
                                 || samples.iter().any(|s| s.quality != crate::model::Quality::Bad);
@@ -926,7 +936,7 @@ pub async fn run_stdout_until(
                 }
             }
             Some(mut sample) = sample_rx.recv() => {
-                print_sample(&mut sample, &mut seq_counters, sample_debug);
+                print_sample(&mut sample, &mut seq_counters, &mut publish_gate, sample_debug);
             }
         }
     }
@@ -940,6 +950,7 @@ pub async fn run_stdout_until(
 fn print_sample(
     sample: &mut Sample,
     seq_counters: &mut HashMap<(String, String), u64>,
+    gate: &mut PublishGate,
     debug: bool,
 ) {
     let counter = seq_counters
@@ -947,6 +958,9 @@ fn print_sample(
         .or_insert(0);
     *counter += 1;
     sample.seq = Some(*counter);
+    if !gate.admits(sample) {
+        return;
+    }
     println!("{}", sample.to_envelope(debug));
 }
 
@@ -1106,6 +1120,7 @@ async fn publish_sample(
     protocol: &str,
     sample: &mut Sample,
     seq_counters: &mut HashMap<(String, String), u64>,
+    gate: &mut PublishGate,
     debug: bool,
 ) {
     let counter = seq_counters
@@ -1113,6 +1128,11 @@ async fn publish_sample(
         .or_insert(0);
     *counter += 1;
     sample.seq = Some(*counter);
+    // The per-point publish policy (§5.4). `seq` is stamped first, so a consumer sees the gap
+    // a suppressed reading leaves and can tell "nothing changed" from "nothing was read".
+    if !gate.admits(sample) {
+        return;
+    }
     if !client.is_online() {
         // With the broker unreachable a queued sample cannot be sent, and it would take the room
         // the state messages need in the client's request queue (see `publish_retained`). A
@@ -1136,6 +1156,115 @@ async fn publish_sample(
     }
 }
 
+/// The per-point publish policy of §5.4, applied by the runtime to the sample stream itself.
+///
+/// The four settings — `on_change`, `deadband`, `min_interval`, `debounce` — are
+/// protocol-neutral and identical in every deployment, so they belong below every consumer
+/// rather than in each flow that wants them: the measurement flow, the parameter twin, a
+/// historian and a future MCP subscription then all see one stream with the policy already
+/// applied, and the code lands once per SDK instead of once per flow.
+///
+/// Only `good` samples are gated. A `bad` sample is still published — contract §5.1 requires
+/// it, an operator must see a failing read — and keeps the runtime's own bad-sample rate
+/// limit; `stale` is unaffected. A consumer that needs every raw read leaves `publish`
+/// undeclared on that point, which is the default.
+#[derive(Default)]
+struct PublishGate {
+    /// The declared policy per `(device, point)`; points that declare none are absent.
+    policies: HashMap<(String, String), crate::config::PublishPolicy>,
+    /// The last value published, and when, per `(device, point)`.
+    last: HashMap<(String, String), (serde_json::Value, OffsetDateTime)>,
+    /// A value waiting out its `debounce` period: the candidate and when it was first seen.
+    candidate: HashMap<(String, String), (serde_json::Value, OffsetDateTime)>,
+}
+
+impl PublishGate {
+    fn new(config: &ConnectorConfig) -> Self {
+        let mut gate = PublishGate::default();
+        gate.reload(config);
+        gate
+    }
+
+    /// Re-read the policies after a configuration change, dropping the state of points that
+    /// are gone. State of a point that survives is kept: a reload is not a reason to republish
+    /// a value that has not changed.
+    fn reload(&mut self, config: &ConnectorConfig) {
+        self.policies.clear();
+        for device in &config.devices {
+            for point in &device.points {
+                if let Some(policy) = &point.publish {
+                    if !policy.is_noop() {
+                        self.policies
+                            .insert((device.name.clone(), point.id.clone()), policy.clone());
+                    }
+                }
+            }
+        }
+        self.last.retain(|key, _| self.policies.contains_key(key));
+        self.candidate.retain(|key, _| self.policies.contains_key(key));
+    }
+
+    /// Whether this sample is published. Mirrors the order `ot-measurement` applied in 0.1:
+    /// debounce, then change detection, then the rate limit.
+    fn admits(&mut self, sample: &Sample) -> bool {
+        if sample.quality != crate::model::Quality::Good {
+            return true;
+        }
+        let key = (sample.device.clone(), sample.point.clone());
+        let Some(policy) = self.policies.get(&key) else {
+            return true;
+        };
+        let Some(value) = sample.value.as_ref().map(|v| v.to_json()) else {
+            return true;
+        };
+        let now = sample.ts;
+        let deadband = policy.deadband.unwrap_or(0.0);
+
+        // Debounce: a changed value is accepted only once it has been observed stable for the
+        // period. The first sighting is the candidate and is not published.
+        if let Some(debounce) = policy.debounce.as_deref().and_then(parse_duration) {
+            match self.candidate.get(&key) {
+                Some((candidate, since)) if values_equal(candidate, &value, 0.0) => {
+                    if now - *since < debounce {
+                        return false; // still settling
+                    }
+                }
+                _ => {
+                    self.candidate.insert(key.clone(), (value.clone(), now));
+                    return false; // new candidate: wait for it to prove stable
+                }
+            }
+        }
+
+        if let Some((last, last_ts)) = self.last.get(&key) {
+            if policy.on_change() && values_equal(last, &value, deadband) {
+                return false;
+            }
+            if let Some(min_interval) = policy.min_interval.as_deref().and_then(parse_duration) {
+                if now - *last_ts < min_interval {
+                    return false;
+                }
+            }
+        }
+
+        self.last.insert(key, (value, now));
+        true
+    }
+}
+
+/// Whether two sample values count as the same reading. Numbers compare within `deadband`
+/// (or exactly, when none is declared); everything else compares by equality, so a `bool` or
+/// a `string` point gets change detection too.
+fn values_equal(a: &serde_json::Value, b: &serde_json::Value, deadband: f64) -> bool {
+    match (a.as_f64(), b.as_f64()) {
+        (Some(a), Some(b)) => {
+            let min_delta = if deadband > 0.0 { deadband } else { f64::EPSILON };
+            (a - b).abs() < min_delta
+        }
+        _ => a == b,
+    }
+}
+
 /// Turn a write request's value — which is in **engineering units**, the same units a sample's
 /// `value` carries (contract §4.2) — into the wire value a module encodes.
 ///
@@ -1156,6 +1285,15 @@ pub fn wire_value(
     point: &crate::config::PointConfig,
     value: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    // The declared engineering-unit bounds (§5.3), checked here — before the transform is
+    // inverted and before the device is touched — so the limit means one thing on both paths.
+    // A limit is a property of the signal, not of whatever is asking: a script, another flow
+    // or a typo in an operation reaches the same check the cloud form renders.
+    if let (Some(range), Some(engineering)) = (&point.range, value.as_f64()) {
+        if let Some(reason) = range.reject(&point.id, engineering) {
+            return Err(reason);
+        }
+    }
     let transform = point.transform.unwrap_or_default();
     if transform.is_identity() {
         return Ok(value.clone());
@@ -1514,6 +1652,38 @@ async fn handle_write_batch(
             return Ok(());
         }
     };
+    // Every entry is validated — `range` (§5.3) and then the transform inversion (§4.2) —
+    // BEFORE the first write is executed, so an out-of-range value fails the batch with
+    // nothing applied. That makes a rejected batch the one failure mode guaranteed to have
+    // left the device untouched, which is what lets an operator retry it safely.
+    let mut wire_values: Vec<Option<serde_json::Value>> = Vec::with_capacity(writes.len());
+    for w in &writes {
+        match (&w.value, configured_point(config, device, &w.point)) {
+            (Some(value), Some(configured)) => match wire_value(configured, value) {
+                Ok(wire) => wire_values.push(Some(wire)),
+                Err(reason) => {
+                    let reason = format!("write to {} rejected: {reason}", w.point);
+                    publish_retained(
+                        client,
+                        topic,
+                        with_origin(
+                            serde_json::json!({
+                                "status": "failed",
+                                "reason": reason,
+                                "results": [],
+                            }),
+                            origin,
+                        )
+                        .to_string(),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            },
+            _ => wire_values.push(w.value.clone()),
+        }
+    }
+
     let points: Vec<&str> = writes.iter().map(|w| w.point.as_str()).collect();
     publish_retained(
         client,
@@ -1528,24 +1698,7 @@ async fn handle_write_batch(
 
     let mut results: Vec<serde_json::Value> = Vec::with_capacity(writes.len());
     let mut failure: Option<String> = None;
-    for w in &writes {
-        // Engineering units in, wire value out (§4.2) — as for a single write.
-        let wire = match (&w.value, configured_point(config, device, &w.point)) {
-            (Some(value), Some(configured)) => match wire_value(configured, value) {
-                Ok(wire) => Some(wire),
-                Err(reason) => {
-                    let reason = format!("write to {} failed: {reason}", w.point);
-                    results.push(serde_json::json!({
-                        "point": w.point,
-                        "status": "failed",
-                        "reason": reason,
-                    }));
-                    failure = Some(reason);
-                    break;
-                }
-            },
-            _ => w.value.clone(),
-        };
+    for (w, wire) in writes.iter().zip(wire_values) {
         let request = CommandRequest {
             point: w.point.clone(),
             value: wire,
@@ -2764,6 +2917,200 @@ protocol_address = { host = "127.0.0.1" }
             wire_value(point("coil"), &serde_json::json!(true)).unwrap(),
             serde_json::json!(true)
         );
+    }
+
+    /// §5.3 — `range` is enforced by the runtime, on the engineering value, before the
+    /// transform is inverted and before the device is touched. The limit is a property of the
+    /// signal, so a script or a typo in an operation meets the same check the cloud form shows.
+    #[test]
+    fn range_is_enforced_on_write() {
+        let cfg: ConnectorConfig = toml::from_str(
+            r#"
+[connector]
+protocol = "modbus"
+
+[[device]]
+name = "plc-1"
+protocol_address = { host = "127.0.0.1" }
+
+  [[device.point]]
+  id = "temp_u16"
+  datatype = "uint16"
+  access = "read_write"
+  address = { table = "holding", address = 3, count = 1 }
+  range = { min = 0, max = 30000 }
+
+  [[device.point]]
+  id = "floor_only"
+  datatype = "int16"
+  access = "read_write"
+  address = { table = "holding", address = 4, count = 1 }
+  range = { min = -10 }
+
+  [[device.point]]
+  id = "scaled"
+  datatype = "uint16"
+  access = "read_write"
+  address = { table = "holding", address = 5, count = 1 }
+  transform = { decimal_shift = -3 }
+  range = { min = 0, max = 30 }
+"#,
+        )
+        .unwrap();
+        let point = |id: &str| configured_point(&cfg, "plc-1", id).unwrap();
+
+        wire_value(point("temp_u16"), &serde_json::json!(30000)).unwrap();
+        let err = wire_value(point("temp_u16"), &serde_json::json!(35000)).unwrap_err();
+        assert_eq!(err, "value 35000 outside range [0, 30000] of temp_u16");
+
+        // One-sided bounds leave the other side open.
+        wire_value(point("floor_only"), &serde_json::json!(9999)).unwrap();
+        let err = wire_value(point("floor_only"), &serde_json::json!(-11)).unwrap_err();
+        assert!(err.contains("outside range [-10, ∞)"), "{err}");
+
+        // The bound is in ENGINEERING units, which is what §4.2 made possible: 30 is allowed
+        // and becomes wire 30000; 31 is refused even though 31000 fits a uint16 perfectly.
+        assert_eq!(
+            wire_value(point("scaled"), &serde_json::json!(30)).unwrap(),
+            serde_json::json!(30000)
+        );
+        let err = wire_value(point("scaled"), &serde_json::json!(31)).unwrap_err();
+        assert!(err.contains("outside range [0, 30] of scaled"), "{err}");
+    }
+
+    /// §5.1 option A — the runtime applies `publish`, so every consumer sees one stream with
+    /// the policy already applied instead of each flow carrying the lookup.
+    #[test]
+    fn the_runtime_applies_the_publish_policy() {
+        let cfg: ConnectorConfig = toml::from_str(
+            r#"
+[connector]
+protocol = "modbus"
+
+[[device]]
+name = "plc-1"
+protocol_address = { host = "127.0.0.1" }
+
+  [[device.point]]
+  id = "changes"
+  datatype = "uint16"
+  address = { table = "holding", address = 1, count = 1 }
+  publish = { on_change = true }
+
+  [[device.point]]
+  id = "band"
+  datatype = "float32"
+  address = { table = "holding", address = 2, count = 2 }
+  publish = { deadband = 0.5 }
+
+  [[device.point]]
+  id = "limited"
+  datatype = "uint16"
+  address = { table = "holding", address = 4, count = 1 }
+  publish = { min_interval = "10s" }
+
+  [[device.point]]
+  id = "every_read"
+  datatype = "uint16"
+  address = { table = "holding", address = 5, count = 1 }
+"#,
+        )
+        .unwrap();
+        let mut gate = PublishGate::new(&cfg);
+        let at = |secs: i64| OffsetDateTime::UNIX_EPOCH + Duration::from_secs(secs as u64);
+        let sample = |point: &str, value: f64, secs: i64| Sample {
+            ts: at(secs),
+            device: "plc-1".into(),
+            protocol: "modbus",
+            point: point.into(),
+            mode: Mode::Typed,
+            datatype: None,
+            value: Some(crate::model::Value::Number(value)),
+            raw: vec![],
+            raw_group: 2,
+            quality: crate::model::Quality::Good,
+            unit: None,
+            addr: serde_json::Value::Null,
+            seq: None,
+            error: None,
+        };
+
+        // on_change: the repeat is suppressed, the next different value is not.
+        assert!(gate.admits(&sample("changes", 42.0, 0)));
+        assert!(!gate.admits(&sample("changes", 42.0, 1)));
+        assert!(gate.admits(&sample("changes", 43.0, 2)));
+
+        // deadband: a change smaller than the band is not a change.
+        assert!(gate.admits(&sample("band", 100.0, 0)));
+        assert!(!gate.admits(&sample("band", 100.4, 1)));
+        assert!(gate.admits(&sample("band", 100.6, 2)));
+
+        // min_interval: too soon after the last published reading, even though it changed.
+        assert!(gate.admits(&sample("limited", 1.0, 0)));
+        assert!(!gate.admits(&sample("limited", 2.0, 5)));
+        assert!(gate.admits(&sample("limited", 3.0, 15)));
+
+        // A point that declares no policy is published on every read — the default.
+        for secs in 0..3 {
+            assert!(gate.admits(&sample("every_read", 7.0, secs)));
+        }
+
+        // A `bad` sample is always published (contract §5.1): an operator must see a failing
+        // read, and the runtime's own bad-sample rate limit is what bounds it.
+        let mut bad = sample("changes", 42.0, 3);
+        bad.quality = crate::model::Quality::Bad;
+        bad.value = None;
+        bad.error = Some("timeout".into());
+        assert!(gate.admits(&bad));
+        assert!(gate.admits(&bad), "and again: the gate never holds a bad sample back");
+    }
+
+    /// `debounce`: a new value is published only once it has stayed stable for the period, and
+    /// the first sighting is the candidate rather than a reading.
+    #[test]
+    fn the_publish_gate_debounces() {
+        let cfg: ConnectorConfig = toml::from_str(
+            r#"
+[connector]
+protocol = "modbus"
+
+[[device]]
+name = "plc-1"
+protocol_address = { host = "127.0.0.1" }
+
+  [[device.point]]
+  id = "b1"
+  datatype = "uint16"
+  address = { table = "holding", address = 1, count = 1 }
+  publish = { debounce = "2s" }
+"#,
+        )
+        .unwrap();
+        let mut gate = PublishGate::new(&cfg);
+        let sample = |value: f64, secs: u64| Sample {
+            ts: OffsetDateTime::UNIX_EPOCH + Duration::from_secs(secs),
+            device: "plc-1".into(),
+            protocol: "modbus",
+            point: "b1".into(),
+            mode: Mode::Typed,
+            datatype: None,
+            value: Some(crate::model::Value::Number(value)),
+            raw: vec![],
+            raw_group: 2,
+            quality: crate::model::Quality::Good,
+            unit: None,
+            addr: serde_json::Value::Null,
+            seq: None,
+            error: None,
+        };
+        // First sighting: a candidate, not a reading.
+        assert!(!gate.admits(&sample(7.0, 0)));
+        // Still settling.
+        assert!(!gate.admits(&sample(7.0, 1)));
+        // Stable for the period: published.
+        assert!(gate.admits(&sample(7.0, 3)));
+        // A different value starts a new candidate.
+        assert!(!gate.admits(&sample(9.0, 4)));
     }
 
     #[test]

@@ -141,26 +141,27 @@ check_empty "measurement: bad quality dropped" ot-measurement \
 
 # --- device manifests (contract §8.2) ---
 # The connector publishes each device's static facts once, retained: type, and per point the
-# datatype/access/unit/labels, the free-form `meta`, and the parameter sets it resolved. The
-# flows keep the last manifest per device in context.mapper, so a test feeds it first, exactly
-# as the broker replays the retained message before any live sample.
+# datatype/access/unit/labels, the typed signal metadata of §5 (`range`, `publish`,
+# `measurement`), the free-form `meta`, and the parameter sets it resolved. The flows keep the
+# last manifest per device in context.mapper, so a test feeds it first, exactly as the broker
+# replays the retained message before any live sample.
+#
+# `publish` is on the manifest for a consumer to read, but no flow applies it: the connector
+# runtime does (contract §5.4), so the stream a flow sees is already filtered.
 MANIFEST_TOPIC='te/device/plc1/ot/modbus/manifest'
 # plc1, no declared type: sets fall back to the protocol name.
 MF_PLC1='{"contract":"0.2","protocol":"modbus","service":"tedge-dot-modbus","points":{
- "temp_u16":{"datatype":"uint16","access":"read_write","parameter":{"sets":["modbus_control_parameters"]}},
+ "temp_u16":{"datatype":"uint16","access":"read_write","range":{"min":0,"max":30000},"parameter":{"sets":["modbus_control_parameters"]}},
  "level_f32":{"datatype":"float32","access":"read"},
- "status_word":{"datatype":"uint16","access":"read","meta":{"parameter":true},"parameter":{"sets":["modbus_control_parameters"]}},
- "pump_speed":{"datatype":"float32","access":"read_write","meta":{"parameter":"pump"},"parameter":{"sets":["pump"]}},
- "hidden_rw":{"datatype":"uint16","access":"read_write","meta":{"parameter":false}},
+ "status_word":{"datatype":"uint16","access":"read","parameter":{"sets":["modbus_control_parameters"]}},
+ "pump_speed":{"datatype":"float32","access":"read_write","parameter":{"sets":["pump"]}},
+ "hidden_rw":{"datatype":"uint16","access":"read_write"},
  "valve_cmd":{"datatype":"bool","access":"write","parameter":{"sets":["modbus_control_parameters"]}},
- "setpoint":{"datatype":"uint16","access":"read_write","meta":{"measurement":false},"parameter":{"sets":["modbus_control_parameters"]}},
- "m1":{"datatype":"uint16","access":"read","meta":{"on_change":true}},
- "d1":{"datatype":"float32","access":"read","meta":{"deadband":0.5}},
- "r1":{"datatype":"uint16","access":"read","meta":{"min_interval":"10s"}},
- "b1":{"datatype":"uint16","access":"read","meta":{"debounce":"2s"}},
- "Foo.Bar":{"datatype":"uint16","access":"read","meta":{"measurement":{"group":"Environment","series":"Temperature"}}},
- "no_optout":{"datatype":"uint16","access":"read_write","meta":{"measurement":"false"},"parameter":{"sets":["modbus_control_parameters"]}},
- "temperature":{"datatype":"uint16","access":"read","meta":{"measurement":{"group":"Environment","series":"Temperature"}}}
+ "setpoint":{"datatype":"uint16","access":"read_write","measurement":false,"parameter":{"sets":["modbus_control_parameters"]}},
+ "m1":{"datatype":"uint16","access":"read","publish":{"on_change":true}},
+ "Foo.Bar":{"datatype":"uint16","access":"read","measurement":{"group":"Environment","series":"Temperature"}},
+ "no_optout":{"datatype":"uint16","access":"read_write","measurement":"false","parameter":{"sets":["modbus_control_parameters"]}},
+ "temperature":{"datatype":"uint16","access":"read","unit":"°C","meta":{"asset_tag":"B-17"},"measurement":{"group":"Environment","series":"Temperature"}}
 }}'
 # The same device declaring a type: the sets are qualified by it (RFC 0005), and two of the
 # points belong to a second group / to absolute sets.
@@ -181,18 +182,22 @@ MF="[$MANIFEST_TOPIC] $MF_PLC1"
 MFT="[$MANIFEST_TOPIC] $MF_TYPED"
 MFO="[te/device/opc1/ot/opcua/manifest] $MF_OPC1"
 
-# A sample carries nothing static any more; the per-signal `meta` comes from the manifest.
+# A sample carries nothing static any more; the typed naming comes from the manifest.
+# A point's `publish` policy is NOT applied here: the connector runtime applies it to the
+# stream (contract §5.4), so two identical readings of a point with `publish.on_change` reach
+# this flow only if the connector let them through — and then this flow forwards both, because
+# its own on_change param is off.
 SM1='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"m1","datatype":"uint16","value":42,"quality":"good"}'
 SM2='{"ts":"2026-05-30T10:00:07.000Z","device":"plc1","protocol":"modbus","point":"m1","datatype":"uint16","value":42,"quality":"good"}'
-check_absent "measurement: manifest meta.on_change suppresses a repeat (sample carries no meta)" ot-measurement \
+check "measurement: a point's publish policy is the connector's job, not this flow's" ot-measurement \
   "$MF"$'\n'"[te/device/plc1/ot/modbus/sample/m1] $SM1"$'\n'"[te/device/plc1/ot/modbus/sample/m1] $SM2" \
-  '"time":"2026-05-30T10:00:00.000Z"' '"time":"2026-05-30T10:00:07.000Z"'
+  '"time":"2026-05-30T10:00:07.000Z"'
 STEMP='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"temperature","datatype":"uint16","value":17.001,"quality":"good"}'
-check "measurement: manifest meta.measurement names group/series" ot-measurement \
+check "measurement: the manifest's typed measurement names group/series" ot-measurement \
   "$MF"$'\n'"[te/device/plc1/ot/modbus/sample/temperature] $STEMP" \
   '[te/device/plc1///m/Environment] {"Environment":{"Temperature":17.001},"time":"2026-05-30T10:00:00.000Z"}'
 # A 0.1 sample that still echoes `meta` is ignored: the manifest is the only source of truth,
-# so the naming comes from it and the stale echo cannot override it.
+# and `meta` is free-form again — a site's own tags, never the naming.
 SMOLD='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"temperature","datatype":"uint16","value":1,"quality":"good","meta":{"measurement":{"group":"Old","series":"Way"}}}'
 check "measurement: meta echoed in a 0.1 sample is ignored; the manifest names the series" ot-measurement \
   "$MF"$'\n'"[te/device/plc1/ot/modbus/sample/temperature] $SMOLD" \
@@ -227,52 +232,30 @@ check_params "measurement: on_change suppresses unchanged" ot-measurement \
   "$(printf '[te/device/plc1/ot/modbus/sample/temp_u16] %s\n[te/device/plc1/ot/modbus/sample/temp_u16] %s' "$SINT" "$SINT")" \
   '"temp_u16":17001'
 
-# --- ot-measurement per-signal meta (the manifest's meta overrides the flow params per point) ---
-# The point's `meta` table is on the device manifest (contract §8.2), published once; a sample
-# carries none of it (§5). Each case therefore feeds the manifest first, exactly as the broker
-# replays the retained message, and the flow applies the per-signal settings with no per-signal
-# flow configuration. (`$MF` declares m1/d1/r1/b1/Foo.Bar with the meta each case needs.)
+# --- ot-measurement per-signal naming (from the device manifest) ---
+# The per-signal PUBLISH POLICY (`publish`: on_change / deadband / min_interval / debounce) is
+# no longer this flow's job: the connector runtime applies it to the sample stream itself
+# (contract §5.4, RFC 0006 §5.1), so it is covered by the SDK's own tests
+# (`the_runtime_applies_the_publish_policy`, `the_publish_gate_debounces`) and by the
+# conformance suite, not here. What stays per signal in this flow is the NAMING, which is the
+# point's typed `measurement` field on the manifest. The flow-wide params of the same names are
+# exercised by the `check_params` cases above.
 
-# meta.deadband: change below the deadband suppressed, change above it emitted.
-DB1='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"d1","mode":"typed","datatype":"float32","value":100.0,"quality":"good"}'
-DB2='{"ts":"2026-05-30T10:00:01.000Z","device":"plc1","protocol":"modbus","point":"d1","mode":"typed","datatype":"float32","value":100.4,"quality":"good"}'
-DB3='{"ts":"2026-05-30T10:00:02.000Z","device":"plc1","protocol":"modbus","point":"d1","mode":"typed","datatype":"float32","value":100.6,"quality":"good"}'
-check_absent "measurement: meta.deadband suppresses sub-threshold change" ot-measurement \
-  "$(printf '%s\n[te/device/plc1/ot/modbus/sample/d1] %s\n[te/device/plc1/ot/modbus/sample/d1] %s\n[te/device/plc1/ot/modbus/sample/d1] %s' "$MF" "$DB1" "$DB2" "$DB3")" \
-  '"time":"2026-05-30T10:00:02.000Z"' '"time":"2026-05-30T10:00:01.000Z"'
-
-# meta.min_interval: reading 5s after the last emit dropped, reading 15s after emitted.
-RL1='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"r1","mode":"typed","datatype":"uint16","value":1,"quality":"good"}'
-RL2='{"ts":"2026-05-30T10:00:05.000Z","device":"plc1","protocol":"modbus","point":"r1","mode":"typed","datatype":"uint16","value":2,"quality":"good"}'
-RL3='{"ts":"2026-05-30T10:00:15.000Z","device":"plc1","protocol":"modbus","point":"r1","mode":"typed","datatype":"uint16","value":3,"quality":"good"}'
-check_absent "measurement: meta.min_interval rate-limits" ot-measurement \
-  "$(printf '%s\n[te/device/plc1/ot/modbus/sample/r1] %s\n[te/device/plc1/ot/modbus/sample/r1] %s\n[te/device/plc1/ot/modbus/sample/r1] %s' "$MF" "$RL1" "$RL2" "$RL3")" \
-  '"time":"2026-05-30T10:00:15.000Z"' '"time":"2026-05-30T10:00:05.000Z"'
-
-# meta.debounce: a new value only passes once it has stayed stable for the period; the first
-# observation is the candidate (no emit), the confirmation 3s later is emitted.
-DE1='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"b1","mode":"typed","datatype":"uint16","value":7,"quality":"good"}'
-DE2='{"ts":"2026-05-30T10:00:03.000Z","device":"plc1","protocol":"modbus","point":"b1","mode":"typed","datatype":"uint16","value":7,"quality":"good"}'
-DE3='{"ts":"2026-05-30T10:00:04.000Z","device":"plc1","protocol":"modbus","point":"b1","mode":"typed","datatype":"uint16","value":9,"quality":"good"}'
-check_absent "measurement: meta.debounce waits for stability" ot-measurement \
-  "$(printf '%s\n[te/device/plc1/ot/modbus/sample/b1] %s\n[te/device/plc1/ot/modbus/sample/b1] %s\n[te/device/plc1/ot/modbus/sample/b1] %s' "$MF" "$DE1" "$DE2" "$DE3")" \
-  '"time":"2026-05-30T10:00:03.000Z"' '"time":"2026-05-30T10:00:04.000Z"'
-
-# meta.measurement wins over the point_separator convention (per-signal beats flow-wide).
+# The typed `measurement` wins over the point_separator convention (per-signal beats flow-wide).
 MMDOT='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"Foo.Bar","mode":"typed","datatype":"uint16","value":1,"quality":"good"}'
 mmtmp="$(flow_with_params ot-measurement 'point_separator = "."')"
 mmout="$(printf '%s\n%s\n' "$MF" "[te/device/plc1/ot/modbus/sample/Foo.Bar] $MMDOT" | tedge flows test --flows-dir "$mmtmp" 2>/dev/null)"
 rm -rf "$mmtmp"
 if [[ "$mmout" == *'{"Environment":{"Temperature":1}'* && "$mmout" != *'"Foo"'* ]]; then
-  echo "ok   - measurement: meta.measurement wins over point_separator"
+  echo "ok   - measurement: the typed measurement wins over point_separator"
   pass=$((pass + 1))
 else
-  echo "FAIL - measurement: meta.measurement wins over point_separator"
+  echo "FAIL - measurement: the typed measurement wins over point_separator"
   echo "       got: $mmout"
   fail=$((fail + 1))
 fi
 
-# meta.measurement = false: the signal stays off the measurements entirely — a parameter whose
+# measurement = false: the signal stays off the measurements entirely — a parameter whose
 # value belongs on its twin fragment only. Without it (the default), a parameter is published both
 # ways, and a naming table (above) still publishes.
 # The three points differ only in the manifest: `setpoint` carries meta.measurement = false,
@@ -280,10 +263,10 @@ fi
 MOFF='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"setpoint","mode":"typed","datatype":"uint16","value":55,"quality":"good"}'
 MOFFSTR='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"no_optout","mode":"typed","datatype":"uint16","value":55,"quality":"good"}'
 MPARAM='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"temp_u16","mode":"typed","datatype":"uint16","value":55,"quality":"good"}'
-check_empty "measurement: meta.measurement = false keeps the signal off the measurements" ot-measurement \
+check_empty "measurement: measurement = false keeps the signal off the measurements" ot-measurement \
   "$MF"$'\n'"[te/device/plc1/ot/modbus/sample/setpoint] $MOFF"
-# Only the boolean opts out, as for meta.parameter = false: a string is not a switch.
-check "measurement: meta.measurement = \"false\" (a string) does not opt out" ot-measurement \
+# Only the boolean opts out, as for parameter = false: a string is not a switch.
+check "measurement: measurement = \"false\" (a string) does not opt out" ot-measurement \
   "$MF"$'\n'"[te/device/plc1/ot/modbus/sample/no_optout] $MOFFSTR" \
   '[te/device/plc1///m/modbus] {"modbus":{"no_optout":55}'
 check "measurement: a parameter is still a measurement by default" ot-measurement \

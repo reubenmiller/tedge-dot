@@ -297,9 +297,87 @@
             }
           }
         },
+        "range": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Engineering-unit bounds of the signal (§5.3). Enforced by the connector on WRITE — a value outside them fails before the device is touched — and rendered as the cloud form's minimum/maximum, so the form and the driver cannot disagree. Reads are not altered: a reading outside the range is still quality 'good'. Rejected on a point whose datatype is not numeric.",
+          "properties": {
+            "min": { "type": "number" },
+            "max": { "type": "number" }
+          }
+        },
+        "publish": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Per-signal publish policy (§5.4), applied by the connector RUNTIME to this point's sample stream — so every consumer sees one stream with the policy already applied. Undeclared means the point is published on every read.",
+          "properties": {
+            "on_change": {
+              "type": "boolean",
+              "description": "Publish only when the value differs from the last published one."
+            },
+            "deadband": {
+              "type": "number",
+              "description": "How much a numeric value must differ to count as changed. Implies on_change."
+            },
+            "min_interval": {
+              "type": "string",
+              "description": "Never publish more often than this (duration string)."
+            },
+            "debounce": {
+              "type": "string",
+              "description": "Publish a new value only once it has been stable for this long. Implies on_change."
+            }
+          }
+        },
+        "measurement": {
+          "description": "Where the signal lands as a measurement (§5.5): false keeps it out of the measurements altogether (e.g. a parameter whose value belongs on its twin fragment only), or a table naming its group and series.",
+          "oneOf": [
+            { "const": false },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "group": { "type": "string" },
+                "series": { "type": "string" }
+              }
+            }
+          ]
+        },
+        "parameter": {
+          "description": "Exposure of the signal as an operator-editable setting (§5.2). A writable point is a parameter by default; false opts it out, true opts a read-only point in, a string names an absolute set, and a table carries the details. The bounds are NOT here: they are the point's 'range'.",
+          "oneOf": [
+            { "type": "boolean" },
+            { "type": "string", "minLength": 1 },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "group": {
+                  "description": "Group name(s); the set is <device type, else protocol>_<group>_parameters.",
+                  "oneOf": [
+                    { "type": "string" },
+                    { "type": "array", "items": { "type": "string" } }
+                  ]
+                },
+                "set": {
+                  "description": "Absolute set name(s), used verbatim; bypasses the naming rule.",
+                  "oneOf": [
+                    { "type": "string" },
+                    { "type": "array", "items": { "type": "string" } }
+                  ]
+                },
+                "title": { "type": "string" },
+                "description": { "type": "string" },
+                "enum": { "type": "array" },
+                "default": {},
+                "order": { "type": "integer" }
+              }
+            }
+          ]
+        },
         "meta": {
           "type": "object",
-          "description": "Free-form signal metadata, echoed verbatim as 'meta' in every sample envelope for this point. Never interpreted by the connector; flows read it for per-signal behaviour (e.g. on_change, deadband, min_interval, debounce) and consumers may carry arbitrary descriptive fields."
+          "description": "Free-form signal metadata — the site's own tags (asset_tag, commissioned, ...). Never interpreted by the connector or the runtime; published verbatim on the device manifest (§8.2) so a site's own flow can find it. The conventions that used to live here — on_change, deadband, min_interval, debounce, measurement, parameter — are the typed point fields above since 0.2, and the loader warns for one release when it finds them here."
         },
         "subscribe": {
           "type": "boolean",
@@ -380,10 +458,17 @@
                 "count": 2
               },
               "unit": "°C",
-              "meta": {
+              "publish": {
                 "on_change": true,
                 "deadband": 0.5,
                 "min_interval": "10s"
+              },
+              "measurement": {
+                "group": "Environment",
+                "series": "Temperature"
+              },
+              "meta": {
+                "asset_tag": "B-17"
               },
               "name": "Boiler temp",
               "description": "Outlet temperature after the heat exchanger"

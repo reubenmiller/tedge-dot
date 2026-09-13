@@ -84,8 +84,8 @@ assert "holding register is writable (c8y_SetRegister parity)" \
   '.point[0].access == "read_write"'
 assert "unit carried over" '.point[0].unit == "°C"'
 assert "divisor-only scaling -> transform.divisor" '.point[0].transform == {divisor: 1000}'
-assert "measurementMapping -> meta.measurement group/series" \
-  '.point[0].meta == {measurement: {group: "modbus", series: "temperature"}}'
+assert "measurementMapping -> typed measurement group/series" \
+  '.point[0].measurement == {group: "modbus", series: "temperature"}'
 
 # --- signed 32-bit input register with scaling --------------------------------------------
 assert "32-bit signed -> int32 over two registers" \
@@ -94,7 +94,7 @@ assert "input flag -> input register table" '.point[1].address.table == "input"'
 assert "input register is not writable" '.point[1] | has("access") | not'
 assert "c8y offset is a decimal shift, not transform.offset (legacy 10^offset semantics)" \
   '.point[1].transform == {multiplier: 3, decimal_shift: 2}'
-assert "no measurementMapping -> no meta" '.point[1] | has("meta") | not'
+assert "no measurementMapping -> no measurement field" '.point[1] | has("measurement") | not'
 
 # --- sub-register bit field ----------------------------------------------------------------
 assert "bit field -> start_bit/bit_count (MSB-based startBit converted to LSB)" \
@@ -105,7 +105,7 @@ assert "bit field decodes via uint16 register" '.point[2].datatype == "uint16"'
 assert "writable coil -> coil table, bool, read_write" \
   '.point[3] == {id: "pump_run", datatype: "bool",
                  address: {table: "coil", address: 48, count: 1}, access: "read_write",
-                 meta: {measurement: {group: "modbus", series: "pump"}}}'
+                 measurement: {group: "modbus", series: "pump"}}'
 assert "input coil -> discrete_input, read-only" \
   '.point[4] == {id: "door_open", datatype: "bool",
                  address: {table: "discrete_input", address: 49, count: 1}}'

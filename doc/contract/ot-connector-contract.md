@@ -128,6 +128,11 @@ enabled       = true            # optional; false keeps the definition but leave
   name     = "<short label>"    # optional human-readable label (§3.1); the id stays an identifier
   description = "<what this signal is>"  # optional longer explanation (§3.1)
   transform = { multiplier = 1, divisor = 1, decimal_shift = 0, offset = 0 } # optional linear scale
+  range     = { min = 0, max = 100 }   # optional engineering bounds; enforced on write (§5.3)
+  publish   = { on_change = true, deadband = 0.5, min_interval = "10s", debounce = "2s" } # §5.4
+  measurement = { group = "Environment", series = "Temperature" }  # or false (§5.5)
+  parameter = { group = ["control"], title = "Setpoint" }          # or false / true / "<set>" (§5.2)
+  meta      = { asset_tag = "B-17" }   # free-form: yours, never interpreted by the connector
 ```
 
 > **Example (Modbus).** To make the skeleton concrete, here are the same fields populated for
@@ -176,13 +181,30 @@ enabled       = true            # optional; false keeps the definition but leave
 | `name` | string | no | Short human-readable label, for wherever a name is displayed instead of the `id` — which is a topic segment and a parameter-set key, so it stays a plain identifier. Feeds a parameter's DTM title (§5.2) and the device manifest (§8.2). |
 | `description` | string | no | Longer human-readable explanation of the signal. Feeds a parameter's DTM description and the device manifest (§8.2). |
 | `transform` | object | no | Per-point linear scale `(value*multiplier*10^decimal_shift/divisor)+offset`; see §4.2. |
-| `meta` | object | no | Free-form signal metadata echoed verbatim as `meta` in every sample envelope. Never interpreted by the connector; flows and tooling read it for per-signal behaviour (e.g. `on_change`, `deadband`, `min_interval`, `debounce`), for naming the point's measurement or, with `meta.measurement = false`, keeping it out of the measurements, and for exposing the point as an operator-editable *parameter* (`meta.parameter`, see §5.2). |
+| `range` | object | no | Engineering-unit bounds `{ min?, max? }`. **Enforced on write** (§5.3) and rendered as the cloud form's limits. Rejected on a non-numeric datatype. |
+| `publish` | object | no | Per-signal publish policy `{ on_change?, deadband?, min_interval?, debounce? }`, applied by the **runtime** to this point's sample stream (§5.4). |
+| `measurement` | `false` \| object | no | Where the signal lands as a measurement: `false` keeps it out of them entirely, `{ group?, series? }` names it (§5.5). |
+| `parameter` | `false` \| `true` \| string \| object | no | Exposure as an operator-editable setting (§5.2). A writable point is one by default. |
+| `meta` | object | no | Free-form signal metadata — **the site's own tags**. Never interpreted by the connector or the runtime; published verbatim on the device manifest (§8.2) so a site's own flow can find it. |
+
+The four typed tables are validated like every other key (§3.3): `publish = { on_chnage = true }`
+is refused, not silently ignored — which is the whole reason they stopped being `meta` keys.
+They also **merge key by key** across point libraries and inline overrides, exactly as `meta`
+and `transform` do (§3.4), so a site can set `publish.deadband` on an inherited point without
+restating `on_change`. The scalar forms (`measurement = false`, `parameter = false | true |
+"<set>"`) replace whatever was inherited, as any scalar does.
+
+> **Moved in 0.2.** These conventions lived in `meta` in 0.1: `meta.on_change`,
+> `meta.deadband`, `meta.min_interval`, `meta.debounce` → `publish.*`; `meta.measurement` →
+> `measurement`; `meta.parameter` → `parameter`; `meta.parameter.min`/`max` → `range`. They are
+> still *accepted* in `meta` — it is free-form — but they no longer *do* anything, so for one
+> release the loader warns when it finds one, naming the field it moved to.
 | `subscribe` | boolean | no | Default `true`. `false` keeps the point on the polling schedule even when the connector supports push delivery. |
 | `address` | object | yes | **Protocol-specific**; shape defined by the connector spec. |
 
 `name` and `description` are **not** echoed in the sample envelope: they are static per point,
 so the connector publishes them once on the device's retained manifest (§8.2) instead of on
-every read. `meta.parameter.title` / `meta.parameter.description` override them for a
+every read. `parameter.title` / `parameter.description` override them for a
 parameter's cloud-facing labels, so a point can carry a general-purpose label and still say
 something different in the parameter UI.
 
@@ -524,12 +546,12 @@ What a 0.1 sample also carried, and where to find it now:
 
 A point whose `access` permits writes is, to an operator, a *parameter*: a setting with a
 current value and a control to change it. The contract deliberately adds no mechanism for
-this beyond the manifest's `access`, `meta`, `parameter.sets` and device `type` (§8.2): a flow
+this beyond the manifest's `access`, `parameter.sets` and device `type` (§8.2): a flow
 (`ot-parameter-state`) derives one
 retained twin fragment per *parameter set* from the samples and acknowledged writes, and
 cloud-specific tooling (`tedge-dot describe`) renders the same sets as cloud-side definitions.
-A read-only point can opt in with `meta.parameter = true`, a writable point can opt out with
-`meta.parameter = false`. Because point ids become the fragment keys, parameter ids SHOULD be
+A read-only point can opt in with `parameter = true`, a writable point can opt out with
+`parameter = false`. Because point ids become the fragment keys, parameter ids SHOULD be
 plain identifiers (`[A-Za-z0-9_]`).
 
 **Naming a set.** A set name is a tenant-wide identifier in the cloud, so it is qualified by the
@@ -541,19 +563,19 @@ says nothing about them:
 ```
 
 Every *run* of characters outside `[A-Za-z0-9]` folds to a single `_`, so `acme-meter-v2` with
-the default group gives `acme_meter_v2_control_parameters`. Two knobs refine it, both under `meta.parameter`:
+the default group gives `acme_meter_v2_control_parameters`. Two knobs refine it, both under the point's `parameter` table:
 
 | Key | Meaning |
 | --- | --- |
 | `group` | A second set *of the same device type* (`commissioning` → `acme_meter_v2_commissioning_parameters`). |
-| `set` | An absolute name, used verbatim — the escape hatch for an identifier that predates this rule, or for a set deliberately shared by several device types. A bare string (`meta.parameter = "pump"`) is this form. |
+| `set` | An absolute name, used verbatim — the escape hatch for an identifier that predates this rule, or for a set deliberately shared by several device types. A bare string (`parameter = "pump"`) is this form. |
 
 Either key MAY be a **list**, and the point then belongs to every set it names — operators group
 signals by what they are *for*, and one setpoint can belong on the commissioning screen and the
 daily-operation one:
 
 ```toml
-meta.parameter = { group = ["control", "commissioning"] }
+parameter = { group = ["control", "commissioning"] }
 ```
 
 Such a point is a property of *each* of those definitions, and its value is published to each of
@@ -564,11 +586,91 @@ same set are not repeated, and an absolute `set` still wins over `group`.
 A device with no declared type falls back to `<protocol>_control_parameters`, which every other
 device type on that protocol also falls back to: fine for a fleet of one type, a collision for a
 fleet of several, and the reason `tedge-dot describe` warns about it. Consumers derive the same
-name from the device `type` echoed in samples and on the link status, so the connector, the
+name from the device `type` on the manifest and on the link status, so the connector, the
 flows and the cloud-side definitions agree without sharing a configuration file.
 
 See [RFC 0003](../rfc/0003-parameter-writes.md) and
 [RFC 0005](../rfc/0005-device-types-and-parameter-sets.md).
+
+### 5.3 `range`: bounds the connector enforces
+
+A point MAY declare engineering-unit bounds:
+
+```toml
+range = { min = 0, max = 30000 }
+```
+
+Either end may be omitted, which leaves that side unbounded. A `range` on a point whose
+datatype is not numeric is refused at configuration time.
+
+**`range` is enforced on write.** A `write` — or any entry of a `write-batch` — whose value
+falls outside the point's range fails *before the device is touched*:
+
+```json
+{ "status": "init", "point": "temp_u16", "value": 35000 }
+```
+
+```json
+{ "status": "failed", "point": "temp_u16",
+  "reason": "value 35000 outside range [0, 30000] of temp_u16" }
+```
+
+The check runs in the runtime, once, for every protocol, on the **engineering** value (§4.2) —
+so the bound means the same thing as the reading it bounds, and a module never sees an
+out-of-range write. In a **batch** the check runs for *every* entry before the first write is
+executed, so an out-of-range value fails the batch with nothing applied: the one failure mode
+guaranteed to have left the device untouched.
+
+Reads are **not** altered: a reading outside `range` is still `quality: "good"` — the device
+really says that — and alarming on it is a flow's job.
+
+Why in the driver: in 0.1 the limit lived only in a cloud form, and a write that bypassed the
+form (a script, another flow, a typo in an operation) reached the device unchecked. A limit is
+a property of the signal, not of whatever is asking, so it belongs next to the datatype. The
+same table is what the cloud form renders as its `minimum`/`maximum`, so the form and the
+driver cannot disagree.
+
+### 5.4 `publish`: the per-signal publish policy
+
+A point MAY declare how often it is worth publishing:
+
+```toml
+publish = { on_change = true, deadband = 0.5, min_interval = "10s", debounce = "2s" }
+```
+
+| Key | Meaning |
+| --- | --- |
+| `on_change` | Publish only when the value differs from the last published one. |
+| `deadband` | How much a numeric value must differ to count as changed. Implies `on_change`. |
+| `min_interval` | Never publish more often than this. |
+| `debounce` | Publish a new value only once it has been stable for this long. Implies `on_change`. |
+
+**The runtime applies it**, to the sample stream itself, in that order: debounce, then change
+detection, then the rate limit. Every consumer — a measurement flow, the parameter twin, a
+historian — therefore sees one stream with the policy already applied, and none of them carries
+a per-signal lookup in its hot path. The four settings are protocol-neutral and identical in
+every deployment, which is why they belong below every consumer rather than in each one.
+
+- Only `good` samples are gated. A `bad` sample is still published (§5.1 requires it) and keeps
+  the connector's own bad-sample rate limit; `stale` is unaffected.
+- `seq` is stamped before the gate, so the gap a suppressed reading leaves is visible: a
+  consumer can tell "nothing changed" from "nothing was read".
+- A point that declares no `publish` is published on every read — the default, and what a
+  consumer needing every raw read leaves in place.
+
+### 5.5 `measurement`: where a signal lands as a measurement
+
+A point MAY name the measurement it becomes, or opt out of measurements entirely:
+
+```toml
+measurement = { group = "Environment", series = "Temperature" }
+measurement = false     # sampled, but never published as a time series
+```
+
+The connector does not interpret this — publishing measurements is a flow's job (`ot-measurement`
+reads it from the manifest) — but it is a typed field rather than a `meta` key so that a
+misspelling is refused instead of silently doing nothing. `measurement = false` is the
+counterpart of `parameter = false`: a parameter whose value belongs on its twin fragment only.
 
 ## 6. Command protocol
 
