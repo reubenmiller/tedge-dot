@@ -13,6 +13,7 @@ pub enum Kind {
     Sample,
     Command,
     Status,
+    Manifest,
     Config,
     PointLibrary,
 }
@@ -23,6 +24,7 @@ impl Kind {
             Kind::Sample => "sample",
             Kind::Command => "command",
             Kind::Status => "status",
+            Kind::Manifest => "manifest",
             Kind::Config => "config",
             Kind::PointLibrary => "point-library",
         }
@@ -31,10 +33,11 @@ impl Kind {
 
 const CONFIG_SCHEMA: &str = include_str!("../../../../../doc/contract/schemas/config.schema.json");
 
-const SOURCES: [(Kind, &str); 5] = [
+const SOURCES: [(Kind, &str); 6] = [
     (Kind::Sample, include_str!("../../../../../doc/contract/schemas/sample.schema.json")),
     (Kind::Command, include_str!("../../../../../doc/contract/schemas/command.schema.json")),
     (Kind::Status, include_str!("../../../../../doc/contract/schemas/status.schema.json")),
+    (Kind::Manifest, include_str!("../../../../../doc/contract/schemas/manifest.schema.json")),
     (Kind::Config, CONFIG_SCHEMA),
     (
         Kind::PointLibrary,
@@ -163,14 +166,37 @@ mod tests {
         assert!(schemas.validate(Kind::Sample, &bad).is_err());
     }
 
+    /// The device descriptor moved from the link status to the manifest (contract §8.2): a
+    /// manifest carrying it validates, a link status still carrying it does not.
     #[test]
-    fn link_status_with_info_descriptor_validates() {
+    fn device_descriptor_lives_on_the_manifest() {
         let schemas = Schemas::load().unwrap();
+        let manifest = serde_json::json!({
+            "contract": "0.2",
+            "protocol": "modbus",
+            "service": "tedge-dot-modbus",
+            "type": "acme-meter-v2",
+            "info": { "protocol": "modbus", "transport": "tcp", "host": "10.0.0.9" },
+            "points": {
+                "temp": { "datatype": "float32", "access": "read", "unit": "°C", "meta": { "on_change": true } },
+                "setpoint": { "datatype": "uint16", "access": "read_write",
+                              "parameter": { "sets": ["acme_meter_v2_control_parameters"] } }
+            }
+        });
+        schemas.validate(Kind::Manifest, &manifest).unwrap();
+
         let link = serde_json::json!({
             "status": "connected",
             "since": "2026-05-30T09:59:00.000Z",
-            "info": { "protocol": "modbus", "transport": "tcp", "host": "10.0.0.9" }
+            "info": { "transport": "tcp" }
         });
-        schemas.validate(Kind::Status, &link).unwrap();
+        assert!(schemas.validate(Kind::Status, &link).is_err());
+
+        // A set name that is not a plain identifier cannot be on a manifest.
+        let bad = serde_json::json!({
+            "contract": "0.2", "protocol": "modbus", "service": "s",
+            "points": { "p": { "access": "read_write", "parameter": { "sets": ["a/b"] } } }
+        });
+        assert!(schemas.validate(Kind::Manifest, &bad).is_err());
     }
 }

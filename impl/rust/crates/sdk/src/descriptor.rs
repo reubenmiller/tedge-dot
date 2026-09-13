@@ -518,34 +518,6 @@ pub fn property_schema(param: &Parameter) -> Value {
     Value::Object(schema)
 }
 
-/// The `point_labels` of the capability descriptor (§7): every configured point that declares
-/// a `name` or a `description`, so a consumer can show something friendlier than the point id.
-///
-/// Points with neither are omitted — their id *is* their label — so a configuration that uses
-/// none of this adds nothing to the descriptor. Published once, retained, rather than echoed
-/// in every sample: the labels are static, and a sample is a time series.
-pub fn point_labels(config: &ConnectorConfig) -> Vec<Value> {
-    let mut labels = Vec::new();
-    for device in &config.devices {
-        for point in &device.points {
-            if point.name.is_none() && point.description.is_none() {
-                continue;
-            }
-            let mut entry = Map::new();
-            entry.insert("device".into(), json!(device.name));
-            entry.insert("point".into(), json!(point.id));
-            if let Some(name) = &point.name {
-                entry.insert("name".into(), json!(name));
-            }
-            if let Some(description) = &point.description {
-                entry.insert("description".into(), json!(description));
-            }
-            labels.push(Value::Object(entry));
-        }
-    }
-    labels
-}
-
 fn title_from_key(key: &str) -> String {
     let mut out = String::new();
     for (i, part) in key.split('_').filter(|p| !p.is_empty()).enumerate() {
@@ -875,42 +847,6 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id 
         assert_eq!(defs[2]["identifier"], "acme_boiler_v2_commissioning_parameters");
         assert_eq!(defs[3]["identifier"], "modbus_control_parameters");
         assert!(defs[3]["jsonSchema"]["properties"]["spare_rw"].is_object());
-    }
-
-    /// The capability descriptor's `point_labels` (§7): the labels are static, so they are
-    /// published once and retained rather than echoed in every sample. Read-only points get an
-    /// entry too — they have no DTM parameter to carry one — and a point with neither label is
-    /// omitted, so a configuration using none of this adds nothing to the descriptor.
-    #[test]
-    fn point_labels_carry_the_human_readable_text() {
-        let labels = point_labels(&cfg());
-        assert_eq!(
-            labels,
-            vec![
-                json!({
-                    "device": "plc1",
-                    "point": "temp_u16",
-                    "name": "Boiler temp",
-                    "description": "Outlet temperature after the heat exchanger",
-                }),
-                json!({ "device": "plc1", "point": "coil_rw", "name": "Pump enable" }),
-                json!({
-                    "device": "plc1",
-                    "point": "level_f32",
-                    "description": "Level in the buffer tank",
-                }),
-            ],
-            "labelled points only, in configuration order, with just the fields they declare"
-        );
-
-        // A configuration that labels nothing produces no labels at all, so the descriptor is
-        // unchanged for everyone not using the feature.
-        let mut bare = cfg();
-        for point in &mut bare.devices[0].points {
-            point.name = None;
-            point.description = None;
-        }
-        assert!(point_labels(&bare).is_empty());
     }
 
     #[test]

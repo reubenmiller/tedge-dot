@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thin-edge.io/ot-connector/manifest.schema.json",
+  "title": "OT Connector Device Manifest",
+  "description": "Retained per-device manifest published to te/device/<device>/ot/<protocol>/manifest (contract §8.2): what the device is and what its points are, so a consumer never needs the configuration file and a sample carries only what changes per read.",
+  "type": "object",
+  "required": [
+    "contract",
+    "protocol",
+    "service",
+    "points"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "contract": {
+      "type": "string",
+      "const": "0.2",
+      "description": "The contract version the connector implements."
+    },
+    "protocol": {
+      "type": "string",
+      "minLength": 1
+    },
+    "service": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The connector service serving the device (contract §6.3)."
+    },
+    "type": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The device's declared type (§3.1), when it has one."
+    },
+    "info": {
+      "type": "object",
+      "description": "The connector's device descriptor (transport/address details) from its connect report, when seen."
+    },
+    "points": {
+      "type": "object",
+      "description": "Every configured point, keyed by point id.",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "access"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "datatype": {
+            "enum": [
+              "bool",
+              "int8",
+              "uint8",
+              "int16",
+              "uint16",
+              "int32",
+              "uint32",
+              "int64",
+              "uint64",
+              "float32",
+              "float64",
+              "string",
+              "bytes"
+            ]
+          },
+          "access": {
+            "enum": [
+              "read",
+              "write",
+              "read_write"
+            ]
+          },
+          "unit": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "meta": {
+            "type": "object",
+            "description": "The point's free-form meta table, verbatim."
+          },
+          "parameter": {
+            "type": "object",
+            "required": [
+              "sets"
+            ],
+            "additionalProperties": false,
+            "description": "Present when the point is a parameter (§5.2): the sets it belongs to, resolved by the connector.",
+            "properties": {
+              "sets": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_]+$"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "contract": "0.2",
+      "protocol": "modbus",
+      "service": "tedge-dot-modbus",
+      "type": "acme-meter-v2",
+      "info": {
+        "transport": "tcp",
+        "host": "192.168.0.10",
+        "port": 502,
+        "unit_id": 1
+      },
+      "points": {
+        "boiler_temp": {
+          "datatype": "float32",
+          "access": "read",
+          "unit": "°C",
+          "name": "Boiler temp",
+          "meta": {
+            "on_change": true
+          }
+        },
+        "setpoint": {
+          "datatype": "uint16",
+          "access": "read_write",
+          "parameter": {
+            "sets": [
+              "acme_meter_v2_control_parameters"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

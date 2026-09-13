@@ -227,7 +227,8 @@ tiny:
 | **Sample publishing** | Serialize `Sample` to the envelope and publish to `sample/<point>` (non-retained). |
 | **Command routing** | Subscribe `cmd/<verb>/+`, act only on commands for devices the live configuration defines (contract §6.5: other instances of the protocol receive them too), validate against the command schema, run the state machine (`init→executing→successful|failed`), call `execute`, publish results (retained). Management verbs arrive on the service command topic instead. |
 | **Management verbs** | Implement `set-config`/`define-device`/`remove-device` (contract §6.3) generically: patch the config document, validate, persist, and live-reload — so no module writes config-mutation code. Augment `capabilities()` with these verbs + the `management` feature. |
-| **Capability descriptor** | Build from `capabilities()` (plus the management verbs above) and publish retained on startup. |
+| **Capability descriptor** | Build from `capabilities()` (plus the management verbs above) and publish retained on startup. A property of the build alone. |
+| **Device manifest** | Publish each device's retained manifest (contract §8.2) — type, descriptor, and every point with its datatype/access/unit/labels/`meta` and its parameter sets resolved — before its link status, republish it on every configuration change, and clear it (with the link status) when the device is removed or switched off. |
 | **Health & link status** | Publish retained service health; turn `LinkReport`s into retained `status/link` messages. |
 | **Config & hot-reload** | Load + schema-validate config (contract schema + the module's own schema), watch files with `notify`, call `configure`/`connect` on change without a process restart. |
 | **Backpressure / throttling** | Optional per-point minimum publish interval and `bad`-sample rate limiting. |

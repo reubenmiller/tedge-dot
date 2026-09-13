@@ -259,11 +259,11 @@
         },
         "name": {
           "type": "string",
-          "description": "Short human-readable label for this signal, for wherever a name is displayed instead of the id — which is a topic segment and a parameter-set key, so it stays a plain identifier. Feeds a parameter's DTM title and the capability descriptor's point_labels (§7). Not echoed per sample."
+          "description": "Short human-readable label for this signal, for wherever a name is displayed instead of the id — which is a topic segment and a parameter-set key, so it stays a plain identifier. Feeds a parameter's DTM title and the device manifest (§8.2). Not echoed per sample."
         },
         "description": {
           "type": "string",
-          "description": "Longer human-readable explanation of the signal. Feeds a parameter's DTM description and the capability descriptor's point_labels (§7). Not echoed per sample; meta.parameter.description overrides it for the parameter UI."
+          "description": "Longer human-readable explanation of the signal. Feeds a parameter's DTM description and the device manifest (§8.2). Not echoed per sample; meta.parameter.description overrides it for the parameter UI."
         },
         "address": {
           "type": "object",

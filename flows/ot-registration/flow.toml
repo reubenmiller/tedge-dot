@@ -1,5 +1,7 @@
 # ot-registration: connector link status -> thin-edge child-device registration
-input.mqtt.topics = ["te/+/+/ot/+/status/link"]
+# The device manifest (contract §8.2) carries the connector's device descriptor (`info`) for the
+# optional twin fragment; the link status carries the device `type` and triggers registration.
+input.mqtt.topics = ["te/+/+/ot/+/status/link", "te/+/+/ot/+/manifest"]
 
 [config]
 # thin-edge entity type assigned to registered OT devices that do not declare one. A connector
@@ -10,8 +12,8 @@ device_type = "${params.device_type}"
 # routes the matching operations). `ot_write` backs c8y_SetRegister; `ot_write_coil` backs c8y_SetCoil;
 # `parameter_update` backs c8y_ParameterUpdate (device parameters).
 command_capabilities = "${params.command_capabilities}"
-# Optional digital-twin fragment name. When set, the connector's device descriptor (from the link
-# status `info`) is published to te/device/<device>///twin/<twin_fragment>. Empty = no twin.
+# Optional digital-twin fragment name. When set, the connector's device descriptor (the device
+# manifest's `info`) is published to te/device/<device>///twin/<twin_fragment>. Empty = no twin.
 twin_fragment = "${params.twin_fragment}"
 
 [[steps]]

@@ -195,3 +195,15 @@ Reconnect To Broker
 Collect Stack Logs
     [Documentation]    Container logs of every service of the stack (docker compose logs).
     DeviceLibrary.Get Service Logs
+
+Retained Message Should Be Cleared
+    [Documentation]    The latest message seen on a retained topic is an empty payload — the
+    ...                clearing message a connector publishes for a device that is gone (§8.2).
+    ...                Waits for it, since it follows the command result on another topic.
+    [Arguments]    ${topic}    ${timeout}=10s
+    Wait Until Keyword Succeeds    ${timeout}    500ms    Latest Message Should Be Empty    ${topic}
+
+Latest Message Should Be Empty
+    [Arguments]    ${topic}
+    ${payload}=    Get Message    ${topic}
+    Should Be Empty    ${payload}    ${topic} still carries a retained payload

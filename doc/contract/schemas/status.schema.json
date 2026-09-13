@@ -30,14 +30,10 @@
         "type": {
           "type": "string",
           "minLength": 1,
-          "description": "The device's declared type (§3.1), when it has one — so the registration flow can use it as the thin-edge entity type, and a consumer can name the device's parameter sets before any sample arrives."
+          "description": "The device's declared type (§3.1), when it has one — on the link status because it is the registration trigger and a registration happens once; the device manifest (§8.2) carries it too."
         },
         "since": { "type": "string", "format": "date-time" },
-        "reason": { "type": "string" },
-        "info": {
-          "type": "object",
-          "description": "Optional device descriptor (transport/address details) supplied by the connector; flows can forward it into a digital-twin fragment."
-        }
+        "reason": { "type": "string" }
       }
     },
     "capabilities": {
@@ -84,22 +80,7 @@
           "items": { "type": "string" },
           "uniqueItems": true
         },
-        "subscribe": { "type": "boolean", "default": false },
-        "point_labels": {
-          "type": "array",
-          "description": "Human-readable labels for the configured points (§3.1 name / description), so a consumer can show something friendlier than the point id. Only points declaring one of them appear, and each entry carries only the fields it declares; no entry means the id is the label. Published here, once and retained, rather than echoed in every sample: the labels are static and a sample is a time series.",
-          "items": {
-            "type": "object",
-            "required": ["device", "point"],
-            "additionalProperties": false,
-            "properties": {
-              "device": { "type": "string", "minLength": 1 },
-              "point": { "type": "string", "minLength": 1 },
-              "name": { "type": "string" },
-              "description": { "type": "string" }
-            }
-          }
-        }
+        "subscribe": { "type": "boolean", "default": false }
       }
     }
   },
@@ -114,11 +95,7 @@
       "point_kinds": ["coil", "discrete_input", "holding_register", "input_register"],
       "command_verbs": ["write"],
       "features": ["polling", "bitfield"],
-      "subscribe": false,
-      "point_labels": [
-        { "device": "plc-1", "point": "boiler_temp",
-          "name": "Boiler temp", "description": "Outlet temperature after the heat exchanger" }
-      ]
+      "subscribe": false
     }
   ]
 }

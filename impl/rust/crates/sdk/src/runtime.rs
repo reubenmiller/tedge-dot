@@ -136,10 +136,50 @@ impl LinkTracker {
         for report in reports {
             self.states.insert(report.device.clone(), report.status);
             if let Some(info) = &report.info {
-                self.infos.insert(report.device.clone(), info.clone());
+                if self.infos.get(&report.device) != Some(info) {
+                    self.infos.insert(report.device.clone(), info.clone());
+                    // The descriptor lives on the manifest (§8.2), which is republished — before
+                    // the link status — the first time a device's `connect` reports it.
+                    if let Some(device) = config.devices.iter().find(|d| d.name == report.device) {
+                        let payload = crate::manifest::device_manifest(config, device, Some(info));
+                        let topic = crate::manifest::topic(&device.name, &self.protocol);
+                        publish_retained(client, &topic, payload.to_string()).await?;
+                    }
+                }
             }
         }
         publish_links(client, &self.protocol, reports, config).await
+    }
+
+    /// Publish the retained manifest (§8.2) of every configured device, carrying the device
+    /// descriptor already learned from its `connect` report when there is one.
+    async fn publish_manifests(
+        &self,
+        client: &Mqtt,
+        config: &ConnectorConfig,
+    ) -> Result<(), BoxError> {
+        for device in &config.devices {
+            let payload =
+                crate::manifest::device_manifest(config, device, self.infos.get(&device.name));
+            let topic = crate::manifest::topic(&device.name, &self.protocol);
+            publish_retained(client, &topic, payload.to_string()).await?;
+        }
+        Ok(())
+    }
+
+    /// Clear the retained manifest and link status of devices the configuration no longer
+    /// defines — removed, or switched off — so nothing retained describes a device that is gone
+    /// (§8.2; the 0.1 contract left the link status behind).
+    async fn clear_devices(&mut self, client: &Mqtt, devices: &[String]) -> Result<(), BoxError> {
+        for device in devices {
+            self.states.remove(device);
+            self.infos.remove(device);
+            publish_retained(client, &crate::manifest::topic(device, &self.protocol), String::new())
+                .await?;
+            let link = format!("te/device/{device}/ot/{}/status/link", self.protocol);
+            publish_retained(client, &link, String::new()).await?;
+        }
+        Ok(())
     }
 
     /// Record a device descriptor without publishing, so a later transition publish carries
@@ -581,14 +621,16 @@ pub async fn run_until_reloadable(
     }
 
     // 3. Publish capability descriptor + service health (retained).
-    publish_retained(&client, &cap_topic, capability_payload(&caps, &config)).await?;
+    publish_retained(&client, &cap_topic, capability_payload(&caps)).await?;
     publish_health(&client, &health_topic, "up").await?;
     client.subscribe(&device_cmd_sub, QoS::AtLeastOnce).await?;
     client.subscribe(&service_cmd_sub, QoS::AtLeastOnce).await?;
     info!(%protocol, %service, "connector started");
 
-    // 4. Connect to devices and publish link status.
+    // 4. Publish every device's manifest (§8.2) — before its link status and before any sample,
+    // on this same connection — then connect to the devices and publish their link status.
     let mut links = LinkTracker::new(&protocol);
+    links.publish_manifests(&client, &config).await?;
     match bounded(limits, "connect", connector.connect()).await {
         Ok(reports) => links.publish_reports(&client, &reports, &config).await?,
         Err(e) => warn!("initial connect failed: {e}"),
@@ -729,7 +771,7 @@ pub async fn run_until_reloadable(
             _ = reload.notified() => {
                 match reload_from_file(
                     &mut connector, &client, &mut links, &mut config, &mut config_doc,
-                    &config_path, &cap_topic, limits,
+                    &config_path, limits,
                 ).await {
                     Reloaded::Applied => rearm = true,
                     Reloaded::Unchanged | Reloaded::Kept => {}
@@ -743,7 +785,7 @@ pub async fn run_until_reloadable(
             Some(p) = incoming_rx.recv() => {
                 match handle_command(
                     &mut connector, &client, &protocol, &service, &mut links,
-                    &mut config, &mut config_doc, &config_path, &cap_topic,
+                    &mut config, &mut config_doc, &config_path,
                     &p.topic, &p.payload, limits,
                 ).await {
                     // A management command changed the config (see below).
@@ -1091,11 +1133,7 @@ fn device_type_of<'a>(config: &'a ConnectorConfig, device: &str) -> Option<&'a s
 }
 
 fn access_str(access: Access) -> &'static str {
-    match access {
-        Access::Read => "read",
-        Access::Write => "write",
-        Access::ReadWrite => "read_write",
-    }
+    access.as_str()
 }
 
 /// The sample envelope as published: the contract envelope plus the point's `meta` (if any)
@@ -1216,7 +1254,6 @@ async fn handle_command(
     config: &mut ConnectorConfig,
     config_doc: &mut DocumentMut,
     config_path: &Path,
-    cap_topic: &str,
     topic: &str,
     payload: &[u8],
     limits: Limits,
@@ -1243,7 +1280,7 @@ async fn handle_command(
     let service_cmd = matches!(route, CommandRoute::Service { .. });
     if service_cmd && is_management_verb(verb) {
         return handle_management(
-            connector, client, links, config, config_doc, config_path, cap_topic, topic, verb,
+            connector, client, links, config, config_doc, config_path, topic, verb,
             &json, limits,
         )
         .await;
@@ -1523,18 +1560,10 @@ fn augment_management_caps(caps: &mut Capabilities) {
 }
 
 /// The retained capability descriptor payload (§7): the module's declared capabilities plus
-/// the configured points' human-readable labels.
-///
-/// The labels are static per point, so they belong in this one retained message rather than in
-/// every sample — but they come from the *configuration*, unlike everything else here, so this
-/// has to be rebuilt and republished whenever a management command changes it.
-fn capability_payload(caps: &Capabilities, config: &ConnectorConfig) -> String {
-    let mut json = caps.to_json();
-    let labels = crate::descriptor::point_labels(config);
-    if !labels.is_empty() {
-        json["point_labels"] = serde_json::Value::Array(labels);
-    }
-    json.to_string()
+/// the verbs the runtime adds. A property of the build alone — what the configuration says
+/// about a device is on its manifest (§8.2) — so it is published once and never rebuilt.
+fn capability_payload(caps: &Capabilities) -> String {
+    caps.to_json().to_string()
 }
 
 /// Handle a management command: patch the config document, validate, persist, and live-reload.
@@ -1547,7 +1576,6 @@ async fn handle_management(
     config: &mut ConnectorConfig,
     config_doc: &mut DocumentMut,
     config_path: &Path,
-    cap_topic: &str,
     topic: &str,
     verb: &str,
     json: &serde_json::Value,
@@ -1618,7 +1646,7 @@ async fn handle_management(
         warn!("failed to persist config to {}: {e}", config_path.display());
     }
     *config_doc = candidate;
-    commit_config(connector, client, links, config, new_config, cap_topic, limits).await?;
+    commit_config(connector, client, links, config, new_config, limits).await?;
 
     publish_retained(
         client,
@@ -1639,20 +1667,23 @@ async fn commit_config(
     links: &mut LinkTracker,
     config: &mut ConnectorConfig,
     new_config: ConnectorConfig,
-    cap_topic: &str,
     limits: Limits,
 ) -> Result<(), BoxError> {
+    // Devices the new configuration no longer defines — removed, or switched off with
+    // `enabled = false` — lose their retained manifest and link status (§8.2): nothing retained
+    // may describe a device that is gone.
+    let gone: Vec<String> = config
+        .devices
+        .iter()
+        .filter(|d| !new_config.devices.iter().any(|n| n.name == d.name))
+        .map(|d| d.name.clone())
+        .collect();
     *config = new_config;
-
-    // Republish the capability descriptor: its `point_labels` (§7) are derived from the
-    // configuration, which just changed, and the retained message would otherwise describe the
-    // configuration as it was at startup — labels for points that are gone, none for a device
-    // just defined. Everything else in it is a property of the build and unchanged, so this is
-    // cheap and idempotent.
-    let mut caps = connector.capabilities();
-    augment_management_caps(&mut caps);
-    augment_batch_caps(&mut caps);
-    publish_retained(client, cap_topic, capability_payload(&caps, config)).await?;
+    links.clear_devices(client, &gone).await?;
+    // The manifests describe the configuration, which just changed: republish every device's,
+    // so a retained manifest never describes the configuration as it was at startup — points
+    // that are gone, none for a device just defined.
+    links.publish_manifests(client, config).await?;
 
     // Reconnect with the new configuration and republish link status.
     let _ = bounded(limits, "disconnect", connector.disconnect()).await;
@@ -1701,7 +1732,6 @@ async fn reload_from_file(
     config: &mut ConnectorConfig,
     config_doc: &mut DocumentMut,
     config_path: &Path,
-    cap_topic: &str,
     limits: Limits,
 ) -> Reloaded {
     let path = config_path.display();
@@ -1744,7 +1774,7 @@ async fn reload_from_file(
     }
     *config_doc = doc;
     if let Err(e) =
-        commit_config(connector, client, links, config, new_config, cap_topic, limits).await
+        commit_config(connector, client, links, config, new_config, limits).await
     {
         warn!("reload: {path}: {e}");
     }
@@ -2030,9 +2060,7 @@ fn link_payload(
     if let Some(reason) = &report.reason {
         obj.insert("reason".into(), serde_json::Value::String(reason.clone()));
     }
-    if let Some(info) = &report.info {
-        obj.insert("info".into(), info.clone());
-    }
+    // The device descriptor (`info`) is on the manifest (§8.2), not here.
     serde_json::Value::Object(obj)
 }
 
@@ -2051,7 +2079,8 @@ async fn restore_mqtt_session(
         client.subscribe(*filter, QoS::AtLeastOnce).await?;
     }
     publish_health(client, health_topic, "up").await?;
-    publish_retained(client, cap_topic, capability_payload(caps, config)).await?;
+    publish_retained(client, cap_topic, capability_payload(caps)).await?;
+    links.publish_manifests(client, config).await?;
     links.republish(client, config).await
 }
 

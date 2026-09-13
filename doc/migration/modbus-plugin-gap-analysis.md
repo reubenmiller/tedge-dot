@@ -73,7 +73,7 @@ does more than tedge-dot.
 | Translate `alarmMapping` / `eventMapping` / `statusMapping` from the device type | **no** (legacy ignores them; alarms/events only via hand-edited `devices.toml`) | no (targets exist: `ot-alarm` / `ot-event` params, `point.meta`) | missing in both |
 | Link the UI-created child MO by creating external id `<device.id>:device:<name>` | yes | no (`ot-registration` registers by name; the c8y mapper would create a *second* MO instead of adopting the UI one) | missing |
 | Re-sync when a device type is edited in the tenant (inventory polling, as the reference c8y fieldbus agent does) | no (fetch happens only when the operation fires) | no | missing in both (optional) |
-| Export device-side config to the cloud UI (twin) | `te/device/<child>///twin/c8y_ModbusDevice` (port/address/protocol/ipAddress) | `ot-registration` `twin_fragment = "c8y_ModbusDevice"` publishing the connector's `LinkReport.info` descriptor ([`cloud/modbus/params/ot-registration.params.toml`](../../cloud/modbus/params/ot-registration.params.toml)) | covered |
+| Export device-side config to the cloud UI (twin) | `te/device/<child>///twin/c8y_ModbusDevice` (port/address/protocol/ipAddress) | `ot-registration` `twin_fragment = "c8y_ModbusDevice"` publishing the connector's device descriptor (the device manifest's `info`, contract §8.2) ([`cloud/modbus/params/ot-registration.params.toml`](../../cloud/modbus/params/ot-registration.params.toml)) | covered |
 
 ### 1.4 Child devices, transports, packaging
 

@@ -101,7 +101,7 @@ Read them roughly in this order:
 | --- | --- | --- |
 | 1 | [rfc/0001-ot-connector-architecture.md](rfc/0001-ot-connector-architecture.md) | The core architectural decision: dumb driver + flows, single pluggable binary, rationale, alternatives, risks. |
 | 2 | [contract/ot-connector-contract.md](contract/ot-connector-contract.md) | **Normative.** The OT Connector Contract: config model, sample envelope, status/health, command protocol, capability model, topic conventions, quality & timestamp rules. |
-| 3 | [contract/schemas/](contract/schemas/) | Machine-readable JSON Schemas for config, point libraries, and sample, command and status messages. |
+| 3 | [contract/schemas/](contract/schemas/) | Machine-readable JSON Schemas for config, point libraries, and sample, command, status and device-manifest messages. |
 | 4 | [contract/asyncapi.yaml](contract/asyncapi.yaml) | AsyncAPI 3.0 description of every MQTT topic and message. |
 | 5 | [sdk/connector-sdk.md](sdk/connector-sdk.md) | The Rust SDK and the `Connector` trait every protocol module implements; what the runtime provides for free. |
 | 6 | [connectors/modbus-connector-spec.md](connectors/modbus-connector-spec.md) | **AI-implementable** reference spec for the Modbus connector, including decode rules and acceptance test vectors. |

@@ -3,7 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Status | **Normative draft** |
-| Version | 0.1.0 |
+| Version | 0.2.0-draft (0.1.0 plus RFC 0006 §3, the device manifest) |
 | Date | 2026-05-30 |
 | Schemas | [schemas/](schemas/) · [asyncapi.yaml](asyncapi.yaml) |
 
@@ -52,6 +52,7 @@ up naturally. `<device>` is the thin-edge entity id segment for the device
 | --- | --- | --- | --- |
 | Sample (read result) | connector → broker | `te/device/<device>/ot/<protocol>/sample/<point>` | no |
 | Connector status | connector → broker | `te/device/main/service/<service>/status/health` | yes |
+| Device manifest | connector → broker | `te/device/<device>/ot/<protocol>/manifest` | yes |
 | Device link status | connector → broker | `te/device/<device>/ot/<protocol>/status/link` | yes |
 | Capability descriptor | connector → broker | `te/device/main/service/<service>/ot/capabilities` | yes |
 | Command request | requester → broker | `te/device/<device>/ot/<protocol>/cmd/<verb>/<id>` | yes |
@@ -171,15 +172,15 @@ enabled       = true            # optional; false keeps the definition but leave
 | `poll_interval` | duration string | no | Overrides device/connector default. |
 | `access` | `"read"` \| `"write"` \| `"read_write"` | no | Default `"read"`. |
 | `unit` | string | no | Opaque hint echoed into the sample for flows. |
-| `name` | string | no | Short human-readable label, for wherever a name is displayed instead of the `id` — which is a topic segment and a parameter-set key, so it stays a plain identifier. Feeds a parameter's DTM title (§5.2) and the capability descriptor's `point_labels` (§7). |
-| `description` | string | no | Longer human-readable explanation of the signal. Feeds a parameter's DTM description and `point_labels` (§7). |
+| `name` | string | no | Short human-readable label, for wherever a name is displayed instead of the `id` — which is a topic segment and a parameter-set key, so it stays a plain identifier. Feeds a parameter's DTM title (§5.2) and the device manifest (§8.2). |
+| `description` | string | no | Longer human-readable explanation of the signal. Feeds a parameter's DTM description and the device manifest (§8.2). |
 | `transform` | object | no | Per-point linear scale `(value*multiplier*10^decimal_shift/divisor)+offset`; see §4.2. |
 | `meta` | object | no | Free-form signal metadata echoed verbatim as `meta` in every sample envelope. Never interpreted by the connector; flows and tooling read it for per-signal behaviour (e.g. `on_change`, `deadband`, `min_interval`, `debounce`), for naming the point's measurement or, with `meta.measurement = false`, keeping it out of the measurements, and for exposing the point as an operator-editable *parameter* (`meta.parameter`, see §5.2). |
 | `subscribe` | boolean | no | Default `true`. `false` keeps the point on the polling schedule even when the connector supports push delivery. |
 | `address` | object | yes | **Protocol-specific**; shape defined by the connector spec. |
 
 `name` and `description` are **not** echoed in the sample envelope: they are static per point,
-so the connector publishes them once in its retained capability descriptor (§7) instead of on
+so the connector publishes them once on the device's retained manifest (§8.2) instead of on
 every read. `meta.parameter.title` / `meta.parameter.description` override them for a
 parameter's cloud-facing labels, so a point can carry a general-purpose label and still say
 something different in the parameter UI.
@@ -792,11 +793,7 @@ same fields with its own values (and typically `"subscribe": true`):
   "point_kinds": ["coil", "discrete_input", "holding_register", "input_register"],
   "command_verbs": ["write", "set-config", "define-device", "remove-device"],
   "features": ["polling", "bitfield", "management"],
-  "subscribe": false,
-  "point_labels": [
-    { "device": "plc-1", "point": "boiler_temp",
-      "name": "Boiler temp", "description": "Outlet temperature after the heat exchanger" }
-  ]
+  "subscribe": false
 }
 ```
 
@@ -808,18 +805,13 @@ same fields with its own values (and typically `"subscribe": true`):
 | `command_verbs` | Verbs accepted on `cmd/<verb>`. MUST include `write` if any point is writable; SDK-based connectors also list `write-batch` (§6.4) and the management verbs (§6.3). |
 | `features` | Optional capability tags: `polling`, `subscribe`, `bitfield`, `string`, `bulk_read`, … |
 | `subscribe` | Whether the connector supports event-driven (push) reads in addition to polling. |
-| `point_labels` | The human-readable `name`/`description` of the configured points (§3.1), so a consumer can show something friendlier than the point id. Only points declaring one of them appear, and each entry carries only the fields it declares — **no entry means the id is the label**, so a configuration that labels nothing adds nothing here. Unlike the fields above, this describes the *configuration* rather than the connector's abilities; it lives here because it is static per point, which makes one retained message the right place for it and a per-sample echo the wrong one (§5 samples are a time series). |
 
 Tooling and the conformance suite use the descriptor to decide which tests apply.
 
-The descriptor is retained, so it MUST be republished whenever something it reports changes.
-Everything except `point_labels` is a property of the connector build and so is published once
-at startup; `point_labels` follows the configuration, and a connector MUST therefore republish
-the descriptor after a management command (§6.3) changes it — a retained message describing the
-configuration as it was at startup is worse than none. Note also that labelling every point of
-a large list has a size: two hundred fully labelled points add on the order of ten kilobytes to
-this one message. That is paid once per (re)publish, not per sample, which is the reason the
-labels live here rather than in the sample envelope.
+Every field is a property of the connector *build*, so the descriptor is published once at
+startup (and again when an MQTT session is restored). What the *configuration* says about a
+device — its points, their labels, their parameter sets — is on that device's manifest (§8.2),
+which is what follows the configuration.
 
 ## 8. Status and health
 
@@ -834,12 +826,66 @@ labels live here rather than in the sample envelope.
   { "status": "connected", "type": "acme-meter-v2", "since": "2026-05-30T09:59:00.000Z" }
   ```
 
-  `type` is the device's declared type (§3.1), present when it has one: the message is retained
-  and published before any sample, which is what lets a consumer name the device's parameter
-  sets (§5.2) and its thin-edge entity type from the start — including for a device whose
-  parameters are all write-only and therefore never sampled.
+  `type` is the device's declared type (§3.1), present when it has one. It is on the link status
+  as well as on the manifest (§8.2) because the link status is the registration *trigger* and a
+  registration happens once: the two retained messages are replayed in no defined order after a
+  restart, so the trigger and the type travel together. The device descriptor (`info`) is on the
+  manifest only.
 
   with `status` ∈ `{"connected","disconnected","degraded"}` and an optional `reason`.
+
+### 8.2 The device manifest
+
+For each device, the connector MUST publish a retained **manifest** to
+`te/device/<device>/ot/<protocol>/manifest` — the one place a consumer learns what the device
+*is* without the configuration file, so that a sample (§5) carries only what changes per read.
+JSON Schema: [schemas/manifest.schema.json](schemas/manifest.schema.json).
+
+```json
+{
+  "contract": "0.2",
+  "protocol": "modbus",
+  "service": "tedge-dot-modbus",
+  "type": "acme-meter-v2",
+  "info": { "transport": "tcp", "host": "192.168.0.10", "port": 502, "unit_id": 1 },
+  "points": {
+    "boiler_temp": {
+      "datatype": "float32", "access": "read", "unit": "°C",
+      "name": "Boiler temp", "description": "Outlet temperature after the heat exchanger",
+      "meta": { "on_change": true, "deadband": 0.5 }
+    },
+    "setpoint": {
+      "datatype": "uint16", "access": "read_write",
+      "meta": { "parameter": { "group": ["control", "commissioning"] } },
+      "parameter": { "sets": ["acme_meter_v2_control_parameters", "acme_meter_v2_commissioning_parameters"] }
+    }
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `contract` | The contract version the connector implements (`"0.2"`). |
+| `protocol`, `service` | The connector that serves the device: its protocol module id and its service name (§6.3). |
+| `type` | The device's declared type (§3.1), when it has one. |
+| `info` | The connector's device descriptor (transport and address details), when its `connect` reported one. A flow can forward it into a digital-twin fragment. |
+| `points` | Every configured point, **keyed by id**: `datatype` (when declared), `access` (always), `unit`, `name`, `description` (when declared), the free-form `meta` table verbatim (when declared), and `parameter.sets` — the parameter sets the point belongs to (§5.2), **resolved by the connector**: absent when the point is not a parameter. A consumer never derives a set name. |
+
+Rules:
+
+- The manifest is published when the device is loaded — **before** its link status and before
+  any of its samples, on the same connection — and republished whenever the configuration that
+  describes the device changes (a reload, a management verb, a changed point library), or a
+  `connect` first reports the device's `info`.
+- When a device is removed (`remove-device`) or switched off (`enabled = false`), the connector
+  MUST clear its manifest **and** its link status (an empty retained message on each), so that
+  nothing retained describes a device that is gone.
+- The topic is a channel below the connector's `ot/<protocol>/` prefix, deliberately: a topic
+  of exactly four segments after `te/` is an entity registration topic to thin-edge, and the
+  c8y mapper parses every message it finds there.
+- Consumers MUST tolerate seeing a sample before the device's manifest (retained delivery order
+  across topics is undefined after a restart): the reference flows fall back to their defaults
+  or wait for the next sample.
 
 ### 8.1 Liveness
 

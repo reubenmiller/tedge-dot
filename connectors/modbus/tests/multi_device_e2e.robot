@@ -132,6 +132,10 @@ A Device Is Removed Only By The Service It Is Addressed To
     Publish Message    ${topic}    {"status":"init","device":"plc-11"}    retain=True
     Command Should Be Handled Once    ${topic}    executing    successful
     Configs Defining Device Should Be    plc-11
+    # Nothing retained describes a removed device (§8.2): its manifest and its link status are
+    # cleared by the instance that owned it.
+    Retained Message Should Be Cleared    te/device/plc-11/ot/${PROTOCOL}/manifest
+    Retained Message Should Be Cleared    te/device/plc-11/ot/${PROTOCOL}/status/link
 
 A Device Is Switched Off And On Again With Set-Config
     [Documentation]    `enabled` (§3.3) is an ordinary device field, so `set-config` switches a device
@@ -146,6 +150,9 @@ A Device Is Switched Off And On Again With Set-Config
     ${config}=    DeviceLibrary.Execute Command    cmd=cat ${CONFIG_DIR}/plc-8.toml
     Should Match Regexp    ${config}    enabled\\s*=\\s*false
 
+    # A device switched off is treated like a removed one: its manifest and link status go.
+    Retained Message Should Be Cleared    te/device/plc-8/ot/${PROTOCOL}/manifest
+    Retained Message Should Be Cleared    te/device/plc-8/ot/${PROTOCOL}/status/link
     Clear Messages
     No Messages On Topic    te/device/plc-8/ot/${PROTOCOL}/sample/#    timeout=5
     ${write}=    Set Variable    te/device/plc-8/ot/${PROTOCOL}/cmd/write/e-2

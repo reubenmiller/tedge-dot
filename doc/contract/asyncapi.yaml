@@ -50,6 +50,19 @@ channels:
       Health:
         $ref: '#/components/messages/Health'
 
+  manifest:
+    address: 'te/device/{device}/ot/{protocol}/manifest'
+    description: >
+      Retained per-device manifest (contract §8.2): what the device is and what its points
+      are, with their parameter sets resolved. Published before the link status and before
+      any sample; cleared when the device is removed or switched off.
+    parameters:
+      device: { description: thin-edge device entity id segment }
+      protocol: { description: protocol module id }
+    messages:
+      Manifest:
+        $ref: '#/components/messages/Manifest'
+
   link:
     address: 'te/device/{device}/ot/{protocol}/status/link'
     description: Retained per-device link status.
@@ -111,6 +124,11 @@ operations:
     channel: { $ref: '#/channels/health' }
     summary: Connector reports service health.
 
+  publishManifest:
+    action: send
+    channel: { $ref: '#/channels/manifest' }
+    summary: The connector publishes a device's retained manifest.
+
   publishLink:
     action: send
     channel: { $ref: '#/channels/link' }
@@ -156,6 +174,12 @@ components:
       contentType: application/json
       payload:
         $ref: './schemas/status.schema.json#/$defs/health'
+    Manifest:
+      name: Manifest
+      title: Device manifest
+      contentType: application/json
+      payload:
+        $ref: './schemas/manifest.schema.json'
     Link:
       name: Link
       title: Device link status

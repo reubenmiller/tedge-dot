@@ -162,6 +162,10 @@ impl Ctx<'_> {
         format!("te/device/{}/ot/{}/status/link", device, self.protocol)
     }
 
+    fn manifest_topic(&self, device: &str) -> String {
+        format!("te/device/{}/ot/{}/manifest", device, self.protocol)
+    }
+
     async fn wait_connector_record(
         &self,
         from: usize,
@@ -277,6 +281,7 @@ pub async fn run(manifest: &Manifest, schemas: &Schemas) -> Result<Vec<Layer>, S
     .await?;
 
     // B1 is load-bearing: without a started connector nothing else can run.
+    check_b1_manifest(&ctx, &mut layer, start_mark).await;
     let caps = match check_b1_startup(&ctx, &mut layer, start_mark).await {
         Some(caps) => caps,
         None => {
@@ -368,6 +373,66 @@ async fn check_b1_startup(ctx: &Ctx<'_>, layer: &mut Layer, from: usize) -> Opti
     );
 
     caps
+}
+
+/// B1 (manifest) — every configured device gets a retained manifest (contract §8.2) that names
+/// the contract version and lists each of its points, keyed by id, with the point's `access`.
+async fn check_b1_manifest(ctx: &Ctx<'_>, layer: &mut Layer, from: usize) {
+    let devices: BTreeSet<String> = ctx.points.iter().map(|p| p.device.clone()).collect();
+    for device in devices {
+        let topic = ctx.manifest_topic(&device);
+        let id = format!("B1-manifest-{device}");
+        let what = "retained device manifest lists every configured point";
+        let record = ctx
+            .wait_connector_record(from, STARTUP_TIMEOUT, "device manifest", |r| {
+                r.topic == topic && r.retain
+            })
+            .await;
+        let json = match record.and_then(|r| r.json()) {
+            Ok(json) => json,
+            Err(e) => {
+                layer.fail(&id, what, e);
+                continue;
+            }
+        };
+        let mut errors = Vec::new();
+        if let Err(e) = ctx.schemas.validate(Kind::Manifest, &json) {
+            errors.push(format!("schema: {e}"));
+        }
+        if json.get("contract").and_then(|c| c.as_str()) != Some(tedge_dot_sdk::CONTRACT_VERSION) {
+            errors.push(format!("contract: expected {:?}, got {:?}", tedge_dot_sdk::CONTRACT_VERSION, json.get("contract")));
+        }
+        if json.get("protocol").and_then(|p| p.as_str()) != Some(ctx.protocol.as_str()) {
+            errors.push(format!("protocol: got {:?}", json.get("protocol")));
+        }
+        let points = json.get("points").and_then(|p| p.as_object());
+        match points {
+            None => errors.push("points: missing or not an object".into()),
+            Some(points) => {
+                for point in ctx.points.iter().filter(|p| p.device == device) {
+                    match points.get(&point.id) {
+                        None => errors.push(format!("points.{}: missing", point.id)),
+                        Some(entry) => {
+                            let access = entry.get("access").and_then(|a| a.as_str());
+                            if access != Some(point.access.as_str()) {
+                                errors.push(format!(
+                                    "points.{}.access: expected {:?}, got {:?}",
+                                    point.id,
+                                    point.access.as_str(),
+                                    access
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if errors.is_empty() {
+            layer.pass(&id, what, None);
+        } else {
+            layer.fail(&id, what, errors.join("; "));
+        }
+    }
 }
 
 /// The SDK runtime adds these to every connector's live capability descriptor; they are
@@ -1202,6 +1267,7 @@ fn check_b10_topic_discipline(ctx: &Ctx<'_>, layer: &mut Layer, from: usize) {
     let allowed = [
         format!("te/device/main/service/{}/status/health", ctx.service),
         format!("te/device/main/service/{}/ot/capabilities", ctx.service),
+        format!("te/device/+/ot/{}/manifest", ctx.protocol),
         format!("te/device/+/ot/{}/status/link", ctx.protocol),
         format!("te/device/+/ot/{}/sample/+", ctx.protocol),
         format!("te/device/+/ot/{}/cmd/+/+", ctx.protocol),
