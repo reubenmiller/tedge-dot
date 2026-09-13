@@ -228,7 +228,9 @@ that they are objects and that each connector documents and schema-validates the
   off, even one whose library is not installed. `enabled` MUST be a boolean when present
   (default `true`), and a disabled device's `name` still counts towards uniqueness. The
   definition stays in the file, so `set-config` (§6.3, target `device:<name>`) can switch it
-  on again.
+  on again. A device switched off while the connector runs — by a reload or a restart — is left
+  like a removed one (`remove-device`): it is no longer polled or answered for, but its retained
+  link status (§8) is not cleared.
 - Duration strings follow the thin-edge convention (`"500ms"`, `"2s"`, `"5m"`).
 - Unknown top-level keys SHOULD be rejected; unknown keys inside protocol-specific objects
   are delegated to the connector's own schema.
@@ -669,7 +671,9 @@ Request (`status: "init"`):
 ```
 
 The `device` object uses the same shape as a `[[device]]` entry in the configuration file (note
-the point list key is `point`, matching the file's `[[device.point]]`).
+the point list key is `point`, matching the file's `[[device.point]]`). It replaces the whole
+entry, so a `define-device` for a device switched off with `enabled = false` (§3.3) switches it
+back on unless the new entry sets `enabled = false` as well.
 
 #### `remove-device` — delete a device
 

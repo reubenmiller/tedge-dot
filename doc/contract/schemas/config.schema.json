@@ -94,7 +94,7 @@
       "description": "Duration string, e.g. '500ms', '2s', '5m'."
     },
     "disabled_device": {
-      "description": "A device switched off with enabled = false (§3.3).",
+      "description": "A device switched off with enabled = false (§3.3). The connector reads nothing but its name, so this schema requires nothing more of it; fields it does carry are still checked for shape.",
       "required": [
         "enabled"
       ],

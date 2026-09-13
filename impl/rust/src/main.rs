@@ -488,11 +488,13 @@ fn pick_log_level(configs: &[PathBuf]) -> String {
 /// (§3.4). The log level and the service name do not depend on a device's points, and a config
 /// whose library reference does not resolve should still contribute them — the real load in
 /// `run_one` is what reports that error, once, with the connector's own span.
+///
+/// Only that section is deserialized, so no device can hide it: a device switched off with
+/// nothing but its name (§3.3) is valid, but would fail a typed parse of the whole file.
 fn connector_section(path: &Path) -> Option<tedge_dot_sdk::config::ConnectorSection> {
     let text = std::fs::read_to_string(path).ok()?;
-    toml::from_str::<ConnectorConfig>(&text)
-        .ok()
-        .map(|c| c.connector)
+    let doc: toml::Value = toml::from_str(&text).ok()?;
+    doc.get("connector")?.clone().try_into().ok()
 }
 
 /// Two configs sharing a `service_name` fight over the same MQTT client id and health topic;
@@ -536,17 +538,34 @@ fn duplicate_devices(configs: &[PathBuf]) -> Vec<((String, String), Vec<String>)
     let mut owners: std::collections::BTreeMap<(String, String), Vec<String>> =
         std::collections::BTreeMap::new();
     for path in configs {
-        let Some(config) = std::fs::read_to_string(path)
+        let Some(doc) = std::fs::read_to_string(path)
             .ok()
-            .and_then(|text| toml::from_str::<ConnectorConfig>(&text).ok())
+            .and_then(|text| toml::from_str::<toml::Value>(&text).ok())
+        else {
+            continue;
+        };
+        let Some(protocol) = doc
+            .get("connector")
+            .and_then(|c| c.get("protocol"))
+            .and_then(toml::Value::as_str)
         else {
             continue;
         };
         let path = path.display().to_string();
-        // Parsed without the loader, so disabled devices are still here: they own nothing.
-        for device in config.devices.iter().filter(|d| d.enabled) {
+        // Read raw rather than as a typed config: a device switched off with nothing but its name
+        // (§3.3) is valid but would fail a typed parse, hiding the file's other devices — and a
+        // disabled device owns nothing, so it cannot be a duplicate.
+        let devices = doc.get("device").and_then(toml::Value::as_array);
+        for device in devices.into_iter().flatten() {
+            // Only a device the loader would keep: `enabled` absent or true.
+            if !device.get("enabled").is_none_or(|v| v.as_bool() == Some(true)) {
+                continue;
+            }
+            let Some(name) = device.get("name").and_then(toml::Value::as_str) else {
+                continue;
+            };
             let paths = owners
-                .entry((config.connector.protocol.clone(), device.name.clone()))
+                .entry((protocol.to_string(), name.to_string()))
                 .or_default();
             if paths.last() != Some(&path) {
                 paths.push(path.clone());
@@ -1102,20 +1121,26 @@ mod tests {
         let a = write(&dir, "a.toml", &config("modbus", "a", &["plc-1", "plc-2"]));
         let b = write(&dir, "b.toml", &config("modbus", "b", &["plc-2"]));
         let c = write(&dir, "c.toml", &config("opcua", "c", &["plc-1"]));
-        // A disabled definition (§3.3) owns nothing, so it duplicates nothing.
+        // A disabled definition (§3.3) owns nothing, so it duplicates nothing — and one carrying
+        // nothing but its name must not hide the enabled devices of its file (plc-2 here).
         let d = write(
             &dir,
             "d.toml",
             "[connector]\nprotocol = \"modbus\"\nservice_name = \"d\"\n\
-             [[device]]\nname = \"plc-1\"\nprotocol_address = {}\nenabled = false\n",
+             [[device]]\nname = \"plc-1\"\nenabled = false\n\
+             [[device]]\nname = \"plc-2\"\nprotocol_address = {}\n",
         );
 
-        let duplicates = duplicate_devices(&[a.clone(), b.clone(), c, d]);
+        let duplicates = duplicate_devices(&[a.clone(), b.clone(), c, d.clone()]);
         assert_eq!(
             duplicates,
             vec![(
                 ("modbus".to_string(), "plc-2".to_string()),
-                vec![a.display().to_string(), b.display().to_string()]
+                vec![
+                    a.display().to_string(),
+                    b.display().to_string(),
+                    d.display().to_string()
+                ]
             )]
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1385,7 +1410,10 @@ protocol_address = { host = "127.0.0.2" }
         let debug = write(
             &dir,
             "debug.toml",
-            "[connector]\nprotocol = \"opcua\"\nlog_level = \"debug\"\n",
+            // A device switched off with nothing but its name (§3.3) is valid, and must not hide
+            // the connector settings of its file.
+            "[connector]\nprotocol = \"opcua\"\nlog_level = \"debug\"\n\
+             [[device]]\nname = \"off\"\nenabled = false\n",
         );
 
         assert_eq!(pick_log_level(std::slice::from_ref(&info)), "info");
