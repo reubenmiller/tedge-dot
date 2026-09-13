@@ -20,13 +20,13 @@ modules that run inside a mapper and are hot-reloaded without restarts.
 
 | Flow | Direction | Reads | Emits |
 | --- | --- | --- | --- |
-| [ot-measurement](ot-measurement/) | OT → thin-edge | `ot/<protocol>/sample/<point>` | `m/<group>` measurement |
+| [ot-measurement](ot-measurement/) | OT → thin-edge | `ot/<protocol>/sample/<point>`, `ot/<protocol>/manifest` (per-signal `meta`) | `m/<group>` measurement |
 | [ot-alarm](ot-alarm/) | thin-edge → thin-edge | `m/<group>` | `a/<type>` alarm (hysteresis) |
 | [ot-event](ot-event/) | thin-edge → thin-edge | `m/<group>` | `e/<type>` event (on change) |
-| [ot-registration](ot-registration/) | OT → thin-edge | `ot/<protocol>/status/link` | `te/device/<device>//` child registration (+ optional `twin/<fragment>`) |
+| [ot-registration](ot-registration/) | OT → thin-edge | `ot/<protocol>/status/link` (trigger + type), `ot/<protocol>/manifest` (descriptor) | `te/device/<device>//` child registration (+ optional `twin/<fragment>`) |
 | [ot-command-forward](ot-command-forward/) | thin-edge → OT | `cmd/ot_<verb>/<id>` (incl. `parameter_update`) | `ot/<protocol>/cmd/<verb>/<id>`, or `service/<service>/ot/cmd/<verb>/<id>` for management verbs |
 | [ot-command-result](ot-command-result/) | OT → thin-edge | `ot/<protocol>/cmd/<verb>/<id>`, `service/<service>/ot/cmd/<verb>/<id>` | `cmd/ot_<verb>/<id>` (or the `origin.command`) |
-| [ot-parameter-state](ot-parameter-state/) | OT → thin-edge | `sample/<point>`, `cmd/write*/<id>`, `status/link` | `twin/<set>` |
+| [ot-parameter-state](ot-parameter-state/) | OT → thin-edge | `manifest` (which points are parameters, and their sets), `sample/<point>`, `cmd/write*/<id>` | `twin/<set>` |
 
 The two `ot-command-*` flows form a bidirectional, **verb-neutral** bridge: *forward* turns a
 thin-edge command into a connector command request; *result* mirrors the connector's `executing` →
@@ -103,14 +103,22 @@ untouched. For per-signal shaping beyond this convention, run one filtered insta
 Linear scaling
 (`multiplier`/`divisor`/`decimal_shift`/`offset`) is a per-point property declared on the
 connector point (applied by the SDK), so the sample already carries the scaled value.
-`ot-registration` can additionally publish the connector's device descriptor as a digital-twin
-fragment (`twin_fragment`, e.g. `c8y_ModbusDevice`).
+`ot-registration` can additionally publish the connector's device descriptor (the manifest's
+`info`) as a digital-twin fragment (`twin_fragment`, e.g. `c8y_ModbusDevice`).
+
+Every static fact about a device — its type, and each point's datatype, access, unit, labels,
+free-form `meta` and resolved parameter sets — is published once, retained, on the **device
+manifest** `te/device/<device>/ot/<protocol>/manifest` (contract §8.2). The flows keep the last
+manifest of each device in the shared mapper state (`ot-manifest:<device>`) and look points up
+there, so a sample carries only what changes per read. Offline, `tedge flows test` is fed the
+manifest line first, as the broker replays the retained message on a restart.
 
 ## Pipeline
 
 ```text
  OT device                    tedge-dot (driver)            flows (this dir)            cloud mapper
  ───────────────   reads ──▶  ot/<protocol>/sample/<point> ──▶  ot-measurement ──▶  m/<group>  ──▶  measurement
+                             ot/<protocol>/manifest         ──▶  (kept by the flows: per-signal meta, parameter sets, descriptor)
                              ot/<protocol>/status/link      ──▶  ot-registration ─▶ te/device/x// ─▶ child device
                                                                  m/<group> ──▶ ot-alarm ──▶ a/<type> ──▶ alarm
 

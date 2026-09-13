@@ -27,10 +27,10 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id 
 default_mode     = "typed"
 
   # uint16, read-only (B7 denies writes to it), unit echo. Carries BOTH labels, so
-  # the retained capability descriptor's `point_labels` (§7) is non-empty and gets
-  # schema-validated here like every other live message class. The three points
-  # below cover the three label shapes -- both, name only, description only --
-  # because each is a separate branch in the descriptor builders.
+  # the retained device manifest (§8.2) carries them and gets schema-validated here
+  # like every other live message class. The three points below cover the three
+  # label shapes -- both, name only, description only -- because each is a separate
+  # branch in the manifest builder.
   [[device.point]]
   id          = "temp_u16"
   datatype    = "uint16"

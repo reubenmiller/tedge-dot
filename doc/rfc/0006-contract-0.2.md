@@ -9,6 +9,9 @@ engineering units — a pre-existing defect that `range` would have compounded),
 §1, §6, §7 and §9 that turned out to be wrong, adds §5.1 (who applies `publish`), and closes with
 §11.1, the complete list of what 0.2 knowingly gives up.
 
+Landing on `develop`, in the RFC's order: §9 (C freeze) · **§3 (device manifest)** · §2 · §4 ·
+§5 · §1 · §7 · §8. Bold marks the section this revision of the document was committed with.
+
 | Field | Value |
 | --- | --- |
 | RFC | 0006 |

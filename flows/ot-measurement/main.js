@@ -12,15 +12,18 @@
 // rate limiting (min_interval) and optional batching of a device's series into one
 // measurement (combine).
 //
-// Per-signal overrides: the connector echoes the point's free-form `meta` table in every
-// sample (sample.meta). When present, meta.on_change / meta.deadband / meta.min_interval /
-// meta.debounce override the flow-wide params for that signal only — so one flow instance can
-// serve a whole plant while individual signals opt into their own behaviour, declared next to
-// the signal's address in the connector config. Naming works the same way:
-// meta.measurement.group / meta.measurement.series name the signal's measurement per point
-// (e.g. written by the Cloud Fieldbus import from a device type's measurementMapping), and
-// meta.measurement = false keeps the signal out of the measurements altogether (e.g. a parameter
-// whose value should reach the cloud only through its twin fragment).
+// Per-signal overrides: the connector publishes each point's free-form `meta` table once, on
+// the device's retained manifest (te/device/<device>/ot/<protocol>/manifest, contract §8.2),
+// which this flow keeps in context.mapper under "ot-manifest:<device>". When present,
+// meta.on_change / meta.deadband / meta.min_interval / meta.debounce override the flow-wide
+// params for that signal only — so one flow instance can serve a whole plant while individual
+// signals opt into their own behaviour, declared next to the signal's address in the connector
+// config. Naming works the same way: meta.measurement.group / meta.measurement.series name the
+// signal's measurement per point (e.g. written by the Cloud Fieldbus import from a device type's
+// measurementMapping), and meta.measurement = false keeps the signal out of the measurements
+// altogether (e.g. a parameter whose value should reach the cloud only through its twin
+// fragment). A sample that still echoes `meta` itself (contract 0.1) is honoured when the
+// manifest has not been seen yet.
 
 const decoder = new TextDecoder();
 
@@ -68,20 +71,44 @@ function deepMerge(target, src) {
   return target;
 }
 
+// Remember (or forget, on a clearing message) a device's manifest. Shared with the other OT
+// flows through context.mapper: the key and content are the same wherever it is stored from.
+function rememberManifest(context, device, payloadBytes) {
+  let manifest = false;
+  try {
+    const parsed = JSON.parse(decoder.decode(payloadBytes));
+    if (parsed && typeof parsed === "object" && parsed.points && typeof parsed.points === "object") {
+      manifest = parsed;
+    }
+  } catch (_e) {
+    // an empty retained message clears the manifest of a removed device
+  }
+  context.mapper.set(`ot-manifest:${device}`, manifest);
+}
+
+// The point's `meta` table: from the device manifest when it has been seen, else what the
+// sample itself carries (contract 0.1 envelopes echo it), else nothing.
+function metaOf(context, device, sample) {
+  const manifest = context.mapper.get(`ot-manifest:${device}`);
+  const point = manifest?.points?.[sample.point];
+  if (point && typeof point === "object") return point.meta && typeof point.meta === "object" ? point.meta : {};
+  return sample.meta && typeof sample.meta === "object" ? sample.meta : {};
+}
+
 // Shape the measurement body (without the time field) from a scaled value:
 //   { <group>: { <series>: value } }
 // Series values are BARE numbers on purpose: the tedge c8y mapper's measurement converter
 // silently drops any object-shaped series value ({ value } and { value, unit } alike), so
-// embedding sample.unit here would strand the measurement on the device. The unit remains
-// available to consumers in the sample envelope (sample.unit).
-function shapeBody(cfg, sample, scaled) {
-  const { group, series } = resolveNaming(cfg, sample);
+// embedding the unit here would strand the measurement on the device. The unit remains
+// available to consumers on the device manifest.
+function shapeBody(cfg, sample, meta, scaled) {
+  const { group, series } = resolveNaming(cfg, sample, meta);
   return { [group]: { [series]: scaled } };
 }
 
 // Resolve the measurement group + series for a sample. Precedence:
-//   1. per-signal sample.meta.measurement.group / .series (echoed from the connector point's
-//      `meta` table, e.g. written by the Cloud Fieldbus import from a device type's
+//   1. per-signal meta.measurement.group / .series (the connector point's `meta` table, from
+//      the device manifest — e.g. written by the Cloud Fieldbus import from a device type's
 //      measurementMapping.type/series) — meta wins over the flow params, consistent with the
 //      other per-signal meta overrides,
 //   2. explicit cfg.group / cfg.series (flow-wide overrides),
@@ -90,12 +117,12 @@ function shapeBody(cfg, sample, scaled) {
 //      group "Environment", series "Temperature"). This lets ONE flow instance remap many
 //      signals just by how their point ids are named on the connector.
 //   4. defaults: group = sample protocol, series = point id.
-function resolveNaming(cfg, sample) {
+function resolveNaming(cfg, sample, meta) {
   const mm =
-    (sample.meta &&
-      typeof sample.meta.measurement === "object" &&
-      !Array.isArray(sample.meta.measurement) &&
-      sample.meta.measurement) ||
+    (meta &&
+      typeof meta.measurement === "object" &&
+      !Array.isArray(meta.measurement) &&
+      meta.measurement) ||
     {};
   let group = mm.group || cfg.group || "";
   let series = mm.series || cfg.series || "";
@@ -121,8 +148,17 @@ function measurementDisabled(meta) {
 }
 
 export function onMessage(message, context) {
+  // Topic shapes: te/device/<device>/ot/<protocol>/sample/<point>
+  //               te/device/<device>/ot/<protocol>/manifest
+  const parts = message.topic.split("/");
+  const device = parts[2] || "main";
+  if (parts[5] === "manifest") {
+    rememberManifest(context, device, message.payload);
+    return [];
+  }
   const sample = JSON.parse(decoder.decode(message.payload));
   const cfg = context.config || {};
+  const meta = metaOf(context, device, sample);
 
   // Optionally restrict this flow instance to a single point id.
   const point = cfg.point || "";
@@ -133,7 +169,7 @@ export function onMessage(message, context) {
   // than also being sent to the cloud as a time series. Checked before any change-detection or
   // combine state is touched. The connector still publishes the sample, so ot-parameter-state
   // (and every other flow) sees it as usual.
-  if (measurementDisabled(sample.meta)) return [];
+  if (measurementDisabled(meta)) return [];
 
   // Only forward good-quality readings.
   if (sample.quality !== "good") return [];
@@ -145,14 +181,14 @@ export function onMessage(message, context) {
   if (sample.value_repr === "boolean" || typeof value === "boolean") {
     if (String(cfg.include_boolean ?? "true") !== "true") return [];
     value = value ? 1 : 0;
-  } else if (sample.value_repr !== "number" || typeof value !== "number") {
+  } else if (typeof value !== "number" || (sample.value_repr !== undefined && sample.value_repr !== "number")) {
+    // `value_repr` is a 0.1 field: a 0.2 sample says what it is by the JSON type alone.
     return [];
   }
   const scaled = value;
 
-  // Per-signal settings from the sample's meta (echoed from the connector point config),
-  // falling back to the flow-wide params.
-  const meta = sample.meta || {};
+  // Per-signal settings from the point's meta (the device manifest), falling back to the
+  // flow-wide params.
   const ts = Date.parse(sample.ts);
   const now = isFinite(ts) ? ts : Date.now();
   const debounceMs = durationMs(meta.debounce !== undefined ? meta.debounce : cfg.debounce);
@@ -194,12 +230,9 @@ export function onMessage(message, context) {
   context.script.set(`last:${sample.point}`, scaled);
   context.script.set(`lastts:${sample.point}`, now);
 
-  // Derive the device from the source topic: te/device/<device>/ot/<protocol>/sample/<point>
-  const parts = message.topic.split("/");
-  const device = parts[2] || "main";
-  const { group } = resolveNaming(cfg, sample);
+  const { group } = resolveNaming(cfg, sample, meta);
   const targetTopic = cfg.target_topic || `te/device/${device}///m/${group}`;
-  const body = shapeBody(cfg, sample, scaled);
+  const body = shapeBody(cfg, sample, meta, scaled);
 
   // Combine mode: buffer each device's series and flush one merged measurement on interval.
   if (String(cfg.combine ?? "false") === "true") {

@@ -120,11 +120,11 @@ pub struct PointConfig {
     pub unit: Option<String>,
     /// Short human-readable label for this signal, for where a name is displayed instead of the
     /// `id` (which is a topic segment and a fragment key, so it stays a plain identifier).
-    /// Feeds a parameter's DTM title and the `point_labels` of the capability descriptor (§7).
+    /// Feeds a parameter's DTM title and the device manifest (§8.2).
     #[serde(default)]
     pub name: Option<String>,
     /// Longer human-readable explanation of what this signal is. Feeds a parameter's DTM
-    /// description and the `point_labels` of the capability descriptor (§7). Neither this nor
+    /// description and the device manifest (§8.2). Neither this nor
     /// `name` is echoed per sample: they are static, so they are published once, retained.
     #[serde(default)]
     pub description: Option<String>,

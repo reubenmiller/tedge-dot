@@ -4,21 +4,19 @@
 # current value of every parameter (writable point) of the device, so a cloud UI such as
 # Cumulocity's device "Parameters" tab shows the live state.
 input.mqtt.topics = [
-  # First, because it is retained and carries the device type: on a (re)start the type is then
-  # usually known before a replayed sample or write result is attributed to a set. Brokers do
-  # not guarantee delivery order across topic filters, so this is a nicety, not the guard — the
-  # guard is that samples carry the type themselves and a requested write carries `origin.set`.
-  # It is also the only source of the type for a device whose parameters are all write-only,
-  # since those points never produce a sample.
-  "te/+/+/ot/+/status/link",
+  # The retained device manifest (contract §8.2) says which points are parameters and which
+  # sets they belong to, resolved by the connector. Brokers do not guarantee delivery order
+  # across topic filters after a restart, so a sample or write result seen before its device's
+  # manifest is simply left for the next one.
+  "te/+/+/ot/+/manifest",
   "te/+/+/ot/+/sample/+",
   "te/+/+/ot/+/cmd/write/+",
   "te/+/+/ot/+/cmd/write-batch/+",
 ]
 
 [config]
-# One parameter set for every point that does not name an absolute one, instead of the derived
-# "<device type, else protocol>_<group>_parameters". Empty -> derive.
+# One parameter set for every parameter, instead of the sets the connector resolved on the
+# manifest ("<device type, else protocol>_<group>_parameters"). Empty -> the manifest's.
 default_set = "${params.default_set}"
 
 [[steps]]

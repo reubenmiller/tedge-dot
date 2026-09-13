@@ -10,6 +10,6 @@ device_type = ""
 command_capabilities = "ot_write,ot_write_coil,parameter_update"
 
 # Optional digital-twin fragment name. When set, the connector's device descriptor (transport and
-# address details from the link status `info`) is published as a retained twin fragment, e.g.
+# address details, the device manifest's `info`) is published as a retained twin fragment, e.g.
 # "c8y_ModbusDevice" makes it appear on the Cumulocity child device. Empty -> no twin published.
 twin_fragment = ""

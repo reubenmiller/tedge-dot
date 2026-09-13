@@ -27,6 +27,15 @@ impl Access {
     pub fn can_write(self) -> bool {
         matches!(self, Access::Write | Access::ReadWrite)
     }
+
+    /// The contract spelling (`read`, `write`, `read_write`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Access::Read => "read",
+            Access::Write => "write",
+            Access::ReadWrite => "read_write",
+        }
+    }
 }
 
 /// A resolved reference to a point the runtime asks the connector to read. The protocol-specific

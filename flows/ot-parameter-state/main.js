@@ -1,160 +1,107 @@
 // ot-parameter-state: keep the device twin's parameter sets in sync with the connector.
 //
 // Direction: OT protocol format -> thin-edge.io data model.
-//   in:  te/device/<device>/ot/<protocol>/sample/<point>         (reads of parameter points)
-//        te/device/<device>/ot/<protocol>/cmd/write/<id>         (single write results)
-//        te/device/<device>/ot/<protocol>/cmd/write-batch/<id>   (batch write results)
-//        te/device/<device>/ot/<protocol>/status/link            (retained: the device type)
-//   out: te/device/<device>///twin/<set>                         (retained: { <point>: value })
+//   in:  te/device/<device>/ot/<protocol>/manifest                 (retained: what the points are)
+//        te/device/<device>/ot/<protocol>/sample/<point>           (reads of parameter points)
+//        te/device/<device>/ot/<protocol>/cmd/write/<id>           (single write results)
+//        te/device/<device>/ot/<protocol>/cmd/write-batch/<id>     (batch write results)
+//   out: te/device/<device>///twin/<set>                           (retained: { <point>: value })
 //
-// A *parameter* is a point whose `access` (echoed in every sample) permits writes, or that opts
-// in via meta.parameter (meta.parameter = false opts a writable point out). Parameters are
-// grouped into *sets*; each set is one twin fragment keyed by point id — the same sets
-// `tedge-dot describe` declares in the cloud, which is why the naming rule below has to match
-// the SDK's (impl/rust/crates/sdk/src/descriptor.rs, impl/c/sdk/src/descriptor.c):
-//
-//   <device type, else the protocol>_<meta.parameter.group, default "control">_parameters
-//
-// `group` (and `set`) may be a list, so one point can belong to several sets — operators group
-// signals by what they are for — and its value is published to each of their fragments.
-//
-// The device type is echoed in every sample and on the link status (contract §3.1/§5), so the
-// flow never needs the connector's configuration file. meta.parameter.set bypasses the rule and
-// is used verbatim.
+// A *parameter* is a point the device manifest (contract §8.2) lists with a `parameter.sets`
+// entry: the connector derives the sets once — a point whose `access` permits writes, or that
+// opts in via meta.parameter, grouped by the RFC 0005 naming rule — and publishes the result,
+// so this flow never re-derives a name and never needs the connector's configuration file.
+// Each set is one twin fragment keyed by point id: the same sets `tedge-dot describe` declares
+// in the cloud.
 //
 // Where values come from:
 //   * readable parameters: every good sample (so the twin follows the device, including
 //     changes made locally on the PLC/HMI);
 //   * write-only parameters (access = "write"): the last acknowledged write — the device cannot
 //     be read back, so this is the *commanded* state, not a measured one. It is unknown (absent
-//     from the twin) until the first successful write after the mapper started, and it lands in
-//     the default set (no sample ever tells us its meta);
+//     from the twin) until the first successful write after the mapper started;
 //   * read/write parameters are also updated optimistically from a successful write, then
 //     confirmed/corrected by the next sample.
 //
+// A sample or a write result for a device whose manifest has not been seen yet is left alone:
+// the manifest is retained and replayed on a restart, and the next sample after it arrives
+// places the value. Nothing is buffered.
+//
 // Shared state (context.mapper):
+//   "ot-manifest:<device>"                -> the device manifest (also kept by ot-measurement)
 //   "ot-protocol:<device>"                -> protocol segment seen for the device
 //                                            (read by ot-command-forward)
-//   "ot-device-type:<device>"             -> declared device type, when the connector reports one
 //   "ot-parameter-values:<device>:<set>"  -> { <point>: value }
-//   "ot-parameter-set:<device>:<point>"   -> [set names], or false for opted-out points
-//                                            (from the point's samples, else from the
-//                                            parameter_update request that wrote it)
 
 const decoder = new TextDecoder();
 
-function canWrite(access) {
-  const a = String(access || "read").toLowerCase();
-  return a === "write" || a === "read_write" || a === "readwrite";
+// A set name becomes BOTH a twin fragment key and a segment of the topic it is published on,
+// so it must be a plain identifier — the same rule `tedge-dot describe` refuses to render
+// without. The manifest applies it before publishing; checked again here because `default_set`
+// is free text from a params file, and `#` or `+` would make an illegal PUBLISH topic.
+function isValidSet(name) {
+  return typeof name === "string" && /^[A-Za-z0-9_]+$/.test(name);
 }
 
-const DEFAULT_GROUP = "control";
-
-// Every RUN of characters outside [A-Za-z0-9] becomes a single "_", so a device type can be
-// written the way it reads ("acme-meter-v2") and still be a valid fragment key. A run rather
-// than a character because the C SDK folds bytes and this folds characters: collapsing runs is
-// what makes them agree on a name with a non-ASCII character in it.
-function sanitize(s) {
-  return String(s).replace(/[^A-Za-z0-9]+/g, "_");
-}
-
-// How this device's sets are named: by its declared type, else by the protocol. `forced` is the
-// flow's default_set (and `tedge-dot describe --set`): one name for every point that does not
-// give an absolute one.
 // Trimmed with the SDKs' definition of whitespace (C's isspace, which `tedge-dot describe`
-// applies to --set) rather than JS's Unicode-aware trim: the flow and the CLI must agree on
-// what a blank `default_set` is, and on the exact spelling of a padded one.
+// applies to --set) rather than JS's Unicode-aware trim, so the flow and the CLI agree on what
+// a blank `default_set` is, and on the exact spelling of a padded one.
 function trimC(s) {
   return String(s).replace(/^[ \t\n\v\f\r]+|[ \t\n\v\f\r]+$/g, "");
 }
 
-function naming(context, device, protocol) {
-  return {
-    forced: trimC(context.config?.default_set || ""),
-    qualifier: context.mapper.get(`ot-device-type:${device}`) || protocol,
-  };
-}
-
-// The set for a point in `group` (undefined = the default group).
-// Sanitized as a whole, so a qualifier that already ends in a separator does not produce a
-// doubled "_" — the SDKs assemble the name the same way.
-function setFor(names, group) {
-  if (names.forced) return names.forced;
-  return sanitize(`${names.qualifier}_${group || DEFAULT_GROUP}_parameters`);
-}
-
-// A set name becomes BOTH a twin fragment key and a segment of the topic it is published on,
-// so it must be a plain identifier — the same rule `tedge-dot describe` refuses to render
-// without (descriptor.rs::is_valid_key). Enforced here because an absolute set name can come
-// from outside the device: `origin.set` is derived from the Cumulocity operation fragment the
-// cloud sent. Unchecked, `#` or `+` would make an illegal PUBLISH topic and a name with `/`
-// would publish outside te/<device>///twin/.
-function isValidSet(name) {
-  return /^[A-Za-z0-9_]+$/.test(name);
-}
-
-// The names a `set`/`group` option holds: one string, or an array of them. Empty, non-string
-// and unusable entries are ignored, so a mistyped entry degrades to the default group rather
-// than inventing a set name. Mirrors descriptor.rs::names_of / descriptor.c::names_of.
-function namesOf(value, validate) {
-  const out = [];
-  for (const name of Array.isArray(value) ? value : [value]) {
-    if (typeof name !== "string" || !name || out.includes(name)) continue;
-    if (validate && !isValidSet(name)) continue;
-    out.push(name);
+// Remember (or forget, on a clearing message) a device's manifest.
+function rememberManifest(context, device, payloadBytes) {
+  let manifest = false;
+  try {
+    const parsed = JSON.parse(decoder.decode(payloadBytes));
+    if (parsed && typeof parsed === "object" && parsed.points && typeof parsed.points === "object") {
+      manifest = parsed;
+    }
+  } catch (_e) {
+    // an empty retained message clears the manifest of a removed device
   }
-  return out;
+  context.mapper.set(`ot-manifest:${device}`, manifest);
 }
 
-// EVERY set a point belongs to: `set` and `group` each accept a string or a list, so one point
-// can appear on several operator screens and its value reaches each of their fragments.
-// `set` is absolute and wins over `group`. Mirrors SetNaming::sets_of in both SDKs.
-function setsOf(options, names) {
-  // An absolute name is used verbatim, so it is the one that has to be checked; a group name
-  // is folded into a derived name and cannot produce anything but [A-Za-z0-9_].
-  const absolute = namesOf(options.set, true);
-  if (absolute.length) return absolute;
-  if (names.forced) return [names.forced];
-  const groups = namesOf(options.group);
-  if (!groups.length) return [setFor(names)];
-  // Deduped on the resulting names: two group names can fold to the same set name.
-  const sets = [];
-  for (const group of groups) {
-    const set = setFor(names, group);
-    if (!sets.includes(set)) sets.push(set);
+// The sets a point belongs to: what the manifest resolved, or — with `default_set` — that one
+// name for every parameter. `null` when the manifest has not been seen; `false` when the point
+// is not a parameter (or does not exist).
+function setsOf(context, device, point) {
+  const manifest = context.mapper.get(`ot-manifest:${device}`);
+  if (!manifest) return null;
+  const entry = manifest.points?.[point];
+  const sets = entry?.parameter?.sets;
+  if (!Array.isArray(sets) || sets.length === 0) return false;
+  const forced = trimC(context.config?.default_set || "");
+  if (forced) return isValidSet(forced) ? [forced] : false;
+  const usable = sets.filter(isValidSet);
+  return usable.length ? usable : false;
+}
+
+// The points a write/write-batch result names: the `results` of a terminal transition, or the
+// single `point` of a `write`.
+function successfulWrites(verb, payload) {
+  const updates = {};
+  if (verb === "write" && typeof payload.point === "string" && payload.value !== undefined) {
+    updates[payload.point] = payload.value;
+  } else if (verb === "write-batch") {
+    for (const r of payload.results ?? []) {
+      if (r?.status === "successful" && typeof r.point === "string" && r.value !== undefined) {
+        updates[r.point] = r.value;
+      }
+    }
   }
-  return sets;
-}
-
-// The sets a sampled point belongs to (false when it is not a parameter).
-function setsFromSample(sample, names) {
-  const mp = sample.meta?.parameter;
-  if (mp === false) return false;
-  // A bare string names the set, absolutely.
-  if (typeof mp === "string" && mp) return isValidSet(mp) ? [mp] : [setFor(names)];
-  if (mp && typeof mp === "object" && !Array.isArray(mp)) return setsOf(mp, names);
-  if (mp === undefined || mp === null) return canWrite(sample.access) ? [setFor(names)] : false;
-  return [setFor(names)]; // `true`, or any other scalar
-}
-
-// The points a write/write-batch message names — the `writes` of a request, the `results` of a
-// terminal transition, or the single `point` of a `write` in any of its states.
-function writtenPoints(verb, payload) {
-  if (verb === "write") return typeof payload.point === "string" ? [payload.point] : [];
-  if (verb === "write-batch") {
-    const listed = payload.writes ?? payload.results ?? [];
-    return listed.map((w) => w?.point).filter((p) => typeof p === "string" && p);
-  }
-  return [];
+  return updates;
 }
 
 // Apply {point: value} updates for a device; returns the twin messages of the changed sets.
 // A point in several sets updates each of them, so the groups never disagree about its value.
-function applyValues(context, device, updates, resolveSets) {
+function applyValues(context, device, updates) {
   const changed = new Set();
   for (const [point, value] of Object.entries(updates)) {
     if (value === undefined) continue;
-    const sets = resolveSets(point);
+    const sets = setsOf(context, device, point);
     if (!sets) continue;
     for (const set of sets) {
       const key = `ot-parameter-values:${device}:${set}`;
@@ -177,6 +124,13 @@ export function onMessage(message, context) {
   const device = parts[2];
   const protocol = parts[4];
   const kind = parts[5];
+  context.mapper.set(`ot-protocol:${device}`, protocol);
+
+  if (kind === "manifest") {
+    rememberManifest(context, device, message.payload);
+    return [];
+  }
+
   let payload;
   try {
     payload = JSON.parse(decoder.decode(message.payload));
@@ -184,76 +138,15 @@ export function onMessage(message, context) {
     return [];
   }
   if (!payload || typeof payload !== "object") return [];
-  context.mapper.set(`ot-protocol:${device}`, protocol);
-  // The device type qualifies every set name below. It arrives on the retained link status
-  // (before any sample) and on every sample, so a device with only write-only points — which
-  // never samples — still gets its sets named after its type.
-  // Only where the contract puts it (§5, §8): a command payload that ever grew a top-level
-  // `type` must not be able to redefine the device's type.
-  if ((kind === "sample" || kind === "status") && typeof payload.type === "string" && payload.type) {
-    context.mapper.set(`ot-device-type:${device}`, payload.type);
-  } else if (kind === "status") {
-    // The link status describes the whole device and is republished on every config reload, so
-    // one without a type means the type is gone (a revert, or a switch to an untyped library)
-    // and the sets go back to the protocol name — which is what `describe` now renders too.
-    // Never inferred from a sample: a sample legitimately omits the type for a point the
-    // runtime has no configuration entry for.
-    context.mapper.set(`ot-device-type:${device}`, "");
-  }
-  if (kind === "status") return [];
-  const names = naming(context, device, protocol);
 
   if (kind === "sample") {
     const point = payload.point || parts[6];
-    // Remember the point's sets (or opt-out) so write results can be attributed later.
-    const sets = setsFromSample(payload, names);
-    context.mapper.set(`ot-parameter-set:${device}:${point}`, sets);
-    if (!sets || payload.quality !== "good" || payload.value === undefined) return [];
-    return applyValues(context, device, { [point]: payload.value }, () => sets);
-  }
-
-  // A parameter_update names the set it edited (origin.set), and for a write-only point —
-  // which never samples — that is the ONLY thing that can say which set its value belongs in.
-  // The connector echoes `origin` into every transition it publishes (§6.4), so this survives
-  // the request being overwritten on the retained command topic, and therefore survives a
-  // mapper restart, which replays the terminal state alone.
-  // Recorded, never overriding what a sample already established.
-  if (kind === "cmd") {
-    const set = payload.origin?.set;
-    if (typeof set === "string" && isValidSet(set)) {
-      for (const point of writtenPoints(parts[6], payload)) {
-        // A missing key reads back as undefined or null depending on the runtime; `false` is a
-        // real value (an opted-out point) and must not be overwritten.
-        const known = context.mapper.get(`ot-parameter-set:${device}:${point}`);
-        if (known === undefined || known === null) {
-          context.mapper.set(`ot-parameter-set:${device}:${point}`, [set]);
-        }
-      }
-    }
-    if (payload.status === "init") return [];
+    if (payload.quality !== "good" || payload.value === undefined) return [];
+    return applyValues(context, device, { [point]: payload.value });
   }
 
   if (kind === "cmd" && payload.status === "successful") {
-    const verb = parts[6];
-    const updates = {};
-    if (verb === "write" && typeof payload.point === "string" && payload.value !== undefined) {
-      updates[payload.point] = payload.value;
-    } else if (verb === "write-batch") {
-      for (const r of payload.results ?? []) {
-        if (r?.status === "successful" && typeof r.point === "string" && r.value !== undefined) {
-          updates[r.point] = r.value;
-        }
-      }
-    }
-    // A point that was written is writable by definition: the sets learned from its samples or
-    // from the request that wrote it, else the default one.
-    const resolveSets = (point) => {
-      const known = context.mapper.get(`ot-parameter-set:${device}:${point}`);
-      if (known === undefined || known === null) return [setFor(names)];
-      // Tolerate the pre-list shape (a bare set name) in case state outlives a flow upgrade.
-      return typeof known === "string" ? [known] : known;
-    };
-    return applyValues(context, device, updates, resolveSets);
+    return applyValues(context, device, successfulWrites(parts[6], payload));
   }
   return [];
 }

@@ -1,8 +1,5 @@
-# One parameter set (twin fragment name / Cumulocity DTM identifier) for every point that does
-# not name an absolute one via meta.parameter.set — the escape hatch for a tenant identifier
-# that predates the naming rule, and it applies to every device this mapper sees.
-#
-# Empty (the default) derives the name instead, per device:
-#   "<device type, else the protocol>_<meta.parameter.group, default control>_parameters"
-# e.g. acme_meter_v2_control_parameters. Must match `tedge-dot describe [--set <name>]`.
+# One parameter set name for EVERY parameter of every device, instead of the sets the connector
+# resolved on the device manifest (contract §8.2: "<device type, else protocol>_<group>_parameters",
+# or an absolute meta.parameter.set). A plain identifier ([A-Za-z0-9_]); it must match the
+# identifier registered in the cloud. Empty -> the manifest's sets.
 default_set = ""

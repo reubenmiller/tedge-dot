@@ -21,6 +21,7 @@ ${SERVICE}              tedge-dot
 ${SAMPLE_PREFIX}        te/device/${DEVICE}/ot/${PROTOCOL}/sample
 ${CMD_PREFIX}           te/device/${DEVICE}/ot/${PROTOCOL}/cmd/write
 ${LINK_TOPIC}           te/device/${DEVICE}/ot/${PROTOCOL}/status/link
+${MANIFEST_TOPIC}       te/device/${DEVICE}/ot/${PROTOCOL}/manifest
 ${CAPS_TOPIC}           te/device/main/service/${SERVICE}/ot/capabilities
 ${HEALTH_TOPIC}         te/device/main/service/${SERVICE}/status/health
 ${BATCH_PREFIX}         te/device/${DEVICE}/ot/${PROTOCOL}/cmd/write-batch
@@ -64,21 +65,49 @@ A Disabled Device Is Left Out Of The Connector
     Should Be Empty    ${answers}    nothing owns a disabled device, so its commands go unanswered
     Publish Message    ${write}    ${EMPTY}    retain=True
 
-Capability Descriptor Carries The Point Labels
-    [Documentation]    A point's `name`/`description` (§3.1) are static, so they are published
-    ...                once in the retained capability descriptor (§7) rather than echoed in
-    ...                every sample. Only labelled points appear — no entry means the id is the
-    ...                label — and here they come from the point library, which is where a
+Device Manifest Describes The Device And Its Points
+    [Documentation]    Every static fact about a device is on its retained manifest (§8.2): the
+    ...                contract version, the connector serving it, its type, the descriptor its
+    ...                connect reported, and every point keyed by id with its datatype, access,
+    ...                unit, labels, free-form meta and the parameter sets the connector
+    ...                resolved. Labels come from the point library here, which is where a
     ...                shared list documents itself once for every instance that references it.
+    # The first manifest goes out before connect; the descriptor (`info`) follows on the
+    # republish the connect report triggers, so wait for that one.
+    ${payload}=    Wait For Message Containing    ${MANIFEST_TOPIC}    "info"    timeout=${READY_TIMEOUT}
+    ${contract}=    Get Json Field    ${payload}    contract
+    Should Be Equal    ${contract}    0.2
+    ${service}=    Get Json Field    ${payload}    service
+    Should Be Equal    ${service}    ${SERVICE}
+    ${type}=    Get Json Field    ${payload}    type
+    Should Be Equal    ${type}    modbus-plc-sim
+    ${transport}=    Get Json Field    ${payload}    info.transport
+    Should Be Equal    ${transport}    tcp
+    ${points}=    Get Json Field    ${payload}    points
+    Should Be Equal    ${points}[count_u32][name]    Cycle count
+    Should Be Equal    ${points}[count_u32][description]    Completed pump cycles since power-on
+    Should Be Equal    ${points}[count_u32][access]    read
+    Should Be Equal    ${points}[count_u32][datatype]    uint32
+    # temp_u16 declares no labels, so it carries none rather than an empty one.
+    Dictionary Should Not Contain Key    ${points}[temp_u16]    name
+    Should Be Equal    ${points}[temp_u16][access]    read_write
+    # The parameter sets are resolved by the connector (RFC 0005: qualified by the type).
+    Should Be Equal    ${points}[temp_u16][parameter][sets]    ${{ ["modbus_plc_sim_control_parameters"] }}
+    # A read-only point is no parameter, so it carries no `parameter` at all.
+    Dictionary Should Not Contain Key    ${points}[level_f32]    parameter
+    # The inline device override wins over the library ("packaged" -> "m").
+    Should Be Equal    ${points}[level_f32][unit]    m
+    # The free-form meta table is on the manifest verbatim, not in every sample.
+    Should Be Equal    ${points}[twin_only_u16][meta]    ${{ {"measurement": False} }}
+
+Capability Descriptor Describes The Build Only
+    [Documentation]    What the configuration says about a device is on its manifest; the
+    ...                capability descriptor (§7) is a property of the build and carries no
+    ...                per-point labels any more.
     ${payload}=    Wait For Retained    ${CAPS_TOPIC}    timeout=${READY_TIMEOUT}
-    ${labels}=    Get Json Field    ${payload}    point_labels
-    ${by_point}=    Evaluate    {l["point"]: l for l in $labels}
-    Dictionary Should Contain Key    ${by_point}    count_u32
-    Should Be Equal    ${by_point}[count_u32][device]    ${DEVICE}
-    Should Be Equal    ${by_point}[count_u32][name]    Cycle count
-    Should Be Equal    ${by_point}[count_u32][description]    Completed pump cycles since power-on
-    # temp_u16 declares no labels, so it is absent rather than carrying an empty entry.
-    Dictionary Should Not Contain Key    ${by_point}    temp_u16
+    ${caps}=    Evaluate    json.loads($payload)    modules=json
+    Dictionary Should Not Contain Key    ${caps}    point_labels
+    Dictionary Should Contain Key    ${caps}    command_verbs
 
 Service Health Is Up
     [Documentation]    The connector publishes a retained service health status of "up".
@@ -430,14 +459,11 @@ Defines A Device From A Point Library Alone
     # so compare the settings only.
     # (chr(10) rather than a "\n" literal: Robot would turn that into a real newline inside
     # the Python expression.)
-    # The capability descriptor's point_labels come from the configuration, so the retained
-    # message must follow a reload — otherwise it keeps describing the config as it was at
-    # startup, with no labels for the device just defined.
-    ${payload}=    Wait For Message Containing    ${CAPS_TOPIC}    plc2    timeout=${SAMPLE_TIMEOUT}
-    ${labels}=    Get Json Field    ${payload}    point_labels
-    ${for_plc2}=    Evaluate    [l for l in $labels if l["device"] == "plc2"]
-    Should Not Be Empty    ${for_plc2}    the reload must republish the labels of the new device
-    Should Be Equal    ${for_plc2}[0][name]    Cycle count
+    # The device just defined gets a retained manifest of its own (§8.2), describing the
+    # points its library reference resolved to.
+    ${payload}=    Wait For Message Containing    te/device/plc2/ot/${PROTOCOL}/manifest    count_u32    timeout=${SAMPLE_TIMEOUT}
+    ${points}=    Get Json Field    ${payload}    points
+    Should Be Equal    ${points}[count_u32][name]    Cycle count
 
     ${config}=    DeviceLibrary.Execute Command    cmd=cat /etc/connector.toml    strip=${True}
     ${settings}=    Evaluate

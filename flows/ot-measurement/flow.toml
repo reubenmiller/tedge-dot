@@ -1,5 +1,6 @@
 # ot-measurement: connector sample -> thin-edge measurement
-input.mqtt.topics = ["te/+/+/ot/+/sample/+"]
+# The device manifest (contract §8.2) carries each point's `meta`; a sample no longer needs to.
+input.mqtt.topics = ["te/+/+/ot/+/sample/+", "te/+/+/ot/+/manifest"]
 
 [config]
 # Restrict to a single point id. Empty = map every point this flow sees.
