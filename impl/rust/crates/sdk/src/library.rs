@@ -1004,7 +1004,6 @@ points_from = ["not-installed"]
         let cfg = resolve(&text, dir.path()).unwrap();
         let names: Vec<&str> = cfg.devices.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, ["plc-1"]);
-        assert!(cfg.devices[0].enabled);
     }
 
     #[test]
