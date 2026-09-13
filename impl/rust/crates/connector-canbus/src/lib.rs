@@ -331,26 +331,29 @@ mod linux_impl {
                 cache.get(&point.signal.can_id).copied().unwrap_or([0u8; CLASSIC_PAYLOAD_LEN])
             };
 
-            if let Some(raw_hex) = &request.raw {
-                let bytes = hex_decode(raw_hex)
-                    .map_err(|e| ConnectorError::Other(format!("invalid raw hex: {e}")))?;
+            // A `bytes` write carries the hex of the whole frame payload in `value` (§1): the
+            // separate `raw` request field went with raw mode.
+            let Some(value) = &request.value else {
+                return Err(ConnectorError::Other(
+                    "write command must supply a 'value'".into(),
+                ));
+            };
+            if point.datatype == DataType::Bytes {
+                let hex = value.as_str().ok_or_else(|| {
+                    ConnectorError::Other("a bytes write needs a hex string in 'value'".into())
+                })?;
+                let bytes = hex_decode(hex)
+                    .map_err(|e| ConnectorError::Other(format!("invalid hex payload: {e}")))?;
                 if bytes.len() > CLASSIC_PAYLOAD_LEN {
                     return Err(ConnectorError::Other(format!(
-                        "raw payload {} bytes exceeds classic CAN max {CLASSIC_PAYLOAD_LEN}",
+                        "payload {} bytes exceeds classic CAN max {CLASSIC_PAYLOAD_LEN}",
                         bytes.len()
                     )));
                 }
                 payload[..bytes.len()].copy_from_slice(&bytes);
-            } else if let Some(value) = &request.value {
-                let dt = point.datatype.ok_or_else(|| {
-                    ConnectorError::Other("typed write requires datatype on the point".into())
-                })?;
-                let bits = value_to_bits(value, dt, &point.signal)?;
-                encode_can_signal(&mut payload, &point.signal, bits);
             } else {
-                return Err(ConnectorError::Other(
-                    "write command must supply either 'value' or 'raw'".into(),
-                ));
+                let bits = value_to_bits(value, point.datatype, &point.signal)?;
+                encode_can_signal(&mut payload, &point.signal, bits);
             }
 
             let can_id: Id = if point.signal.can_id <= 0x7FF {

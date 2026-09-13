@@ -527,21 +527,25 @@ impl CanopenConnector {
             .as_mut()
             .ok_or_else(|| ConnectorError::NotConnected(device.clone()))?;
 
-        let bytes: Vec<u8> = if let Some(raw_hex) = &request.raw {
-            hex_decode(raw_hex)
-                .map_err(|e| ConnectorError::Other(format!("invalid raw hex: {e}")))?
-        } else if let Some(json_val) = &request.value {
-            let dt = pt.datatype.ok_or_else(|| {
-                ConnectorError::Other("typed write requires datatype on the point".into())
+        // A `bytes` write carries the hex of the SDO payload in `value` (§1): the separate
+        // `raw` request field went with raw mode.
+        let Some(json_val) = &request.value else {
+            return Err(ConnectorError::Other(
+                "write command must supply a 'value'".into(),
+            ));
+        };
+        let bytes: Vec<u8> = if pt.datatype == DataType::Bytes {
+            let hex = json_val.as_str().ok_or_else(|| {
+                ConnectorError::Other("a bytes write needs a hex string in 'value'".into())
             })?;
+            hex_decode(hex)
+                .map_err(|e| ConnectorError::Other(format!("invalid hex payload: {e}")))?
+        } else {
+            let dt = pt.datatype;
             let sdk_value = json_to_value(json_val, dt)?;
             // CANopen is little-endian on the wire.
             encode_primitive(&sdk_value, dt, Endianness::Little, WordOrder::Big)
                 .map_err(|e| ConnectorError::Other(format!("encode failed: {e}")))?
-        } else {
-            return Err(ConnectorError::Other(
-                "write command must supply either 'value' or 'raw'".into(),
-            ));
         };
 
         bus.sdo_download(node_id, pt.od.index, pt.od.subindex, &bytes)
