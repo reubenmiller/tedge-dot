@@ -80,6 +80,11 @@ several sets and its value is published to each of their fragments. `meta.parame
 names a set outright, and the flow's `default_set` param forces one name for everything. `tedge-dot describe` derives the same
 names from the same configuration and renders them as Cumulocity DTM definitions for a tenant
 admin to register — see [RFC 0005](../doc/rfc/0005-device-types-and-parameter-sets.md).
+A parameter is still an ordinary signal otherwise, so by default its samples also become
+measurements through `ot-measurement`. To keep its value on the twin fragment only, and not also
+as a measurement series, set `meta.measurement = false` on the point: it stays a parameter and
+keeps being sampled. `ot-alarm` and `ot-event` work from measurements, so they no longer see
+such a point either.
 
 By default `ot-measurement` names the measurement group after the sample's `protocol`
 (`m/modbus`, `m/opcua`, ...), `ot-registration` types the child device as `<protocol>-device`,

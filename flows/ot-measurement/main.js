@@ -18,7 +18,9 @@
 // serve a whole plant while individual signals opt into their own behaviour, declared next to
 // the signal's address in the connector config. Naming works the same way:
 // meta.measurement.group / meta.measurement.series name the signal's measurement per point
-// (e.g. written by the Cloud Fieldbus import from a device type's measurementMapping).
+// (e.g. written by the Cloud Fieldbus import from a device type's measurementMapping), and
+// meta.measurement = false keeps the signal out of the measurements altogether (e.g. a parameter
+// whose value should reach the cloud only through its twin fragment).
 
 const decoder = new TextDecoder();
 
@@ -111,6 +113,13 @@ function resolveNaming(cfg, sample) {
   return { group, series };
 }
 
+// True when the signal opted out of measurements: `meta.measurement = false`, a boolean. Same
+// shape as the `meta.parameter = false` opt-out (ot-parameter-state), and like it a string is not
+// a switch.
+function measurementDisabled(meta) {
+  return meta ? meta.measurement === false : false;
+}
+
 export function onMessage(message, context) {
   const sample = JSON.parse(decoder.decode(message.payload));
   const cfg = context.config || {};
@@ -118,6 +127,13 @@ export function onMessage(message, context) {
   // Optionally restrict this flow instance to a single point id.
   const point = cfg.point || "";
   if (point && sample.point !== point) return [];
+
+  // Opt-out: `meta.measurement = false` keeps the signal out of the measurements entirely —
+  // typically a parameter (contract §5.2) whose value belongs on its twin fragment only, rather
+  // than also being sent to the cloud as a time series. Checked before any change-detection or
+  // combine state is touched. The connector still publishes the sample, so ot-parameter-state
+  // (and every other flow) sees it as usual.
+  if (measurementDisabled(sample.meta)) return [];
 
   // Only forward good-quality readings.
   if (sample.quality !== "good") return [];
