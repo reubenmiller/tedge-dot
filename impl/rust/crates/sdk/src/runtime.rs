@@ -129,7 +129,7 @@ impl LinkTracker {
     /// `define-device` just added would carry no type at all.
     async fn publish_reports(
         &mut self,
-        client: &AsyncClient,
+        client: &Mqtt,
         reports: &[LinkReport],
         config: &ConnectorConfig,
     ) -> Result<(), BoxError> {
@@ -154,7 +154,7 @@ impl LinkTracker {
     /// repeat on a backoff schedule and must not re-publish the same retained status.
     async fn publish_if_changed(
         &mut self,
-        client: &AsyncClient,
+        client: &Mqtt,
         report: &LinkReport,
         config: &ConnectorConfig,
     ) {
@@ -173,7 +173,7 @@ impl LinkTracker {
     /// readable) and publish a retained link transition when the status changed.
     async fn note_poll(
         &mut self,
-        client: &AsyncClient,
+        client: &Mqtt,
         device: &str,
         healthy: bool,
         reason: Option<String>,
@@ -203,7 +203,7 @@ impl LinkTracker {
     /// is not recorded, so a republished status carries none.
     async fn republish(
         &self,
-        client: &AsyncClient,
+        client: &Mqtt,
         config: &ConnectorConfig,
     ) -> Result<(), BoxError> {
         let mut reports: Vec<LinkReport> = self
@@ -265,7 +265,7 @@ impl ReconnectEntry {
 /// the old one (push subscriptions).
 async fn attempt_reconnect(
     connector: &mut Box<dyn Connector>,
-    client: &AsyncClient,
+    client: &Mqtt,
     links: &mut LinkTracker,
     device: &str,
     limits: Limits,
@@ -395,8 +395,10 @@ pub async fn run_until_watched(
 
 /// How long a connector attempt waits for the broker to accept its session before it fails.
 const BROKER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long publishing one sample may wait for the MQTT client to take it.
-const SAMPLE_PUBLISH_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long one publish may wait for the MQTT client to take it: long enough for a busy but
+/// connected client, short enough that a connection gone before the event loop noticed (a
+/// half-open socket) does not hold up the main loop for long.
+const PUBLISH_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long a stopping connector gives its final health and DISCONNECT to reach the broker.
 const MQTT_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -516,6 +518,10 @@ pub async fn run_until_reloadable(
     // and the next `publish().await` blocks — and the main loop with it: no reload, no stop, until
     // the broker is back. The main loop checks this before publishing samples.
     let (online_tx, mut online) = tokio::sync::watch::channel(false);
+    let client = Mqtt {
+        client,
+        online: online.clone(),
+    };
     // Ends with this function, however it returns: the process may host other connectors and
     // restart this one, and a leaked event loop would keep its session connected (or keep
     // reconnecting) behind it.
@@ -626,17 +632,13 @@ pub async fn run_until_reloadable(
                     let device = config.devices[device_index].name.clone();
                     match bounded(limits, "read", connector.read_points(&device, &points)).await {
                         Ok(mut samples) => {
-                            let online_now = *online.borrow();
                             for s in samples.iter_mut() {
                                 // The runtime owns the device identity for polled reads:
                                 // connectors routinely leave `device` empty, and the sample
                                 // topic + meta lookup are keyed by the configured name.
                                 s.device = device.clone();
-                                publish_sample(
-                                    &client, &protocol, s, &mut seq_counters, &meta_index,
-                                    online_now,
-                                )
-                                .await;
+                                publish_sample(&client, &protocol, s, &mut seq_counters, &meta_index)
+                                    .await;
                             }
                             // A batch where every point failed means the device itself is
                             // unreachable (a single bad point keeps the link healthy).
@@ -711,11 +713,8 @@ pub async fn run_until_reloadable(
                 }
             }
             Some(mut sample) = sample_rx.recv() => {
-                let online_now = *online.borrow();
-                publish_sample(
-                    &client, &protocol, &mut sample, &mut seq_counters, &meta_index, online_now,
-                )
-                .await;
+                publish_sample(&client, &protocol, &mut sample, &mut seq_counters, &meta_index)
+                    .await;
                 progress.mark();
             }
             _ = reconnected.notified() => {
@@ -775,8 +774,7 @@ pub async fn run_until_reloadable(
     // broker (the event loop ends once the DISCONNECT is written). With the broker unreachable
     // there is nothing to send them over, and the broker publishes the last will instead.
     let _ = bounded(limits, "disconnect", connector.disconnect()).await;
-    let online_now = *online.borrow();
-    if online_now {
+    if client.is_online() {
         let flush = async {
             publish_health(&client, &health_topic, "down").await.ok();
             client.disconnect().await.ok();
@@ -1119,23 +1117,21 @@ fn envelope_with_meta(sample: &Sample, meta_index: &MetaIndex) -> serde_json::Va
 /// Stamp the per-point sequence number and publish one sample. Shared by the polling loop and
 /// the subscription channel so both paths get identical seq/meta/topic handling.
 async fn publish_sample(
-    client: &AsyncClient,
+    client: &Mqtt,
     protocol: &str,
     sample: &mut Sample,
     seq_counters: &mut HashMap<(String, String), u64>,
     meta_index: &MetaIndex,
-    online: bool,
 ) {
     let counter = seq_counters
         .entry((sample.device.clone(), sample.point.clone()))
         .or_insert(0);
     *counter += 1;
     sample.seq = Some(*counter);
-    if !online {
-        // With the broker unreachable a queued sample cannot be sent, and enough of them fill the
-        // client's request queue until publishing blocks the main loop (see
-        // `run_until_reloadable`). A sample is a reading of the moment: it is dropped, and the
-        // gap shows in `seq`.
+    if !client.is_online() {
+        // With the broker unreachable a queued sample cannot be sent, and it would take the room
+        // the state messages need in the client's request queue (see `publish_retained`). A
+        // sample is a reading of the moment: it is dropped, and the gap shows in `seq`.
         return;
     }
     let topic = format!(
@@ -1144,13 +1140,13 @@ async fn publish_sample(
     );
     let payload = envelope_with_meta(sample, meta_index).to_string();
     let publish = client.publish(&topic, QoS::AtMostOnce, false, payload);
-    match tokio::time::timeout(SAMPLE_PUBLISH_TIMEOUT, publish).await {
+    match tokio::time::timeout(PUBLISH_TIMEOUT, publish).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => error!("failed to publish sample: {e}"),
         // The connection is gone but the event loop has not noticed yet (a half-open socket).
         Err(_) => warn!(
             "dropping a sample on {topic}: the MQTT client did not take it within {}s",
-            SAMPLE_PUBLISH_TIMEOUT.as_secs()
+            PUBLISH_TIMEOUT.as_secs()
         ),
     }
 }
@@ -1213,7 +1209,7 @@ fn route_command<'a>(
 #[allow(clippy::too_many_arguments)]
 async fn handle_command(
     connector: &mut Box<dyn Connector>,
-    client: &AsyncClient,
+    client: &Mqtt,
     protocol: &str,
     service: &str,
     links: &mut LinkTracker,
@@ -1398,7 +1394,7 @@ pub fn parse_batch_writes(json: &serde_json::Value) -> Result<Vec<BatchWrite>, S
 /// applied before a failure.
 async fn handle_write_batch(
     connector: &mut Box<dyn Connector>,
-    client: &AsyncClient,
+    client: &Mqtt,
     topic: &str,
     device: &str,
     json: &serde_json::Value,
@@ -1546,7 +1542,7 @@ fn capability_payload(caps: &Capabilities, config: &ConnectorConfig) -> String {
 #[allow(clippy::too_many_arguments)]
 async fn handle_management(
     connector: &mut Box<dyn Connector>,
-    client: &AsyncClient,
+    client: &Mqtt,
     links: &mut LinkTracker,
     config: &mut ConnectorConfig,
     config_doc: &mut DocumentMut,
@@ -1639,7 +1635,7 @@ async fn handle_management(
 /// it, republishing their link status. Shared by management commands and reloads.
 async fn commit_config(
     connector: &mut Box<dyn Connector>,
-    client: &AsyncClient,
+    client: &Mqtt,
     links: &mut LinkTracker,
     config: &mut ConnectorConfig,
     new_config: ConnectorConfig,
@@ -1700,7 +1696,7 @@ fn needs_restart(running: &ConnectorConfig, new: &ConnectorConfig) -> bool {
 #[allow(clippy::too_many_arguments)]
 async fn reload_from_file(
     connector: &mut Box<dyn Connector>,
-    client: &AsyncClient,
+    client: &Mqtt,
     links: &mut LinkTracker,
     config: &mut ConnectorConfig,
     config_doc: &mut DocumentMut,
@@ -1757,7 +1753,7 @@ async fn reload_from_file(
 }
 
 async fn publish_failed(
-    client: &AsyncClient,
+    client: &Mqtt,
     topic: &str,
     reason: &str,
     origin: Option<&serde_json::Value>,
@@ -1994,7 +1990,7 @@ fn persist_config(path: &Path, doc: &DocumentMut) -> Result<(), String> {
 }
 
 async fn publish_links(
-    client: &AsyncClient,
+    client: &Mqtt,
     protocol: &str,
     reports: &[LinkReport],
     config: &ConnectorConfig,
@@ -2043,7 +2039,7 @@ fn link_payload(
 /// Restore what a clean MQTT session loses when the broker drops the connection: the command
 /// subscriptions, and the retained service health, capability descriptor and link statuses.
 async fn restore_mqtt_session(
-    client: &AsyncClient,
+    client: &Mqtt,
     subscriptions: &[&str],
     health_topic: &str,
     cap_topic: &str,
@@ -2059,7 +2055,7 @@ async fn restore_mqtt_session(
     links.republish(client, config).await
 }
 
-async fn publish_health(client: &AsyncClient, topic: &str, status: &str) -> Result<(), BoxError> {
+async fn publish_health(client: &Mqtt, topic: &str, status: &str) -> Result<(), BoxError> {
     let payload = serde_json::json!({
         "status": status,
         "time": format_rfc3339_ms(OffsetDateTime::now_utc())
@@ -2068,15 +2064,55 @@ async fn publish_health(client: &AsyncClient, topic: &str, status: &str) -> Resu
     publish_retained(client, topic, payload).await
 }
 
-async fn publish_retained(
-    client: &AsyncClient,
-    topic: &str,
-    payload: String,
-) -> Result<(), BoxError> {
-    client
-        .publish(topic, QoS::AtLeastOnce, true, payload)
-        .await
-        .map_err(|e| Box::new(e) as BoxError)
+/// The MQTT client, and whether its broker is connected right now (kept up to date by the event
+/// loop task in [`run_until_reloadable`]). It dereferences to the client, so publishing and
+/// subscribing read as usual; what it adds is the connection state that decides how a publish
+/// may wait.
+struct Mqtt {
+    client: AsyncClient,
+    online: tokio::sync::watch::Receiver<bool>,
+}
+
+impl Mqtt {
+    fn is_online(&self) -> bool {
+        *self.online.borrow()
+    }
+}
+
+impl std::ops::Deref for Mqtt {
+    type Target = AsyncClient;
+
+    fn deref(&self) -> &AsyncClient {
+        &self.client
+    }
+}
+
+/// Publish a retained state message: health, capability descriptor, link status, command status.
+///
+/// Every one of them goes through here, so none can hold up the main loop. While the broker is
+/// unreachable rumqttc does not read its request queue, and an awaited publish would wait for the
+/// broker once the queue is full — which one reload of a connector with more devices than the
+/// queue has slots is enough for. So, offline, the message is queued if there is room and dropped
+/// if not: reconnecting republishes the health, the capability descriptor and every link status
+/// (`restore_mqtt_session`). Online, the wait is bounded (see [`PUBLISH_TIMEOUT`]).
+async fn publish_retained(client: &Mqtt, topic: &str, payload: String) -> Result<(), BoxError> {
+    if !client.is_online() {
+        if let Err(e) = client.try_publish(topic, QoS::AtLeastOnce, true, payload) {
+            debug!("not publishing {topic} while the MQTT broker is unreachable: {e}");
+        }
+        return Ok(());
+    }
+    let publish = client.publish(topic, QoS::AtLeastOnce, true, payload);
+    match tokio::time::timeout(PUBLISH_TIMEOUT, publish).await {
+        Ok(result) => result.map_err(|e| Box::new(e) as BoxError),
+        Err(_) => {
+            warn!(
+                "publishing {topic} took longer than {}s; the MQTT connection looks lost",
+                PUBLISH_TIMEOUT.as_secs()
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Resolve the effective output mode of a point ignoring device default; small helper used by

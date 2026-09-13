@@ -102,7 +102,9 @@ connector and a removed file stops its connector. A change of `service_name`, `p
 `[mqtt]` or the effective stall timeout (`stall_timeout`, raised to twice `operation_timeout`)
 restarts that one connector, and `log_level` needs a service restart. A connector that cannot
 start, or cannot restart, is tried again every `TEDGE_DOT_RESTART_DELAY` seconds (default 5) and
-on every reload; the service keeps running meanwhile.
+on every reload; the service keeps running meanwhile. The same goes for a broker that does not
+accept the connection within 10 seconds, such as one still starting at boot: the connector
+starts once it does.
 
 ## One point list, many devices
 
