@@ -170,8 +170,8 @@ After extraction and type interpretation the SDK `Transform::apply()` is called 
 per-point `transform` (multiplier/divisor/offset). The DBC `factor` and `offset` fields are
 **not applied** by the connector.
 
-`int64`/`uint64` values outside the JS safe-integer range MUST be emitted as `Value::Text`
-with `value_repr: "string"` (contract §4.1).
+`int64`/`uint64` values outside the JS safe-integer range MUST be emitted as `Value::Text`,
+i.e. a string `value` (contract §4.1); the sample's `datatype` says it is an integer.
 
 ### 4.3 Raw mode
 

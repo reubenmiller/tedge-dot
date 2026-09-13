@@ -224,7 +224,7 @@ tiny:
 | **MQTT** | Connect to the local broker (`rumqttc`), publish/subscribe, retained semantics, reconnection, QoS. |
 | **Scheduling** | Drive `read_points` per point/device `poll_interval`; coalesce due points per device into batched calls. |
 | **Subscriptions** | For modules advertising `subscribe`, manage the push lifecycle and forward Samples. |
-| **Sample publishing** | Serialize `Sample` to the envelope and publish to `sample/<point>` (non-retained). |
+| **Sample publishing** | Serialize `Sample` to the envelope and publish to `sample/<point>` (non-retained). The envelope is a time series row (contract §5) — identity, value, quality — so nothing static per point is echoed: `raw` and `addr` are added only under `[connector] sample_debug`, and the unit, labels, `access`, `meta` and device `type` are on the manifest. |
 | **Command routing** | Subscribe `cmd/<verb>/+`, act only on commands for devices the live configuration defines (contract §6.5: other instances of the protocol receive them too), validate against the command schema, run the state machine (`init→executing→successful|failed`), call `execute`, publish results (retained). Management verbs arrive on the service command topic instead. |
 | **Management verbs** | Implement `set-config`/`define-device`/`remove-device` (contract §6.3) generically: patch the config document, validate, persist, and live-reload — so no module writes config-mutation code. Augment `capabilities()` with these verbs + the `management` feature. |
 | **Capability descriptor** | Build from `capabilities()` (plus the management verbs above) and publish retained on startup. A property of the build alone. |

@@ -141,7 +141,7 @@ good numeric point into an `m/<protocol>` measurement whose series is the point 
 ```sh
 just test-flows          # runs flows/test-flows.sh (covers modbus and opcua samples)
 # or a single case:
-echo '[te/device/plc1/ot/modbus/sample/level_f32] {"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"level_f32","mode":"typed","datatype":"float32","value":404.17,"value_repr":"number","raw":"43ca 15c3","quality":"good","addr":{}}' \
+echo '[te/device/plc1/ot/modbus/sample/level_f32] {"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"level_f32","mode":"typed","datatype":"float32","value":404.17,"quality":"good"}' \
   | tedge flows test --flows-dir ./flows/ot-measurement/
 ```
 

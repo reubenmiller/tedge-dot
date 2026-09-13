@@ -69,6 +69,7 @@ const CONNECTOR_KEYS: &[&str] = &[
     "log_level",
     "operation_timeout",
     "stall_timeout",
+    "sample_debug",
     "point_library_path",
 ];
 const MQTT_KEYS: &[&str] = &["host", "port"];

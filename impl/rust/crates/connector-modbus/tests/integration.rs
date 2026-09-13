@@ -182,9 +182,10 @@ async fn tcp_read_and_write_roundtrip() {
     let status = samples.iter().find(|s| s.point == "status_word").unwrap();
     assert_eq!(status.quality, Quality::Good);
     assert!(status.value.is_none());
-    // raw envelope hex (grouped per 16-bit register)
-    let env = status.to_envelope();
+    // raw envelope hex (grouped per 16-bit register); `raw` is opt-in (§5: sample_debug)
+    let env = status.to_envelope(true);
     assert_eq!(env["raw"], "1234");
+    assert!(status.to_envelope(false).get("raw").is_none());
 
     let run = samples.iter().find(|s| s.point == "run_state").unwrap();
     assert_eq!(run.value, Some(Value::Bool(true)));

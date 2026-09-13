@@ -163,8 +163,12 @@ pub struct Sample {
     /// Number of bytes per hex group when serializing `raw` (2 for 16-bit registers, 1 for coils).
     pub raw_group: usize,
     pub quality: Quality,
+    /// The point's declared unit, as the module resolved it. **Not** serialized into the
+    /// envelope (§5): a unit is static per point, so it is published once on the device
+    /// manifest (§8.2). Kept here because it is part of what a read resolved, and the module
+    /// integration tests assert on it.
     pub unit: Option<String>,
-    /// Protocol-specific address echo.
+    /// Protocol-specific address echo. Serialized only under `[connector] sample_debug`.
     pub addr: serde_json::Value,
     pub seq: Option<u64>,
     /// Required when `quality == Bad`.
@@ -173,10 +177,18 @@ pub struct Sample {
 
 impl Sample {
     /// Build the JSON sample envelope per the OT Connector Contract §5.
-    pub fn to_envelope(&self) -> serde_json::Value {
+    ///
+    /// A sample is a time series row: identity, value, quality — and nothing that is static per
+    /// point. Everything a consumer needs to *interpret* the point (its unit, its labels, its
+    /// access, its free-form `meta`, and the device's type) is on the device's retained manifest
+    /// (§8.2), published once instead of on every read.
+    ///
+    /// `debug` is `[connector] sample_debug`: it adds `raw` and `addr` back, for the tooling
+    /// that inspects the wire (the conformance suite runs with it on). Off by default, because
+    /// both are a debugging aid on a message a point publishes thousands of times a day.
+    pub fn to_envelope(&self, debug: bool) -> serde_json::Value {
         let mut obj = serde_json::Map::new();
         obj.insert("ts".into(), serde_json::Value::String(format_rfc3339_ms(self.ts)));
-        obj.insert("ts_ms".into(), serde_json::json!(unix_ms(self.ts)));
         obj.insert("device".into(), serde_json::Value::String(self.device.clone()));
         obj.insert("protocol".into(), serde_json::Value::String(self.protocol.into()));
         obj.insert("point".into(), serde_json::Value::String(self.point.clone()));
@@ -190,34 +202,27 @@ impl Sample {
         if let Some(dt) = self.datatype {
             obj.insert("datatype".into(), serde_json::to_value(dt).unwrap());
         }
+        // No `value_repr`: `datatype` plus the JSON type of `value` say the same thing, and a
+        // consumer that needs to know an int64 was widened to a string reads `datatype`.
         if let Some(v) = &self.value {
             obj.insert("value".into(), v.to_json());
-            obj.insert("value_repr".into(), serde_json::Value::String(v.repr().into()));
         }
-        obj.insert(
-            "raw".into(),
-            serde_json::Value::String(hex_grouped(&self.raw, self.raw_group)),
-        );
         obj.insert("quality".into(), serde_json::Value::String(self.quality.as_str().into()));
-        if let Some(u) = &self.unit {
-            obj.insert("unit".into(), serde_json::Value::String(u.clone()));
-        }
-        obj.insert("addr".into(), self.addr.clone());
         if let Some(seq) = self.seq {
             obj.insert("seq".into(), serde_json::json!(seq));
         }
         if let Some(err) = &self.error {
             obj.insert("error".into(), serde_json::Value::String(err.clone()));
         }
+        if debug {
+            obj.insert(
+                "raw".into(),
+                serde_json::Value::String(hex_grouped(&self.raw, self.raw_group)),
+            );
+            obj.insert("addr".into(), self.addr.clone());
+        }
         serde_json::Value::Object(obj)
     }
-}
-
-/// Unix epoch milliseconds as a float (sub-millisecond precision preserved), the numeric
-/// companion to the RFC 3339 `ts` — consumers doing time math get a number instead of a
-/// string to parse.
-pub fn unix_ms(ts: OffsetDateTime) -> f64 {
-    ts.unix_timestamp_nanos() as f64 / 1e6
 }
 
 /// Format an `OffsetDateTime` as RFC 3339, millisecond precision, UTC `Z`.
@@ -303,10 +308,9 @@ mod tests {
         assert_eq!(t.apply(Value::Text("hi".into())), Value::Text("hi".into()));
     }
 
-    #[test]
-    fn envelope_carries_both_timestamp_forms() {
+    fn envelope_sample() -> Sample {
         let ts = OffsetDateTime::from_unix_timestamp_nanos(1_500_000_000_123_456_789).unwrap();
-        let sample = Sample {
+        Sample {
             ts,
             device: "plc-1".into(),
             protocol: "modbus",
@@ -317,15 +321,42 @@ mod tests {
             raw: vec![0x00, 0x01],
             raw_group: 2,
             quality: Quality::Good,
-            unit: None,
-            addr: serde_json::Value::Null,
-            seq: None,
+            unit: Some("°C".into()),
+            addr: serde_json::json!({ "table": "holding", "address": 3 }),
+            seq: Some(7),
             error: None,
-        };
-        let env = sample.to_envelope();
+        }
+    }
+
+    /// The 0.2 envelope is a time series row: identity, value, quality. Everything static per
+    /// point — the unit, the labels, the access, `meta`, the device type — is on the manifest
+    /// (§8.2), and `ts_ms`/`value_repr` are gone because `ts` and `datatype` already say it.
+    #[test]
+    fn envelope_carries_only_what_changes_per_read() {
+        let env = envelope_sample().to_envelope(false);
         assert_eq!(env["ts"], serde_json::json!("2017-07-14T02:40:00.123Z"));
-        // ts_ms is the same instant as unix epoch milliseconds (float, sub-ms preserved)
-        assert!((env["ts_ms"].as_f64().unwrap() - 1_500_000_000_123.456_8).abs() < 1e-3);
+        assert_eq!(env["device"], serde_json::json!("plc-1"));
+        assert_eq!(env["protocol"], serde_json::json!("modbus"));
+        assert_eq!(env["point"], serde_json::json!("temp"));
+        assert_eq!(env["datatype"], serde_json::json!("uint16"));
+        assert_eq!(env["value"], serde_json::json!(1.0));
+        assert_eq!(env["quality"], serde_json::json!("good"));
+        assert_eq!(env["seq"], serde_json::json!(7));
+        for gone in ["ts_ms", "value_repr", "unit", "type", "access", "meta", "raw", "addr"] {
+            assert!(env.get(gone).is_none(), "{gone} must not be in a 0.2 sample");
+        }
+    }
+
+    /// `sample_debug` puts the wire back on the envelope — and nothing else: it is a debugging
+    /// aid, not a way to re-add the static fields the manifest carries.
+    #[test]
+    fn sample_debug_adds_the_wire_back() {
+        let env = envelope_sample().to_envelope(true);
+        assert_eq!(env["raw"], serde_json::json!("0001"));
+        assert_eq!(env["addr"]["address"], serde_json::json!(3));
+        for gone in ["ts_ms", "value_repr", "unit", "type", "access", "meta"] {
+            assert!(env.get(gone).is_none(), "{gone} is the manifest's, debug or not");
+        }
     }
 
     #[test]

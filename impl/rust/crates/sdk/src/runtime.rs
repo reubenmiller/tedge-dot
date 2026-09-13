@@ -642,7 +642,7 @@ pub async fn run_until_reloadable(
     let mut subscribed =
         setup_subscriptions(&mut connector, &config, caps.subscribe, &sample_tx, limits).await;
     let mut schedule = build_schedule(&config, &subscribed);
-    let mut meta_index = build_meta_index(&config);
+    let mut sample_debug = config.connector.sample_debug;
     let mut seq_counters: HashMap<(String, String), u64> = HashMap::new();
     // Devices whose transport needs re-establishing, keyed by device name.
     let mut reconnects: HashMap<String, ReconnectEntry> = HashMap::new();
@@ -679,7 +679,7 @@ pub async fn run_until_reloadable(
                                 // connectors routinely leave `device` empty, and the sample
                                 // topic + meta lookup are keyed by the configured name.
                                 s.device = device.clone();
-                                publish_sample(&client, &protocol, s, &mut seq_counters, &meta_index)
+                                publish_sample(&client, &protocol, s, &mut seq_counters, sample_debug)
                                     .await;
                             }
                             // A batch where every point failed means the device itself is
@@ -755,7 +755,7 @@ pub async fn run_until_reloadable(
                 }
             }
             Some(mut sample) = sample_rx.recv() => {
-                publish_sample(&client, &protocol, &mut sample, &mut seq_counters, &meta_index)
+                publish_sample(&client, &protocol, &mut sample, &mut seq_counters, sample_debug)
                     .await;
                 progress.mark();
             }
@@ -805,7 +805,7 @@ pub async fn run_until_reloadable(
                 &mut connector, &config, caps.subscribe, &sample_tx, limits,
             ).await;
             schedule = build_schedule(&config, &subscribed);
-            meta_index = build_meta_index(&config);
+            sample_debug = config.connector.sample_debug;
             seq_counters.clear();
             // applying the configuration already reconnected every device
             reconnects.clear();
@@ -861,7 +861,7 @@ pub async fn run_stdout_until(
     let subscribed =
         setup_subscriptions(&mut connector, &config, caps.subscribe, &sample_tx, limits).await;
     let mut schedule = build_schedule(&config, &subscribed);
-    let meta_index = build_meta_index(&config);
+    let sample_debug = config.connector.sample_debug;
     let mut seq_counters: HashMap<(String, String), u64> = HashMap::new();
     let mut reconnects: HashMap<String, ReconnectEntry> = HashMap::new();
 
@@ -887,7 +887,7 @@ pub async fn run_stdout_until(
                         Ok(mut samples) => {
                             for s in samples.iter_mut() {
                                 s.device = device.clone();
-                                print_sample(s, &mut seq_counters, &meta_index);
+                                print_sample(s, &mut seq_counters, sample_debug);
                             }
                             let healthy = samples.is_empty()
                                 || samples.iter().any(|s| s.quality != crate::model::Quality::Bad);
@@ -926,7 +926,7 @@ pub async fn run_stdout_until(
                 }
             }
             Some(mut sample) = sample_rx.recv() => {
-                print_sample(&mut sample, &mut seq_counters, &meta_index);
+                print_sample(&mut sample, &mut seq_counters, sample_debug);
             }
         }
     }
@@ -940,14 +940,14 @@ pub async fn run_stdout_until(
 fn print_sample(
     sample: &mut Sample,
     seq_counters: &mut HashMap<(String, String), u64>,
-    meta_index: &MetaIndex,
+    debug: bool,
 ) {
     let counter = seq_counters
         .entry((sample.device.clone(), sample.point.clone()))
         .or_insert(0);
     *counter += 1;
     sample.seq = Some(*counter);
-    println!("{}", envelope_with_meta(sample, meta_index));
+    println!("{}", sample.to_envelope(debug));
 }
 
 /// Build the polling schedule, skipping points that are delivered by subscription.
@@ -1087,39 +1087,6 @@ async fn subscribe_device(
     }
 }
 
-/// Per-point `meta` lookup, keyed by `(device name, point id)`; injected into every published
-/// sample envelope so flows can apply per-signal behaviour without their own config.
-/// Per-point configuration echoed into every sample envelope beyond what the driver produces:
-/// the free-form `meta` table and the declared `access` (so consumers can tell writable
-/// points — parameters — apart without the configuration file).
-#[derive(Clone, Debug)]
-struct PointExtras {
-    meta: Option<serde_json::Value>,
-    access: Access,
-    /// The device's declared `type` (§3.1). Per device rather than per point, but carried here
-    /// so one lookup answers everything the envelope needs.
-    device_type: Option<String>,
-}
-
-type MetaIndex = HashMap<(String, String), PointExtras>;
-
-fn build_meta_index(config: &ConnectorConfig) -> MetaIndex {
-    let mut index = HashMap::new();
-    for device in &config.devices {
-        for point in &device.points {
-            index.insert(
-                (device.name.clone(), point.id.clone()),
-                PointExtras {
-                    meta: point.meta.clone(),
-                    access: Access::parse(point.access.as_deref()),
-                    device_type: device.device_type.clone().filter(|t| !t.is_empty()),
-                },
-            );
-        }
-    }
-    index
-}
-
 /// The declared `type` of one configured device (§3.1), if it has one. Used verbatim: the
 /// loader normalised and validated it (`library::expand`), so trimming here — and only here —
 /// would make the link status spell the type differently from the samples and the set names.
@@ -1132,34 +1099,14 @@ fn device_type_of<'a>(config: &'a ConnectorConfig, device: &str) -> Option<&'a s
         .filter(|t| !t.is_empty())
 }
 
-fn access_str(access: Access) -> &'static str {
-    access.as_str()
-}
-
-/// The sample envelope as published: the contract envelope plus the point's `meta` (if any)
-/// and its `access`.
-fn envelope_with_meta(sample: &Sample, meta_index: &MetaIndex) -> serde_json::Value {
-    let mut envelope = sample.to_envelope();
-    if let Some(extras) = meta_index.get(&(sample.device.clone(), sample.point.clone())) {
-        if let Some(meta) = &extras.meta {
-            envelope["meta"] = meta.clone();
-        }
-        envelope["access"] = serde_json::Value::String(access_str(extras.access).into());
-        if let Some(device_type) = &extras.device_type {
-            envelope["type"] = serde_json::Value::String(device_type.clone());
-        }
-    }
-    envelope
-}
-
 /// Stamp the per-point sequence number and publish one sample. Shared by the polling loop and
-/// the subscription channel so both paths get identical seq/meta/topic handling.
+/// the subscription channel so both paths get identical seq/topic handling.
 async fn publish_sample(
     client: &Mqtt,
     protocol: &str,
     sample: &mut Sample,
     seq_counters: &mut HashMap<(String, String), u64>,
-    meta_index: &MetaIndex,
+    debug: bool,
 ) {
     let counter = seq_counters
         .entry((sample.device.clone(), sample.point.clone()))
@@ -1176,7 +1123,7 @@ async fn publish_sample(
         "te/device/{}/ot/{}/sample/{}",
         sample.device, protocol, sample.point
     );
-    let payload = envelope_with_meta(sample, meta_index).to_string();
+    let payload = sample.to_envelope(debug).to_string();
     let publish = client.publish(&topic, QoS::AtMostOnce, false, payload);
     match tokio::time::timeout(PUBLISH_TIMEOUT, publish).await {
         Ok(Ok(())) => {}
@@ -2490,7 +2437,7 @@ default_mode = "typed"
     }
 
     #[test]
-    fn point_meta_parsed_and_indexed() {
+    fn point_meta_is_parsed_and_kept_on_the_point() {
         let cfg: ConnectorConfig = toml::from_str(
             r#"
 [connector]
@@ -2509,16 +2456,14 @@ protocol_address = { host = "127.0.0.1" }
 "#,
         )
         .unwrap();
-        let index = build_meta_index(&cfg);
-        let extras = index.get(&("plc-1".to_string(), "temp".to_string())).unwrap();
-        let meta = extras.meta.as_ref().unwrap();
-        assert_eq!(extras.access, Access::Read);
-        assert_eq!(extras.device_type.as_deref(), Some("acme-meter-v2"));
-        assert_eq!(device_type_of(&cfg, "plc-1"), Some("acme-meter-v2"));
-        assert_eq!(device_type_of(&cfg, "nope"), None);
+        // `meta` is parsed and kept on the point — the manifest publishes it (§8.2); a sample
+        // does not (§5).
+        let meta = cfg.devices[0].points[0].meta.as_ref().unwrap();
         assert_eq!(meta["on_change"], serde_json::json!(true));
         assert_eq!(meta["min_interval"], serde_json::json!("5s"));
         assert_eq!(meta["room"], serde_json::json!("boiler"));
+        assert_eq!(device_type_of(&cfg, "plc-1"), Some("acme-meter-v2"));
+        assert_eq!(device_type_of(&cfg, "nope"), None);
     }
 
     /// The retained link status carries the device type from the configuration the connector
@@ -2584,7 +2529,7 @@ protocol_address = { host = "127.0.0.1" }
     }
 
     #[test]
-    fn envelope_carries_point_meta() {
+    fn envelope_echoes_nothing_static_per_point() {
         let sample = Sample {
             ts: OffsetDateTime::UNIX_EPOCH,
             device: "plc-1".into(),
@@ -2601,26 +2546,17 @@ protocol_address = { host = "127.0.0.1" }
             seq: None,
             error: None,
         };
-        let mut index = HashMap::new();
-        index.insert(
-            ("plc-1".to_string(), "temp".to_string()),
-            PointExtras {
-                meta: Some(serde_json::json!({ "on_change": true })),
-                access: Access::ReadWrite,
-                device_type: Some("acme-meter-v2".into()),
-            },
-        );
-        let env = envelope_with_meta(&sample, &index);
-        assert_eq!(env["meta"]["on_change"], serde_json::json!(true));
-        assert_eq!(env["access"], serde_json::json!("read_write"));
-        // The device type (§3.1): what a consumer needs to name the point's parameter set
-        // without the configuration file (§5.2).
-        assert_eq!(env["type"], serde_json::json!("acme-meter-v2"));
-        // a sample of an unindexed point has neither meta, access nor type
-        let env2 = envelope_with_meta(&sample, &HashMap::new());
-        assert!(env2.get("meta").is_none());
-        assert!(env2.get("access").is_none());
-        assert!(env2.get("type").is_none());
+        // Nothing static per point is echoed any more: `meta`, `access`, `unit` and the
+        // device `type` are on the device manifest (§8.2), published once.
+        let env = sample.to_envelope(false);
+        for gone in ["meta", "access", "type", "unit", "value_repr", "ts_ms", "raw", "addr"] {
+            assert!(env.get(gone).is_none(), "{gone} must not be echoed per sample");
+        }
+        // `sample_debug` puts back the wire, and only the wire.
+        let debug = sample.to_envelope(true);
+        assert_eq!(debug["raw"], serde_json::json!("1234"));
+        assert!(debug.get("addr").is_some());
+        assert!(debug.get("meta").is_none());
     }
 
     #[test]

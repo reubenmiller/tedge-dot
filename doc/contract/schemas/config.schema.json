@@ -39,6 +39,11 @@
           "default": "120s",
           "description": "How long the connector's loop may make no progress before it is treated as wedged and restarted (the supervisor cancels and re-runs it; the MQTT last will marks the service down). Must exceed operation_timeout; \"0\" disables the watchdog."
         },
+        "sample_debug": {
+          "type": "boolean",
+          "default": false,
+          "description": "Put the wire back on every sample envelope: 'raw' (the bytes read, hex) and 'addr' (the protocol-specific address). Off by default — both are debugging detail on a message a point publishes thousands of times a day (§5) — and switched on by tooling that inspects the wire, above all the conformance suite."
+        },
         "log_level": {
           "enum": [
             "error",

@@ -96,6 +96,12 @@ pub fn rewrite_config(
         root.get_mut("connector").and_then(|c| c.get_mut("point_library_path")),
         template_dir,
     );
+    // The suite checks the bytes a read returned against the golden vectors, and `raw`/`addr`
+    // are opt-in on the 0.2 envelope (§5). Forced here rather than asked of every conformance
+    // configuration, so that a connector cannot pass by shipping a config that hides the wire.
+    if let Some(connector) = root.get_mut("connector").and_then(|c| c.as_table_mut()) {
+        connector.insert("sample_debug".into(), toml::Value::Boolean(true));
+    }
 
     let rewritten = toml::to_string_pretty(&doc).map_err(|e| format!("re-serialize config: {e}"))?;
     let out = out_dir.join(

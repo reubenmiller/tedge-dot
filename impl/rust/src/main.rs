@@ -985,7 +985,16 @@ async fn cmd_read(args: ReadArgs) -> Result<(), String> {
         })
         .collect();
 
-    let result = read_loop(&mut connector, &mut jobs, args.json, poll_mode).await;
+    // `--json` prints the same envelope the service publishes, so it obeys the same
+    // `[connector] sample_debug` switch (§5): the CLI is a second path to one code path.
+    let result = read_loop(
+        &mut connector,
+        &mut jobs,
+        args.json,
+        config.connector.sample_debug,
+        poll_mode,
+    )
+    .await;
     let _ = connector.disconnect().await;
     let saw_bad = result?;
 
@@ -1008,6 +1017,7 @@ async fn read_loop(
     connector: &mut Box<dyn Connector>,
     jobs: &mut Vec<ReadJob>,
     json: bool,
+    debug: bool,
     poll_mode: bool,
 ) -> Result<bool, String> {
     let mut saw_bad = false;
@@ -1030,7 +1040,7 @@ async fn read_loop(
                         sample.device = job.device.clone();
                         saw_bad |= sample.quality == Quality::Bad;
                         if json {
-                            println!("{}", sample.to_envelope());
+                            println!("{}", sample.to_envelope(debug));
                         } else {
                             println!("{}", format_sample(&job.device, sample));
                         }
