@@ -33,15 +33,17 @@ static void usage(void) {
         "  tedge-dot write -c <config> -d <device> -p <point> --value <v>\n"
         "  tedge-dot run   -c <config> [--output stdout|mqtt] "
         "[--duration <dur>]\n"
-        "  tedge-dot describe [-c <config>] [-d <device>] [--set <name>] "
-        "[--format c8y-dtm] [--compact]\n"
+        "  tedge-dot describe [-c <config-or-dir>]... [-d <device>] "
+        "[--set <name>] [--format c8y-dtm] [--compact]\n"
+        "      (default: every config in /etc/tedge/plugins/ot)\n"
         "  tedge-dot <config-or-dir> [run options]      (same as run)\n"
         "  tedge-dot --version\n",
         stderr);
 }
 
-/* Same default config file as the Rust binary. */
-#define DEFAULT_CONFIG "/etc/tedge/plugins/ot/modbus.toml"
+/* Same default config directory as the Rust binary: the one the packaged
+ * service runs. */
+#define DEFAULT_CONFIG_DIR "/etc/tedge/plugins/ot"
 
 static volatile sig_atomic_t g_stop = 0;
 static void on_signal(int sig) {
@@ -50,7 +52,11 @@ static void on_signal(int sig) {
 }
 
 typedef struct {
-    const char *config;
+    const char *config;   /* the first of `configs` */
+    const char **configs; /* every -c/--config and positional path, as many as
+                             given (only `describe` takes more than one) */
+    int nconfigs;
+    int capconfigs;
     const char *device;
     const char *points[16];
     int npoints;
@@ -66,6 +72,23 @@ typedef struct {
     bool compact;
 } args_t;
 
+static int add_config(args_t *a, const char *path) {
+    if (a->nconfigs == a->capconfigs) {
+        int cap = a->capconfigs ? a->capconfigs * 2 : 4;
+        const char **grown = realloc(a->configs, (size_t)cap * sizeof *grown);
+        if (!grown) {
+            fputs("out of memory\n", stderr);
+            return -1;
+        }
+        a->configs = grown;
+        a->capconfigs = cap;
+    }
+    a->configs[a->nconfigs++] = path;
+    if (!a->config)
+        a->config = path;
+    return 0;
+}
+
 static int parse_args(int argc, char **argv, args_t *a) {
     memset(a, 0, sizeof *a);
     a->interval_s = 1.0;
@@ -74,9 +97,10 @@ static int parse_args(int argc, char **argv, args_t *a) {
     for (int i = 2; i < argc; i++) {
         const char *arg = argv[i];
         const char *next = (i + 1 < argc) ? argv[i + 1] : NULL;
-        if ((!strcmp(arg, "-c") || !strcmp(arg, "--config")) && next)
-            a->config = argv[++i];
-        else if ((!strcmp(arg, "-d") || !strcmp(arg, "--device")) && next)
+        if ((!strcmp(arg, "-c") || !strcmp(arg, "--config")) && next) {
+            if (add_config(a, argv[++i]) != 0)
+                return -1;
+        } else if ((!strcmp(arg, "-d") || !strcmp(arg, "--device")) && next)
             a->device = argv[++i];
         else if ((!strcmp(arg, "-p") || !strcmp(arg, "--point")) && next) {
             if (a->npoints < 16)
@@ -101,22 +125,31 @@ static int parse_args(int argc, char **argv, args_t *a) {
             a->poll = true;
         else if (!strcmp(arg, "--json"))
             a->json = true;
-        else if (arg[0] != '-' && !a->config)
-            a->config = arg; /* positional config path */
-        else {
+        else if (arg[0] != '-') {
+            if (add_config(a, arg) != 0) /* positional config path */
+                return -1;
+        } else {
             fprintf(stderr, "unknown argument: %s\n", arg);
             return -1;
         }
     }
+    bool describe = !strcmp(argv[1], "describe");
     if (!a->config) {
         /* `describe` needs neither a device nor a broker, so — like the Rust
-         * binary — it falls back to the packaged default config path. */
-        if (!strcmp(argv[1], "describe"))
-            a->config = DEFAULT_CONFIG;
-        else {
+         * binary — it falls back to the directory the packaged service runs. */
+        if (describe) {
+            if (add_config(a, DEFAULT_CONFIG_DIR) != 0)
+                return -1;
+        } else {
             fputs("missing --config\n", stderr);
             return -1;
         }
+    }
+    /* Only describe renders several configs at once. Every other command acts on
+     * one, and quietly taking one of several would act on the wrong file. */
+    if (a->nconfigs > 1 && !describe) {
+        fprintf(stderr, "%s takes a single config path\n", argv[1]);
+        return -1;
     }
     return 0;
 }
@@ -331,41 +364,119 @@ static int cmp_str(const void *a, const void *b) {
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
-/* Run every *.toml in a directory, one connector per file, in one process
- * (the packaged systemd unit points ExecStart at /etc/tedge/plugins/ot). */
-static int run_dir(const char *dir, const tdot_run_opts_t *opts) {
-    DIR *d = opendir(dir);
-    if (!d) {
-        fprintf(stderr, "error: cannot open config directory %s\n", dir);
-        return 1;
-    }
-    char **paths = NULL;
-    size_t n = 0, cap = 0;
-    struct dirent *e;
-    while ((e = readdir(d))) {
-        const char *dot = strrchr(e->d_name, '.');
-        if (!dot || strcmp(dot, ".toml") != 0)
-            continue;
-        if (n == cap) {
-            cap = cap ? cap * 2 : 8;
-            paths = realloc(paths, cap * sizeof *paths);
-        }
-        char full[1024];
-        snprintf(full, sizeof full, "%s/%s", dir, e->d_name);
-        paths[n++] = strdup(full);
-    }
-    closedir(d);
-    if (n == 0) {
-        fprintf(stderr, "error: no *.toml configs in %s\n", dir);
-        free(paths);
-        return 1;
-    }
-    qsort(paths, n, sizeof *paths, cmp_str); /* stable, predictable order */
-
-    int rc = tdot_runtime_run_configs((const char *const *)paths, n, opts);
+static void free_paths(char **paths, size_t n) {
     for (size_t i = 0; i < n; i++)
         free(paths[i]);
     free(paths);
+}
+
+static void push_string(char ***list, size_t *n, size_t *cap, char *owned) {
+    if (*n == *cap) {
+        *cap = *cap ? *cap * 2 : 8;
+        *list = realloc(*list, *cap * sizeof **list);
+    }
+    (*list)[(*n)++] = owned;
+}
+
+/* The config files found so far, each with the canonical path it resolves to:
+ * the same file under two spellings (`dir` and `dir//a.toml`, or a symlink) is
+ * one config, kept under the spelling it was first named by. */
+typedef struct {
+    char **paths, **keys;
+    size_t n, cap, nkeys, capkeys;
+} config_list_t;
+
+static void config_list_push(config_list_t *l, const char *path) {
+    char *key = realpath(path, NULL);
+    if (!key)
+        key = strdup(path);
+    for (size_t i = 0; i < l->nkeys; i++)
+        if (strcmp(l->keys[i], key) == 0) {
+            free(key);
+            return;
+        }
+    push_string(&l->keys, &l->nkeys, &l->capkeys, key);
+    push_string(&l->paths, &l->n, &l->cap, strdup(path));
+}
+
+/* Expand config arguments into the files they name, by the same rules as the
+ * Rust binary's discover_configs() (describe-parity.sh pins them): a directory
+ * contributes its *.toml regular files in sorted order, anything else that
+ * exists is taken as is (a file, or a pipe such as `-c <(generate-config)`),
+ * and a file named twice is kept once. Returns 0 with an array the caller
+ * releases with free_paths(), or -1 after printing why (a path that does not
+ * exist, a directory that cannot be read). */
+static int collect_configs(const char *const *args, size_t nargs,
+                           char ***out, size_t *nout) {
+    config_list_t list = {0};
+    int rc = 0;
+    for (size_t i = 0; i < nargs && rc == 0; i++) {
+        struct stat st;
+        if (stat(args[i], &st) != 0) {
+            fprintf(stderr, "error: config path '%s' does not exist\n", args[i]);
+            rc = -1;
+            break;
+        }
+        if (!S_ISDIR(st.st_mode)) {
+            config_list_push(&list, args[i]);
+            continue;
+        }
+        DIR *d = opendir(args[i]);
+        if (!d) {
+            fprintf(stderr, "error: cannot read config directory %s\n", args[i]);
+            rc = -1;
+            break;
+        }
+        /* Without the trailing '/', so `dir/` and `dir` spell the same files. */
+        int dirlen = (int)strlen(args[i]);
+        while (dirlen > 1 && args[i][dirlen - 1] == '/')
+            dirlen--;
+        char **found = NULL;
+        size_t nfound = 0, capfound = 0;
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            /* A name that is only `.toml` has no extension (a hidden file), as
+             * Rust's Path::extension() sees it, so it is not a config. */
+            const char *dot = strrchr(e->d_name, '.');
+            if (!dot || dot == e->d_name || strcmp(dot, ".toml") != 0)
+                continue;
+            char full[1024];
+            snprintf(full, sizeof full, "%.*s/%s", dirlen, args[i], e->d_name);
+            struct stat fst;
+            if (stat(full, &fst) != 0 || !S_ISREG(fst.st_mode))
+                continue;
+            push_string(&found, &nfound, &capfound, strdup(full));
+        }
+        closedir(d);
+        qsort(found, nfound, sizeof *found, cmp_str); /* stable, predictable order */
+        for (size_t j = 0; j < nfound; j++)
+            config_list_push(&list, found[j]);
+        free_paths(found, nfound);
+    }
+    free_paths(list.keys, list.nkeys);
+    if (rc != 0) {
+        free_paths(list.paths, list.n);
+        return rc;
+    }
+    *out = list.paths;
+    *nout = list.n;
+    return 0;
+}
+
+/* Run every *.toml in a directory, one connector per file, in one process
+ * (the packaged systemd unit points ExecStart at /etc/tedge/plugins/ot). */
+static int run_dir(const char *dir, const tdot_run_opts_t *opts) {
+    char **paths = NULL;
+    size_t n = 0;
+    if (collect_configs(&dir, 1, &paths, &n) != 0)
+        return 1;
+    if (n == 0) {
+        fprintf(stderr, "error: no *.toml configs in %s\n", dir);
+        free_paths(paths, n);
+        return 1;
+    }
+    int rc = tdot_runtime_run_configs((const char *const *)paths, n, opts);
+    free_paths(paths, n);
     return rc == 0 ? 0 : 1;
 }
 
@@ -380,6 +491,17 @@ static int cmd_run(const args_t *a) {
     struct stat st;
     if (a->config && stat(a->config, &st) == 0 && S_ISDIR(st.st_mode))
         return run_dir(a->config, &opts);
+    /* Otherwise a file, as in the Rust build: a connector can need its config
+     * again (the Rust build re-reads it to restart one), which a pipe such as
+     * `-c <(generate-config)` cannot provide twice. `describe` reads once, so it
+     * takes pipes too. */
+    if (a->config && stat(a->config, &st) == 0 && !S_ISREG(st.st_mode)) {
+        fprintf(stderr,
+                "error: config path '%s' is not a regular file; `run` re-reads its "
+                "configs, so it needs files or directories\n",
+                a->config);
+        return 1;
+    }
 
     tdot_config_t *cfg;
     tdot_connector_t *conn;
@@ -391,37 +513,65 @@ static int cmd_run(const args_t *a) {
     return rc == 0 ? 0 : 1;
 }
 
-/* Render the Cumulocity DTM property definitions derived from a configuration
- * (mirrors cmd_describe in src/main.rs). Needs no device, broker or protocol
- * module — only the config file. */
+/* Render the Cumulocity DTM property definitions derived from every connector
+ * configuration the arguments name (mirrors cmd_describe in src/main.rs).
+ * Needs no device, broker or protocol module — only the config files.
+ *
+ * One service runs every config in its directory and a DTM identifier is
+ * tenant-wide, so the definitions and the warnings about them are computed
+ * across all of the configs: a set declared in several files is rendered once. */
 static int cmd_describe(const args_t *a) {
     if (strcmp(a->format, "c8y-dtm") != 0) {
         fprintf(stderr, "error: unknown --format '%s' (expected c8y-dtm)\n",
                 a->format);
         return 1;
     }
-    char err[256];
-    tdot_config_t *cfg = tdot_config_load(a->config, err, sizeof err);
-    if (!cfg) {
-        fprintf(stderr, "error: %s\n", err);
+    char **paths = NULL;
+    size_t npaths = 0;
+    if (collect_configs(a->configs, (size_t)a->nconfigs, &paths, &npaths) != 0)
+        return 1;
+    if (npaths == 0) {
+        fprintf(stderr, "error: no connector configs (*.toml) found in");
+        for (int i = 0; i < a->nconfigs; i++)
+            fprintf(stderr, "%s %s", i ? "," : "", a->configs[i]);
+        fputc('\n', stderr);
+        free_paths(paths, npaths);
         return 1;
     }
 
-    /* Restrict to the matching devices by moving them to the front; ndevices is
-     * restored before the free so nothing leaks. */
-    size_t all = cfg->ndevices, keep = 0;
-    for (size_t i = 0; i < all; i++) {
-        if (!device_matches(a, &cfg->devices[i]))
-            continue;
-        tdot_device_t tmp = cfg->devices[keep];
-        cfg->devices[keep] = cfg->devices[i];
-        cfg->devices[i] = tmp;
-        keep++;
-    }
-    cfg->ndevices = keep;
     int rc = 1;
     char *forced_owned = NULL;
-    if (keep == 0 && a->device) {
+    char err[256];
+    tdot_config_t **cfgs = calloc(npaths, sizeof *cfgs);
+    size_t *all = calloc(npaths, sizeof *all); /* each config's own ndevices */
+    for (size_t c = 0; c < npaths; c++) {
+        cfgs[c] = tdot_config_load(paths[c], err, sizeof err);
+        if (!cfgs[c]) {
+            fprintf(stderr, "error: %s\n", err);
+            goto out;
+        }
+        all[c] = cfgs[c]->ndevices;
+    }
+    const tdot_config_t *const *view = (const tdot_config_t *const *)cfgs;
+
+    /* Restrict to the matching devices by moving them to the front of each
+     * config; ndevices is restored before the free so nothing leaks. */
+    size_t kept = 0;
+    for (size_t c = 0; c < npaths; c++) {
+        tdot_config_t *cfg = cfgs[c];
+        size_t keep = 0;
+        for (size_t i = 0; i < all[c]; i++) {
+            if (!device_matches(a, &cfg->devices[i]))
+                continue;
+            tdot_device_t tmp = cfg->devices[keep];
+            cfg->devices[keep] = cfg->devices[i];
+            cfg->devices[i] = tmp;
+            keep++;
+        }
+        cfg->ndevices = keep;
+        kept += keep;
+    }
+    if (kept == 0 && a->device) {
         fprintf(stderr, "error: no device matches '%s'\n", a->device);
         goto out;
     }
@@ -449,7 +599,7 @@ static int cmd_describe(const args_t *a) {
         forced = *forced_owned ? forced_owned : NULL;
     }
 
-    char *bad = tdot_param_invalid_keys(cfg, forced);
+    char *bad = tdot_param_invalid_keys_across(view, npaths, forced);
     if (bad) {
         fprintf(stderr, "error: parameter keys must match [A-Za-z0-9_]: %s\n",
                 bad);
@@ -461,24 +611,37 @@ static int cmd_describe(const args_t *a) {
      * shared with every other device type that speaks it. Declaring the device
      * type is what keeps them apart. */
     if (!forced) {
-        char *collisions = tdot_param_type_warnings(cfg);
+        char *collisions = tdot_param_type_warnings_across(view, npaths);
         if (collisions) {
             fprintf(stderr, "%s\n", collisions);
             free(collisions);
         }
-        char *untyped = tdot_param_untyped_devices(cfg);
-        if (untyped) {
-            fprintf(stderr,
-                    "warning: device(s) %s declare no `type`, so their parameter "
-                    "sets are named after the protocol ('%s_...') and collide "
-                    "with every other %s device type in the tenant; set `type` "
-                    "on the device or in its point library\n",
-                    untyped, cfg->protocol, cfg->protocol);
-            free(untyped);
+        /* One untyped-device warning per protocol, in the order the protocols
+         * first appear: such a device's sets are named after its protocol, so
+         * that is what it collides with. */
+        for (size_t c = 0; c < npaths; c++) {
+            const char *protocol = cfgs[c]->protocol;
+            bool seen = false;
+            for (size_t p = 0; p < c && !seen; p++)
+                seen = strcmp(cfgs[p]->protocol, protocol) == 0;
+            if (seen)
+                continue;
+            char *untyped =
+                tdot_param_untyped_devices_across(view, npaths, protocol);
+            if (untyped) {
+                fprintf(stderr,
+                        "warning: device(s) %s declare no `type`, so their "
+                        "parameter sets are named after the protocol ('%s_...') "
+                        "and collide with every other %s device type in the "
+                        "tenant; set `type` on the device or in its point "
+                        "library\n",
+                        untyped, protocol, protocol);
+                free(untyped);
+            }
         }
     }
 
-    cJSON *docs = tdot_c8y_dtm_definitions(cfg, forced);
+    cJSON *docs = tdot_c8y_dtm_definitions_across(view, npaths, forced);
     if (a->compact) {
         cJSON *doc;
         cJSON_ArrayForEach(doc, docs) {
@@ -496,8 +659,15 @@ static int cmd_describe(const args_t *a) {
 
 out:
     free(forced_owned);
-    cfg->ndevices = all;
-    tdot_config_free(cfg);
+    for (size_t c = 0; c < npaths; c++) {
+        if (!cfgs[c])
+            continue; /* not loaded: an earlier config failed */
+        cfgs[c]->ndevices = all[c];
+        tdot_config_free(cfgs[c]);
+    }
+    free(cfgs);
+    free(all);
+    free_paths(paths, npaths);
     return rc;
 }
 
@@ -548,5 +718,6 @@ int main(int argc, char **argv) {
     else
         usage();
     free(shifted);
+    free(a.configs);
     return rc;
 }

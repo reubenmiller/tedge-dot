@@ -70,11 +70,25 @@ bool tdot_param_is(const tdot_point_t *point, const tdot_set_naming_t *naming);
  * `forced` may be NULL. Caller frees. */
 char *tdot_param_invalid_keys(const tdot_config_t *cfg, const char *forced);
 
+/* The `_across` variants below take several configurations, in order, and are
+ * what the single-config functions wrap. One service runs every config in its
+ * directory, and a DTM identifier is tenant-wide: two files declaring the same
+ * device type share its sets, and two types folding to one name collide
+ * whichever files they are in. Mirrors the `*_across` functions of the Rust
+ * SDK's descriptor.rs. */
+char *tdot_param_invalid_keys_across(const tdot_config_t *const *cfgs,
+                                     size_t ncfgs, const char *forced);
+
 /* Names of the devices that expose parameters without declaring a `type`, so
  * their sets fall back to the protocol — which every other device type on that
  * protocol also falls back to. Joined with ", ", NULL when there are none;
  * `describe` warns about them. Caller frees. */
 char *tdot_param_untyped_devices(const tdot_config_t *cfg);
+
+/* The untyped devices of the configurations speaking `protocol`: per protocol,
+ * because the set such a device falls back to is named after it. */
+char *tdot_param_untyped_devices_across(const tdot_config_t *const *cfgs,
+                                        size_t ncfgs, const char *protocol);
 
 /* Warnings about the device types a configuration declares, '\n'-separated;
  * NULL when there are none. Same text as the Rust build's type_warnings(),
@@ -89,6 +103,8 @@ char *tdot_param_untyped_devices(const tdot_config_t *cfg);
  *
  * Devices that expose no parameters derive no set and are not reported. */
 char *tdot_param_type_warnings(const tdot_config_t *cfg);
+char *tdot_param_type_warnings_across(const tdot_config_t *const *cfgs,
+                                      size_t ncfgs);
 
 /* Cumulocity Digital Twin Manager property definitions — one per parameter set
  * — as a cJSON array. Each element is the request body of
@@ -97,6 +113,14 @@ char *tdot_param_type_warnings(const tdot_config_t *cfg);
  * on several devices are merged (the identifier is tenant-wide); for a key
  * defined twice the first definition wins. Caller cJSON_Delete()s the result. */
 cJSON *tdot_c8y_dtm_definitions(const tdot_config_t *cfg, const char *forced);
+
+/* The definitions of several configurations — every connector a service runs.
+ * A set declared in more than one of them is still ONE definition: keys merge
+ * across files (the first definition of a key wins), and the definition is
+ * described and tagged with the protocol of the configuration that declared
+ * the set first. */
+cJSON *tdot_c8y_dtm_definitions_across(const tdot_config_t *const *cfgs,
+                                       size_t ncfgs, const char *forced);
 
 #ifdef __cplusplus
 }

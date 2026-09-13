@@ -71,15 +71,21 @@ enum DescribeFormat {
 
 #[derive(Args)]
 struct DescribeArgs {
-    /// Path to the connector configuration file.
-    #[arg(short, long, default_value = DEFAULT_CONFIG)]
-    config: String,
+    /// Connector configuration files and/or directories to scan for `*.toml` configs, as for
+    /// `run`. The definitions cover every config found, with a set shared by several of them
+    /// rendered once.
+    configs: Vec<String>,
+    /// Connector configuration file or directory (same as the positional argument; repeat
+    /// for several). Defaults to /etc/tedge/plugins/ot when neither is given.
+    #[arg(short, long = "config", value_name = "PATH")]
+    config: Vec<String>,
     /// What to print.
     #[arg(short, long, value_enum, default_value_t = DescribeFormat::C8yDtm)]
     format: DescribeFormat,
-    /// Device name or wildcard pattern to restrict the output to.
-    #[arg(short, long, default_value = "*")]
-    device: String,
+    /// Device name or wildcard pattern to restrict the output to; it must match at least one
+    /// device. Default: every device.
+    #[arg(short, long)]
+    device: Option<String>,
     /// One parameter set for every point that does not name an absolute one, instead of the
     /// derived <type-or-protocol>_<group>_parameters. Must match the ot-parameter-state flow
     /// setting.
@@ -217,10 +223,10 @@ fn normalized_args() -> Vec<String> {
 }
 
 /// Combine the positional config paths with the `--config` flag values, falling back to the
-/// default config directory when neither is given.
-fn combined_config_args(args: &RunArgs) -> Vec<String> {
-    let mut paths = args.configs.clone();
-    paths.extend(args.config.iter().cloned());
+/// default config directory when neither is given. Shared by `run` and `describe`.
+fn combined_config_args(positional: &[String], flagged: &[String]) -> Vec<String> {
+    let mut paths = positional.to_vec();
+    paths.extend(flagged.iter().cloned());
     if paths.is_empty() {
         paths.push(DEFAULT_CONFIG_DIR.to_string());
     }
@@ -243,11 +249,13 @@ async fn shutdown_or_deadline(duration: Option<Duration>) {
 
 /// Run every discovered connector concurrently in this process (long-lived service).
 async fn run(args: RunArgs) -> ExitCode {
-    let config_args = combined_config_args(&args);
-    let configs = match discover_configs(&config_args) {
+    let config_args = combined_config_args(&args.configs, &args.config);
+    let configs = match discover_configs(&config_args)
+        .and_then(|configs| require_rereadable(&configs).map(|()| configs))
+    {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("error: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -436,8 +444,14 @@ async fn stall_watchdog(progress: runtime::Progress, limit: Duration) -> String 
     }
 }
 
-/// Expand the `run` arguments into concrete config files: directories contribute their `*.toml`
-/// entries (sorted), files are taken as-is, and duplicates are dropped.
+/// Expand config path arguments into concrete config files: directories contribute their `*.toml`
+/// regular files (sorted), anything else that exists is taken as-is (a file, or a pipe such as
+/// `-c <(generate-config)`), and a file named twice is kept once.
+///
+/// "Named twice" is judged by where the path resolves to, so the same file under two spellings
+/// (`dir` and `dir//a.toml`, or a symlink) is one config; the spelling it was first named by is
+/// what gets used and reported. `impl/c/src/main.c` (`collect_configs`) applies the same rules,
+/// which `describe-parity.sh` pins.
 fn discover_configs(args: &[String]) -> Result<Vec<PathBuf>, String> {
     let mut found = Vec::new();
     for arg in args {
@@ -451,15 +465,30 @@ fn discover_configs(args: &[String]) -> Result<Vec<PathBuf>, String> {
                 .collect();
             entries.sort();
             found.extend(entries);
-        } else if path.is_file() {
+        } else if path.exists() {
             found.push(path.to_path_buf());
         } else {
             return Err(format!("config path '{arg}' does not exist"));
         }
     }
     let mut seen = std::collections::HashSet::new();
-    found.retain(|p| seen.insert(p.clone()));
+    found.retain(|p| seen.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())));
     Ok(found)
+}
+
+/// `run` reads a connector's config again whenever it restarts the connector, which a pipe
+/// (`-c <(generate-config)`) cannot provide a second time: the first read would empty it and every
+/// restart after that fail. So `run` takes files and directories only; `describe`, which reads
+/// each config once, takes pipes too. The C build refuses the same paths.
+fn require_rereadable(configs: &[PathBuf]) -> Result<(), String> {
+    match configs.iter().find(|path| !path.is_file()) {
+        Some(path) => Err(format!(
+            "config path '{}' is not a regular file; `run` re-reads its configs, so it needs \
+             files or directories",
+            path.display()
+        )),
+        None => Ok(()),
+    }
 }
 
 /// Default log filter for the service: the most verbose `connector.log_level` across the
@@ -884,9 +913,24 @@ async fn cmd_write(args: WriteArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// Print the Cumulocity DTM definitions derived from a configuration.
+/// Print the Cumulocity DTM definitions derived from every connector configuration found.
+///
+/// One service runs every config in its directory and a DTM identifier is tenant-wide, so the
+/// definitions — and the warnings about them — are computed across all of the configs rather
+/// than per file: a set declared in several files is rendered once.
 fn cmd_describe(args: DescribeArgs) -> Result<(), String> {
-    let mut config = load_config(&args.config)?;
+    let paths = combined_config_args(&args.configs, &args.config);
+    let files = discover_configs(&paths)?;
+    if files.is_empty() {
+        return Err(format!(
+            "no connector configs (*.toml) found in {}",
+            paths.join(", ")
+        ));
+    }
+    let mut configs = files
+        .iter()
+        .map(|path| load_config(&path.display().to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
     // A blank `--set` means "none given", as an empty `default_set` does in the flow: an unset
     // variable in a provisioning script (`--set "$PARAM_SET"`) must not force every point into
     // a nameless set. The C build applies the same rule.
@@ -895,16 +939,18 @@ fn cmd_describe(args: DescribeArgs) -> Result<(), String> {
         .as_deref()
         .map(tedge_dot_sdk::descriptor::trim_c)
         .filter(|s| !s.is_empty());
-    if args.device != "*" {
-        config
-            .devices
-            .retain(|d| wildcard_match(&args.device, &d.name));
-        if config.devices.is_empty() {
-            return Err(format!("no device matches '{}'", args.device));
+    // A pattern that was given must match a device somewhere — `*` included, as in the C build:
+    // what decides is whether `-d` was given, not what it says.
+    if let Some(pattern) = &args.device {
+        for config in &mut configs {
+            config.devices.retain(|d| wildcard_match(pattern, &d.name));
+        }
+        if configs.iter().all(|config| config.devices.is_empty()) {
+            return Err(format!("no device matches '{pattern}'"));
         }
     }
     // Parameter ids become fragment keys on the device twin, so they must be plain identifiers.
-    let bad = tedge_dot_sdk::descriptor::invalid_keys(&config, forced);
+    let bad = tedge_dot_sdk::descriptor::invalid_keys_across(&configs, forced);
     if !bad.is_empty() {
         return Err(format!(
             "parameter keys must match [A-Za-z0-9_]: {}",
@@ -916,23 +962,34 @@ fn cmd_describe(args: DescribeArgs) -> Result<(), String> {
     if forced.is_none() {
         // Worded and shaped exactly like the C build's warning (impl/c/src/main.c): the two
         // CLIs are meant to be interchangeable, and `describe-parity.sh` compares stderr.
-        for warning in tedge_dot_sdk::descriptor::type_warnings(&config) {
+        for warning in tedge_dot_sdk::descriptor::type_warnings_across(&configs) {
             eprintln!("{warning}");
         }
-        let untyped = tedge_dot_sdk::descriptor::devices_without_type(&config);
-        if !untyped.is_empty() {
-            eprintln!(
-                "warning: device(s) {} declare no `type`, so their parameter sets are named \
-                 after the protocol ('{}_...') and collide with every other {} device type in \
-                 the tenant; set `type` on the device or in its point library",
-                untyped.join(", "),
-                config.connector.protocol,
-                config.connector.protocol
-            );
+        // One untyped-device warning per protocol, in the order the protocols first appear:
+        // such a device's sets are named after its protocol, so that is what it collides with.
+        let mut protocols: Vec<&str> = Vec::new();
+        for config in &configs {
+            if !protocols.contains(&config.connector.protocol.as_str()) {
+                protocols.push(&config.connector.protocol);
+            }
+        }
+        for protocol in protocols {
+            let untyped = tedge_dot_sdk::descriptor::untyped_devices_across(&configs, protocol);
+            if !untyped.is_empty() {
+                eprintln!(
+                    "warning: device(s) {} declare no `type`, so their parameter sets are named \
+                     after the protocol ('{protocol}_...') and collide with every other \
+                     {protocol} device type in the tenant; set `type` on the device or in its \
+                     point library",
+                    untyped.join(", "),
+                );
+            }
         }
     }
     let docs: Vec<serde_json::Value> = match args.format {
-        DescribeFormat::C8yDtm => tedge_dot_sdk::c8y_dtm_definitions(&config, forced),
+        DescribeFormat::C8yDtm => {
+            tedge_dot_sdk::descriptor::c8y_dtm_definitions_across(&configs, forced)
+        }
     };
     if args.compact {
         for doc in &docs {
@@ -1203,6 +1260,56 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// One file is one config however it is spelled (judged by where the path resolves to), a
+    /// hidden file named just `.toml` has no extension and is not a config, and a path that is
+    /// not a regular file — a pipe, `-c <(generate-config)` — is still taken. The C build's
+    /// `collect_configs` follows the same rules (pinned by `describe-parity.sh`).
+    #[test]
+    fn discover_configs_judges_files_not_spellings() {
+        let dir = std::env::temp_dir().join(format!("tedge-dot-spelling-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write(&dir, "a.toml", "");
+        write(&dir, ".toml", "");
+
+        let spelled = format!("{}//a.toml", dir.display());
+        let found = discover_configs(&[
+            spelled.clone(),
+            dir.display().to_string(),
+            format!("{}/./a.toml", dir.display()),
+        ])
+        .unwrap();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].as_os_str(), spelled.as_str(), "kept as first named");
+
+        #[cfg(unix)]
+        assert_eq!(
+            discover_configs(&["/dev/null".into()]).unwrap(),
+            vec![PathBuf::from("/dev/null")]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `run` re-reads its configs, so it refuses a path it could only read once (a pipe); a file
+    /// and a symlink to one are fine.
+    #[test]
+    fn run_refuses_a_config_it_cannot_read_again() {
+        let dir = std::env::temp_dir().join(format!("tedge-dot-rereadable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = write(&dir, "a.toml", "");
+        assert_eq!(require_rereadable(std::slice::from_ref(&file)), Ok(()));
+        #[cfg(unix)]
+        {
+            let link = dir.join("link.toml");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert_eq!(require_rereadable(&[link]), Ok(()));
+            let err = require_rereadable(&[PathBuf::from("/dev/null")]).unwrap_err();
+            assert!(err.contains("not a regular file"), "{err}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn discover_configs_rejects_missing_paths() {
         let err = discover_configs(&["/nonexistent/tedge-dot".into()]).unwrap_err();
@@ -1345,15 +1452,34 @@ protocol_address = { host = "127.0.0.2" }
             output: Output::Mqtt,
             duration: None,
         };
-        assert_eq!(combined_config_args(&args), vec!["a.toml", "b.toml"]);
+        assert_eq!(
+            combined_config_args(&args.configs, &args.config),
+            vec!["a.toml", "b.toml"]
+        );
+        assert_eq!(combined_config_args(&[], &[]), vec![DEFAULT_CONFIG_DIR]);
+    }
 
-        let args = RunArgs {
-            configs: vec![],
-            config: vec![],
-            output: Output::Mqtt,
-            duration: None,
+    /// `describe` takes the same paths as `run` and defaults to the same directory: the one the
+    /// packaged service runs, so its definitions cover every connector of that service.
+    #[test]
+    fn describe_takes_the_config_paths_run_does() {
+        let cli = Cli::parse_from(["tedge-dot", "describe", "a.toml", "-c", "dir", "-c", "b.toml"]);
+        let Command::Describe(args) = cli.command else {
+            panic!("not parsed as describe");
         };
-        assert_eq!(combined_config_args(&args), vec![DEFAULT_CONFIG_DIR]);
+        assert_eq!(
+            combined_config_args(&args.configs, &args.config),
+            vec!["a.toml", "dir", "b.toml"]
+        );
+
+        let cli = Cli::parse_from(["tedge-dot", "describe"]);
+        let Command::Describe(args) = cli.command else {
+            panic!("not parsed as describe");
+        };
+        assert_eq!(
+            combined_config_args(&args.configs, &args.config),
+            vec![DEFAULT_CONFIG_DIR]
+        );
     }
 
     #[test]

@@ -97,8 +97,15 @@ compare_run() {
     local name=$1 config=$2
     shift 2
     local rust_out c_out rust_rc=0 c_rc=0
-    rust_out=$("$rust_bin" describe -c "$config" --compact "$@" 2>"$rust_errs") || rust_rc=$?
-    c_out=$("$c_bin" describe -c "$config" --compact "$@" 2>"$c_errs") || c_rc=$?
+    if [ -n "${STDIN_FROM:-}" ]; then
+        # Each binary reads the file through its own pipe (`-c /dev/stdin`): a config that is
+        # not a regular file must be accepted, or refused, by both.
+        rust_out=$(cat "$STDIN_FROM" | "$rust_bin" describe -c "$config" --compact "$@" 2>"$rust_errs") || rust_rc=$?
+        c_out=$(cat "$STDIN_FROM" | "$c_bin" describe -c "$config" --compact "$@" 2>"$c_errs") || c_rc=$?
+    else
+        rust_out=$("$rust_bin" describe -c "$config" --compact "$@" 2>"$rust_errs") || rust_rc=$?
+        c_out=$("$c_bin" describe -c "$config" --compact "$@" 2>"$c_errs") || c_rc=$?
+    fi
     # A config one binary rejects and the other accepts is the divergence that matters most:
     # the same file must be usable, or unusable, from either package.
     if [ "$rust_rc" != "$c_rc" ]; then
@@ -146,6 +153,47 @@ if [ $# -eq 0 ]; then
         compare_run "folded-types-modbus.toml -d '$glob'" \
             "$repo/impl/c/ci/fixtures/folded-types-modbus.toml" -d "$glob"
     done
+    # Several configs at once — a directory, or `-c` repeated — render one list of definitions
+    # across all of them, with a set declared in several files merged into one, and the
+    # warnings computed over every file. The demo directory mixes all five protocols; the
+    # fixtures overlap on device names and types.
+    compare_run "demo/config (directory)" "$repo/demo/config"
+    compare_run "impl/c/ci/fixtures (directory)" "$repo/impl/c/ci/fixtures"
+    for glob in "d1" "nomatch"; do
+        compare_run "impl/c/ci/fixtures -d '$glob'" "$repo/impl/c/ci/fixtures" -d "$glob"
+    done
+    compare_run "untyped + folded-types (-c twice)" \
+        "$repo/impl/c/ci/fixtures/untyped-modbus.toml" \
+        -c "$repo/impl/c/ci/fixtures/folded-types-modbus.toml"
+    # The configs a package installs define no devices: rendering them is empty, not an error,
+    # while a `-d` pattern that was given — even `*` — must match a device.
+    compare_run "packaging/config (no devices)" "$repo/packaging/config"
+    compare_run "packaging/config -d '*' (no devices)" "$repo/packaging/config" -d '*'
+    # A directory and one of its own files name that file twice; it is rendered once.
+    compare_run "demo/config + demo/config/modbus.toml" "$repo/demo/config" \
+        -c "$repo/demo/config/modbus.toml"
+
+    # Which files a set of paths names has to agree as well, not only what the files say: a
+    # config read from a pipe, a hidden file named just `.toml` (no extension, so not a config —
+    # and not valid TOML here, so a build that loaded it would fail the run), one file under
+    # several spellings, and more paths than a fixed-size table would hold. A file loaded twice
+    # renders exactly like one loaded once, so the spellings case only pins that both builds
+    # accept them; the Rust unit test `discover_configs_judges_files_not_spellings` pins the
+    # de-duplication itself.
+    STDIN_FROM="$repo/demo/config/modbus.toml" compare_run "a config from a pipe (-c /dev/stdin)" /dev/stdin
+    paths_dir=$(mktemp -d)
+    trap 'rm -rf "$compare" "$rust_errs" "$c_errs" "$paths_dir"' EXIT
+    printf '[[[ not a config\n' > "$paths_dir/.toml"
+    cp "$repo/impl/c/ci/fixtures/untyped-modbus.toml" "$paths_dir/untyped.toml"
+    compare_run "a directory holding a bare .toml" "$paths_dir"
+    compare_run "one file under three spellings" "$paths_dir" \
+        -c "$paths_dir//untyped.toml" -c "$paths_dir/./untyped.toml"
+    many=()
+    for i in $(seq 1 70); do
+        cp "$repo/impl/c/ci/fixtures/untyped-modbus.toml" "$paths_dir/copy-$i.toml"
+        many+=(-c "$paths_dir/copy-$i.toml")
+    done
+    compare_run "70 config paths" "$paths_dir/copy-1.toml" "${many[@]:2}"
 fi
 
 if [ "$fail" != 0 ]; then

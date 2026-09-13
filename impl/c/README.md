@@ -270,6 +270,7 @@ cmake --build build
 # register once (needs no device, broker or protocol module):
 ./build/tedge-dot describe -c ../../demo/config/modbus.toml
 ./build/tedge-dot describe -c ../../demo/config/modbus.toml -d plc1 --compact
+./build/tedge-dot describe -c ../../demo/config    # every config in the directory, sets merged
 
 # tests
 ./build/tedge-dot-golden ../rust/crates/sdk/conformance/vectors.json
