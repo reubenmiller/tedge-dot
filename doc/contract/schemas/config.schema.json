@@ -93,11 +93,21 @@
       "pattern": "^[0-9]+(ms|s|m|h)$",
       "description": "Duration string, e.g. '500ms', '2s', '5m'."
     },
+    "disabled_device": {
+      "description": "A device switched off with enabled = false (§3.3). The connector reads nothing but its name and the names of its keys, so this schema requires nothing more of it; fields it does carry are still checked for shape.",
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "const": false
+        }
+      }
+    },
     "device": {
       "type": "object",
       "required": [
-        "name",
-        "protocol_address"
+        "name"
       ],
       "additionalProperties": false,
       "properties": {
@@ -113,6 +123,11 @@
         "protocol_address": {
           "type": "object",
           "description": "Protocol-specific device address. Shape defined by the connector spec."
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "false takes the device out of the configuration (§3.3): it is not connected, polled, described or answered for, and nothing else about it is read — not even its point libraries. The definition stays in the file (and a management command can switch it back on); its name still counts for uniqueness."
         },
         "poll_interval": {
           "$ref": "#/$defs/duration"
@@ -140,11 +155,31 @@
       },
       "allOf": [
         {
-          "description": "Without a points_from reference there is nothing for a point to inherit from, so every inline point must be complete (§3.4). With one, a point may be a patch and the connector applies these rules to the resolved point instead — which a static schema cannot check, since it would have to read the referenced files.",
+          "description": "A disabled device (enabled = false) is not loaded, so nothing but its name is required of it (§3.3); every other device needs an address.",
           "if": {
             "not": {
-              "required": [
-                "points_from"
+              "$ref": "#/$defs/disabled_device"
+            }
+          },
+          "then": {
+            "required": [
+              "protocol_address"
+            ]
+          }
+        },
+        {
+          "description": "Without a points_from reference there is nothing for a point to inherit from, so every inline point must be complete (§3.4). With one, a point may be a patch and the connector applies these rules to the resolved point instead — which a static schema cannot check, since it would have to read the referenced files. A disabled device is not loaded (§3.3), so its points are not checked either.",
+          "if": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "points_from"
+                  ]
+                },
+                {
+                  "$ref": "#/$defs/disabled_device"
+                }
               ]
             }
           },

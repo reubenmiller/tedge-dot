@@ -56,6 +56,141 @@ const CONNECTOR_ONLY_KEYS: [&str; 4] = ["connector", "mqtt", "connection", "devi
 /// address is not a meaningful thing to inherit.
 const DEEP_MERGED_KEYS: [&str; 2] = ["meta", "transform"];
 
+// The keys a contract-level table may carry (§3.3). Anything else is refused, with the nearest
+// known key suggested, so a misspelt setting — `polling_interval` for `poll_interval` — is
+// reported instead of silently doing nothing. The protocol-specific objects (`connection`,
+// `protocol_address`, `address`) and `meta` are free-form and not checked. The C loader
+// (impl/c/sdk/src/config.c `check_keys`) refuses the same keys with the same message.
+const TOP_KEYS: &[&str] = &["connector", "mqtt", "connection", "device"];
+const CONNECTOR_KEYS: &[&str] = &[
+    "protocol",
+    "service_name",
+    "poll_interval",
+    "log_level",
+    "operation_timeout",
+    "stall_timeout",
+    "point_library_path",
+];
+const MQTT_KEYS: &[&str] = &["host", "port"];
+const DEVICE_KEYS: &[&str] = &[
+    "name",
+    "type",
+    "protocol_address",
+    "poll_interval",
+    "default_mode",
+    "points_from",
+    "point",
+    "enabled",
+];
+const POINT_KEYS: &[&str] = &[
+    "id",
+    "mode",
+    "datatype",
+    "endianness",
+    "word_order",
+    "poll_interval",
+    "address",
+    "access",
+    "unit",
+    "name",
+    "description",
+    "transform",
+    "meta",
+    "subscribe",
+];
+const TRANSFORM_KEYS: &[&str] = &["multiplier", "divisor", "decimal_shift", "offset"];
+const LIBRARY_TOP_KEYS: &[&str] = &["library", "point"];
+const LIBRARY_KEYS: &[&str] = &["protocol", "type", "description", "version"];
+
+/// Refuse the keys of `table` that are not `known`, naming the table (`place`) and, for each, the
+/// known key it most resembles when one is close enough to be what was meant. Every unknown key
+/// is listed, in byte order, so the message does not depend on how a TOML parser orders a table
+/// (the C loader's keeps file order). A value that is not a table is left to the typed parse,
+/// whose message for a wrong shape is the canonical one.
+fn check_keys(table: &Value, known: &[&str], place: &str) -> Result<(), String> {
+    let Some(table) = table.as_table() else {
+        return Ok(());
+    };
+    let mut unknown: Vec<&str> = table
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !known.contains(key))
+        .collect();
+    unknown.sort_unstable();
+    match unknown.as_slice() {
+        [] => Ok(()),
+        [key] => Err(format!("unknown key '{key}' in {place}{}", suggestion(key, known))),
+        keys => {
+            let listed: Vec<String> = keys
+                .iter()
+                .map(|key| format!("'{key}'{}", suggestion(key, known)))
+                .collect();
+            Err(format!("unknown keys in {place}: {}", listed.join(", ")))
+        }
+    }
+}
+
+/// The suggestion for an unknown key: the nearest known key, when its edit distance is at most a
+/// third of the key's length (and at least 2), so `polling_interval` suggests `poll_interval`
+/// while an unrelated word suggests nothing. Ties go to the first known key.
+fn suggestion(key: &str, known: &[&str]) -> String {
+    let limit = (key.len() / 3).max(2);
+    known
+        .iter()
+        .map(|candidate| (edit_distance(key, candidate), *candidate))
+        .min_by_key(|(distance, _)| *distance)
+        .filter(|(distance, _)| *distance <= limit)
+        .map(|(_, candidate)| format!(" (did you mean '{candidate}'?)"))
+        .unwrap_or_default()
+}
+
+/// Levenshtein distance over bytes (as the C loader computes it).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let substitute = prev[j] + usize::from(ca != cb);
+            cur[j + 1] = substitute.min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// The keys of a connector configuration, table by table (§3.3). Checked on the document as
+/// written, before anything is resolved — a disabled device's keys included, since a misspelt
+/// key is a mistake whether or not the device is switched on.
+fn check_document(doc: &Value) -> Result<(), String> {
+    check_keys(doc, TOP_KEYS, "the top level")?;
+    if let Some(connector) = doc.get("connector") {
+        check_keys(connector, CONNECTOR_KEYS, "[connector]")?;
+    }
+    if let Some(mqtt) = doc.get("mqtt") {
+        check_keys(mqtt, MQTT_KEYS, "[mqtt]")?;
+    }
+    for device in doc.get("device").and_then(Value::as_array).into_iter().flatten() {
+        let name = device.get("name").and_then(Value::as_str).unwrap_or("<unnamed>");
+        check_keys(device, DEVICE_KEYS, &format!("device '{name}'"))?;
+        for point in device.get("point").and_then(Value::as_array).into_iter().flatten() {
+            check_point_keys(point)?;
+        }
+    }
+    Ok(())
+}
+
+/// The keys of one point definition, inline or in a point library, and of its transform.
+fn check_point_keys(point: &Value) -> Result<(), String> {
+    let id = point.get("id").and_then(Value::as_str).unwrap_or("<unnamed>");
+    check_keys(point, POINT_KEYS, &format!("point '{id}'"))?;
+    if let Some(transform) = point.get("transform") {
+        check_keys(transform, TRANSFORM_KEYS, &format!("the transform of point '{id}'"))?;
+    }
+    Ok(())
+}
+
 /// Load a connector configuration file, resolving every device's point-library references.
 ///
 /// Relative library paths resolve against the configuration file's own directory.
@@ -80,6 +215,7 @@ pub fn config_base_dir(config_path: &Path) -> &Path {
 /// directory; see [`config_base_dir`]).
 pub fn resolve(text: &str, base_dir: &Path) -> Result<ConnectorConfig, String> {
     let mut doc: Value = toml::from_str(text).map_err(|e| format!("failed to parse config: {e}"))?;
+    check_document(&doc)?;
     expand(&mut doc, base_dir)?;
     doc.try_into()
         .map_err(|e: toml::de::Error| format!("failed to parse config: {e}"))
@@ -112,6 +248,7 @@ fn expand(doc: &mut Value, base_dir: &Path) -> Result<(), String> {
     // "was this reference already here" ambiguous for the management guard.
     let mut seen: Vec<&str> = Vec::new();
     let mut normalised: Vec<(usize, String)> = Vec::new();
+    let mut disabled: Vec<usize> = Vec::new();
     for (index, device) in devices.iter().enumerate() {
         let Some(name) = device.get("name").and_then(Value::as_str) else {
             continue; // a device without a name is the typed parse's error to report
@@ -120,6 +257,19 @@ fn expand(doc: &mut Value, base_dir: &Path) -> Result<(), String> {
             return Err(format!("device '{name}' is defined more than once"));
         }
         seen.push(name);
+        // `enabled = false` (§3.3) takes the device out of the configuration before anything else
+        // about it is read — its type, its address, its point libraries — so a config can carry a
+        // ready-made device switched off, even one naming a library that is not installed yet.
+        // Its name still counted above: switching it on must not produce a duplicate.
+        match device.get("enabled") {
+            None | Some(Value::Boolean(true)) => {}
+            Some(Value::Boolean(false)) => {
+                tracing::info!(device = %name, "device is disabled (enabled = false); not loaded");
+                disabled.push(index);
+                continue;
+            }
+            Some(_) => return Err(format!("device '{name}': enabled must be true or false")),
+        }
         // Checked here rather than left to the typed parse, because an empty string would
         // otherwise be accepted as a type and silently behave like an absent one — and the C
         // loader must reject exactly the same files as this one.
@@ -139,6 +289,10 @@ fn expand(doc: &mut Value, base_dir: &Path) -> Result<(), String> {
         if let Some(table) = devices[index].as_table_mut() {
             table.insert("type".to_string(), Value::String(device_type));
         }
+    }
+    // Last in, first out, so the indices still to remove stay valid.
+    for index in disabled.into_iter().rev() {
+        devices.remove(index);
     }
 
     let mut cache: HashMap<PathBuf, Library> = HashMap::new();
@@ -436,6 +590,12 @@ fn read_library(path: &Path, protocol: &str) -> Result<Library, String> {
              section); a point library holds only [library] and [[point]]"
         ));
     }
+    // The known keys (§3.3), after the check above: a connector configuration pointed at by
+    // mistake deserves that message rather than "unknown key 'connector'".
+    check_keys(&doc, LIBRARY_TOP_KEYS, &format!("point library '{where_}'"))?;
+    if let Some(library) = table.get("library") {
+        check_keys(library, LIBRARY_KEYS, &format!("[library] of point library '{where_}'"))?;
+    }
     let device_type = table
         .get("library")
         .and_then(|l| l.get("type"))
@@ -481,6 +641,7 @@ fn read_library(path: &Path, protocol: &str) -> Result<Library, String> {
     // order to apply and the second definition would silently win.
     let mut seen: Vec<&str> = Vec::new();
     for point in points {
+        check_point_keys(point).map_err(|e| format!("point library '{where_}': {e}"))?;
         let id = point
             .get("id")
             .and_then(Value::as_str)
@@ -951,6 +1112,144 @@ protocol_address = { transport = "tcp", host = "10.0.0.1", port = 502, unit_id =
         let cfg = resolve(text, dir.path()).unwrap();
         assert!(cfg.devices[0].points_from.is_empty());
         assert_eq!(cfg.devices[0].points.len(), 1);
+    }
+
+    /// `enabled = false` (§3.3) takes a device out of the configuration before anything else
+    /// about it is read. Mirrors `check_disabled_devices` in impl/c/tests/config.c.
+    #[test]
+    fn a_disabled_device_is_left_out_without_resolving_its_libraries() {
+        let dir = Dir::new("disabled");
+        let text = format!(
+            r#"
+[connector]
+protocol = "modbus"
+point_library_path = ["{}"]
+
+[[device]]
+name             = "plc-1"
+enabled          = true
+protocol_address = {{ transport = "tcp", host = "10.0.0.1", port = 502, unit_id = 1 }}
+
+  [[device.point]]
+  id       = "only"
+  datatype = "uint16"
+  address  = {{ table = "holding", address = 1, count = 1 }}
+
+# Nothing about it is valid beyond its name, and nothing has to be.
+[[device]]
+name        = "plc-2"
+enabled     = false
+type        = ""
+points_from = ["not-installed"]
+"#,
+            dir.path().display()
+        );
+        let cfg = resolve(&text, dir.path()).unwrap();
+        let names: Vec<&str> = cfg.devices.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["plc-1"]);
+    }
+
+    #[test]
+    fn enabled_must_be_a_boolean_and_disabled_names_still_count() {
+        let dir = Dir::new("enabled-shape");
+        let device =
+            |name: &str, extra: &str| format!("[[device]]\nname = \"{name}\"\n{extra}\nprotocol_address = {{ unit_id = 1 }}\n");
+        let err = resolve(
+            &format!("[connector]\nprotocol = \"modbus\"\n{}", device("plc-1", "enabled = \"no\"")),
+            dir.path(),
+        )
+        .unwrap_err();
+        assert!(err.contains("enabled must be true or false"), "{err}");
+
+        // Switching the disabled one on would make two devices of one name.
+        let err = resolve(
+            &format!(
+                "[connector]\nprotocol = \"modbus\"\n{}{}",
+                device("plc-1", ""),
+                device("plc-1", "enabled = false")
+            ),
+            dir.path(),
+        )
+        .unwrap_err();
+        assert!(err.contains("defined more than once"), "{err}");
+    }
+
+    /// A key the contract does not define is refused (§3.3), naming the table and — when one is
+    /// close enough to be what was meant — the known key: `polling_interval` must not be accepted
+    /// and silently ignored. Mirrors `check_unknown_keys` in impl/c/tests/config.c.
+    #[test]
+    fn unknown_keys_are_refused_with_the_key_they_resemble() {
+        let dir = Dir::new("unknown-keys");
+        let config = |connector: &str, device: &str, point: &str| {
+            format!(
+                "[connector]\nprotocol = \"modbus\"\n{connector}\n\
+                 [[device]]\nname = \"plc-1\"\nprotocol_address = {{ unit_id = 1 }}\n{device}\n\
+                 [[device.point]]\nid = \"t\"\ndatatype = \"uint16\"\naddress = {{ address = 1 }}\n{point}\n"
+            )
+        };
+        let refused = |text: String| resolve(&text, dir.path()).unwrap_err();
+
+        assert_eq!(
+            refused(config("", "polling_interval = \"10s\"", "")),
+            "unknown key 'polling_interval' in device 'plc-1' (did you mean 'poll_interval'?)"
+        );
+        assert_eq!(
+            refused(config("log_levle = \"debug\"", "", "")),
+            "unknown key 'log_levle' in [connector] (did you mean 'log_level'?)"
+        );
+        assert_eq!(
+            refused(config("", "", "datatyp = \"uint16\"")),
+            "unknown key 'datatyp' in point 't' (did you mean 'datatype'?)"
+        );
+        assert_eq!(
+            refused(config("", "", "transform = { multiplyer = 2 }")),
+            "unknown key 'multiplyer' in the transform of point 't' (did you mean 'multiplier'?)"
+        );
+        assert_eq!(
+            refused(format!("{}[mqqt]\nhost = \"broker\"\n", config("", "", ""))),
+            "unknown key 'mqqt' in the top level (did you mean 'mqtt'?)"
+        );
+        // Nothing close enough to be what was meant: no suggestion.
+        assert_eq!(
+            refused(config("", "colour = \"red\"", "")),
+            "unknown key 'colour' in device 'plc-1'"
+        );
+        // A switched-off device's keys are checked too: a misspelt key is a mistake either way.
+        assert_eq!(
+            refused(config("", "enabled = false\nenabeld = true", "")),
+            "unknown key 'enabeld' in device 'plc-1' (did you mean 'enabled'?)"
+        );
+        // Every unknown key of a table is listed, in byte order whatever the file order and
+        // whether the value is a scalar or a table, so both loaders name the same keys.
+        assert_eq!(
+            refused(config("", "zeta = 1\npolling_interval = \"10s\"\nalpha_tbl = { a = 1 }", "")),
+            "unknown keys in device 'plc-1': 'alpha_tbl', \
+             'polling_interval' (did you mean 'poll_interval'?), 'zeta'"
+        );
+        // The free-form objects are not checked.
+        resolve(
+            &config("[connection]\nwhatever = 1", "", "meta = { anything = 1 }"),
+            dir.path(),
+        )
+        .expect("connection, protocol_address, address and meta are free-form");
+    }
+
+    #[test]
+    fn unknown_keys_in_a_point_library_are_refused() {
+        let dir = Dir::new("unknown-library-keys");
+        dir.write(
+            "modbus/acme.toml",
+            "[library]\nprotocol = \"modbus\"\nvendor = \"acme\"\n\n[[point]]\nid = \"t\"\naddress = {}\n",
+        );
+        let err = resolve_in(dir.path(), "\"acme\"", "").unwrap_err();
+        assert!(err.contains("unknown key 'vendor' in [library] of point library"), "{err}");
+
+        dir.write(
+            "modbus/acme.toml",
+            "[library]\nprotocol = \"modbus\"\n\n[[point]]\nid = \"t\"\naddress = {}\nunits = \"K\"\n",
+        );
+        let err = resolve_in(dir.path(), "\"acme\"", "").unwrap_err();
+        assert!(err.contains("unknown key 'units' in point 't' (did you mean 'unit'?)"), "{err}");
     }
 
     #[test]

@@ -1190,7 +1190,126 @@ static void check_watchdog_period(void) {
           tdot_runtime_watchdog_period(loose, 1));
 }
 
+/* `enabled = false` (contract §3.3) takes a device out of the configuration
+ * before anything else about it is read, but its name still counts. Mirrors
+ * library.rs::a_disabled_device_is_left_out_without_resolving_its_libraries and
+ * enabled_must_be_a_boolean_and_disabled_names_still_count. */
+static void check_disabled_devices(void) {
+    scratch_t s;
+    scratch_init(&s);
+    char body[2048];
+    snprintf(body, sizeof body,
+             "[connector]\nprotocol = \"modbus\"\npoint_library_path = [\"%s\"]\n"
+             "\n[[device]]\nname = \"plc-1\"\nenabled = true\n"
+             "protocol_address = { transport = \"tcp\", host = \"10.0.0.1\", port = 502, "
+             "unit_id = 1 }\n"
+             "\n  [[device.point]]\n  id = \"only\"\n  datatype = \"uint16\"\n"
+             "  address = { table = \"holding\", address = 1, count = 1 }\n"
+             /* Nothing about it is valid beyond its name, and nothing has to be. */
+             "\n[[device]]\nname = \"plc-2\"\nenabled = false\ntype = \"\"\n"
+             "points_from = [\"not-installed\"]\n",
+             s.dir);
+    write_file(&s, "etc/modbus.toml", body);
+    char err[256] = "";
+    tdot_config_t *cfg = tdot_config_load(scratch_path(&s, "etc/modbus.toml"), err, sizeof err);
+    CHECK(cfg != NULL, "a config with a disabled device must load: %s", err);
+    if (cfg) {
+        CHECK(cfg->ndevices == 1 && strcmp(cfg->devices[0].name, "plc-1") == 0,
+              "only the enabled device is loaded (got %zu device(s))", cfg->ndevices);
+        CHECK(tdot_config_device(cfg, "plc-2") == NULL, "the disabled device is not loaded");
+        tdot_config_free(cfg);
+    }
+
+    const char *not_bool =
+        "[connector]\nprotocol = \"modbus\"\n"
+        "\n[[device]]\nname = \"plc-1\"\nenabled = \"no\"\n"
+        "protocol_address = { unit_id = 1 }\n";
+    check_body_rejected("enabled as a string", &s, not_bool, "enabled must be true or false");
+
+    const char *duplicate =
+        "[connector]\nprotocol = \"modbus\"\n"
+        "\n[[device]]\nname = \"plc-1\"\n"
+        "protocol_address = { unit_id = 1 }\n"
+        "\n[[device]]\nname = \"plc-1\"\nenabled = false\n";
+    check_body_rejected("a disabled device named like an enabled one", &s, duplicate,
+                        "defined more than once");
+    scratch_free(&s);
+}
+
+/* A key the contract does not define is refused (contract §3.3), naming the
+ * table and, when one is close enough to be what was meant, the key it
+ * resembles. Mirrors library.rs::unknown_keys_are_refused_with_the_key_they_resemble
+ * and unknown_keys_in_a_point_library_are_refused, messages included. */
+static void check_unknown_keys(void) {
+    scratch_t s;
+    scratch_init(&s);
+    static const struct {
+        const char *what, *connector, *device, *point, *tail, *message;
+    } cases[] = {
+        {"a device key", "", "polling_interval = \"10s\"\n", "", "",
+         "unknown key 'polling_interval' in device 'plc-1' (did you mean 'poll_interval'?)"},
+        {"a connector key", "log_levle = \"debug\"\n", "", "", "",
+         "unknown key 'log_levle' in [connector] (did you mean 'log_level'?)"},
+        {"a point key", "", "", "datatyp = \"uint16\"\n", "",
+         "unknown key 'datatyp' in point 't' (did you mean 'datatype'?)"},
+        {"a transform key", "", "", "transform = { multiplyer = 2 }\n", "",
+         "unknown key 'multiplyer' in the transform of point 't' (did you mean 'multiplier'?)"},
+        {"a top-level key", "", "", "", "[mqqt]\nhost = \"broker\"\n",
+         "unknown key 'mqqt' in the top level (did you mean 'mqtt'?)"},
+        {"a key like none", "", "colour = \"red\"\n", "", "",
+         "unknown key 'colour' in device 'plc-1'"},
+        {"a disabled device's key", "", "enabled = false\nenabeld = true\n", "", "",
+         "unknown key 'enabeld' in device 'plc-1' (did you mean 'enabled'?)"},
+        /* Every unknown key is listed, in byte order: tomlc99 keeps file order
+         * and puts tables last, the Rust parser sorts. */
+        {"several keys", "",
+         "zeta = 1\npolling_interval = \"10s\"\nalpha_tbl = { a = 1 }\n", "", "",
+         "unknown keys in device 'plc-1': 'alpha_tbl', "
+         "'polling_interval' (did you mean 'poll_interval'?), 'zeta'"},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
+        char body[1024];
+        snprintf(body, sizeof body,
+                 "[connector]\nprotocol = \"modbus\"\n%s"
+                 "[[device]]\nname = \"plc-1\"\nprotocol_address = { unit_id = 1 }\n%s"
+                 "[[device.point]]\nid = \"t\"\ndatatype = \"uint16\"\n"
+                 "address = { address = 1 }\n%s%s",
+                 cases[i].connector, cases[i].device, cases[i].point, cases[i].tail);
+        check_body_rejected(cases[i].what, &s, body, cases[i].message);
+    }
+
+    /* The free-form objects are not checked. */
+    write_file(&s, "etc/modbus.toml",
+               "[connector]\nprotocol = \"modbus\"\n[connection]\nwhatever = 1\n"
+               "[[device]]\nname = \"plc-1\"\nprotocol_address = { unit_id = 1 }\n"
+               "[[device.point]]\nid = \"t\"\ndatatype = \"uint16\"\n"
+               "address = { address = 1 }\nmeta = { anything = 1 }\n");
+    char err[256] = "";
+    tdot_config_t *cfg = tdot_config_load(scratch_path(&s, "etc/modbus.toml"), err, sizeof err);
+    CHECK(cfg != NULL, "connection, protocol_address, address and meta are free-form: %s", err);
+    tdot_config_free(cfg);
+
+    /* A point library's keys are checked too. */
+    write_file(&s, "modbus/acme.toml",
+               "[library]\nprotocol = \"modbus\"\nvendor = \"acme\"\n\n"
+               "[[point]]\nid = \"t\"\naddress = {}\n");
+    cfg = load_with_libs(&s, "\"acme\"", "", err, sizeof err);
+    CHECK(!cfg && strstr(err, "unknown key 'vendor' in [library] of point library"),
+          "a [library] key must be refused, got: %s", cfg ? "<loaded>" : err);
+    tdot_config_free(cfg);
+    write_file(&s, "modbus/acme.toml",
+               "[library]\nprotocol = \"modbus\"\n\n"
+               "[[point]]\nid = \"t\"\naddress = {}\nunits = \"K\"\n");
+    cfg = load_with_libs(&s, "\"acme\"", "", err, sizeof err);
+    CHECK(!cfg && strstr(err, "unknown key 'units' in point 't' (did you mean 'unit'?)"),
+          "a library point key must be refused, got: %s", cfg ? "<loaded>" : err);
+    tdot_config_free(cfg);
+    scratch_free(&s);
+}
+
 int main(void) {
+    check_unknown_keys();
+    check_disabled_devices();
     check_timeout_defaults();
     check_service_name_default();
     check_timeouts_are_parsed();

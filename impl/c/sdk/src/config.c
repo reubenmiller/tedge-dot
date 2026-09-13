@@ -3,12 +3,204 @@
 
 #include <ctype.h>
 #include <limits.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
 #include "cjson/cJSON.h"
+
+/* ---- known keys (contract §3.3) -------------------------------------------
+ * The keys a contract-level table may carry. Anything else is refused, with the
+ * nearest known key suggested, so a misspelt setting -- `polling_interval` for
+ * `poll_interval` -- is reported instead of silently doing nothing. The
+ * protocol-specific objects (`connection`, `protocol_address`, `address`) and
+ * `meta` are free-form and not checked. The Rust loader
+ * (impl/rust/crates/sdk/src/library.rs `check_keys`) refuses the same keys with
+ * the same message. */
+static const char *const TOP_KEYS[] = {"connector", "mqtt", "connection", "device", NULL};
+static const char *const CONNECTOR_KEYS[] = {
+    "protocol",          "service_name",  "poll_interval",      "log_level",
+    "operation_timeout", "stall_timeout", "point_library_path", NULL};
+static const char *const MQTT_KEYS[] = {"host", "port", NULL};
+static const char *const DEVICE_KEYS[] = {
+    "name",         "type",        "protocol_address", "poll_interval",
+    "default_mode", "points_from", "point",            "enabled",
+    NULL};
+static const char *const POINT_KEYS[] = {
+    "id",      "mode",   "datatype", "endianness",  "word_order",
+    "poll_interval", "address", "access", "unit", "name", "description",
+    "transform", "meta", "subscribe", NULL};
+static const char *const TRANSFORM_KEYS[] = {"multiplier", "divisor",
+                                             "decimal_shift", "offset", NULL};
+static const char *const LIBRARY_TOP_KEYS[] = {"library", "point", NULL};
+static const char *const LIBRARY_KEYS[] = {"protocol", "type", "description",
+                                           "version", NULL};
+
+/* Levenshtein distance over bytes (as the Rust loader computes it). */
+static size_t edit_distance(const char *a, const char *b) {
+    size_t la = strlen(a), lb = strlen(b);
+    size_t *prev = malloc((lb + 1) * sizeof *prev);
+    size_t *cur = malloc((lb + 1) * sizeof *cur);
+    if (!prev || !cur) {
+        free(prev);
+        free(cur);
+        return (size_t)-1;
+    }
+    for (size_t j = 0; j <= lb; j++)
+        prev[j] = j;
+    for (size_t i = 1; i <= la; i++) {
+        cur[0] = i;
+        for (size_t j = 1; j <= lb; j++) {
+            size_t best = prev[j - 1] + (a[i - 1] != b[j - 1]);
+            if (prev[j] + 1 < best)
+                best = prev[j] + 1;
+            if (cur[j - 1] + 1 < best)
+                best = cur[j - 1] + 1;
+            cur[j] = best;
+        }
+        size_t *swap = prev;
+        prev = cur;
+        cur = swap;
+    }
+    size_t distance = prev[lb];
+    free(prev);
+    free(cur);
+    return distance;
+}
+
+/* The known key an unknown one most resembles, when it is close enough to be
+ * what was meant: within an edit distance of a third of the key's length, and
+ * at least 2. Ties go to the first known key. NULL when none is. */
+static const char *nearest_key(const char *key, const char *const *known) {
+    const char *nearest = NULL;
+    size_t nearest_distance = 0;
+    for (const char *const *k = known; *k; k++) {
+        size_t distance = edit_distance(key, *k);
+        if (!nearest || distance < nearest_distance) {
+            nearest = *k;
+            nearest_distance = distance;
+        }
+    }
+    size_t limit = strlen(key) / 3 < 2 ? 2 : strlen(key) / 3;
+    return nearest && nearest_distance <= limit ? nearest : NULL;
+}
+
+static int compare_keys(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+/* Append to `err` as snprintf would, never past `errlen`. */
+static void append(char *err, size_t errlen, size_t *used, const char *fmt, ...) {
+    if (*used >= errlen)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(err + *used, errlen - *used, fmt, ap);
+    va_end(ap);
+    *used = n < 0 ? errlen : *used + (size_t)n;
+}
+
+/* Refuse the keys of `tbl` that are not in `known` (NULL-terminated), naming
+ * the table (`place`) and, for each, the known key it most resembles (see
+ * nearest_key). Every unknown key is listed, in byte order, as the Rust loader
+ * lists them: tomlc99 keeps file order, the Rust parser sorts. Returns 0, or -1
+ * with `err` filled. */
+static int check_keys(toml_table_t *tbl, const char *const *known,
+                      const char *place, char *err, size_t errlen) {
+    int nkeys = 0;
+    while (toml_key_in(tbl, nkeys))
+        nkeys++;
+    const char **unknown = malloc((size_t)(nkeys ? nkeys : 1) * sizeof *unknown);
+    if (!unknown) {
+        snprintf(err, errlen, "out of memory checking the keys of %s", place);
+        return -1;
+    }
+    size_t n = 0;
+    for (int i = 0; i < nkeys; i++) {
+        const char *key = toml_key_in(tbl, i);
+        bool is_known = false;
+        for (const char *const *k = known; *k && !is_known; k++)
+            is_known = strcmp(*k, key) == 0;
+        if (!is_known)
+            unknown[n++] = key;
+    }
+    if (n == 0) {
+        free(unknown);
+        return 0;
+    }
+    qsort(unknown, n, sizeof *unknown, compare_keys);
+    size_t used = 0;
+    if (n == 1)
+        append(err, errlen, &used, "unknown key '%s' in %s", unknown[0], place);
+    else
+        append(err, errlen, &used, "unknown keys in %s: ", place);
+    for (size_t i = 0; i < n; i++) {
+        const char *nearest = nearest_key(unknown[i], known);
+        if (n > 1)
+            append(err, errlen, &used, "%s'%s'", i ? ", " : "", unknown[i]);
+        if (nearest)
+            append(err, errlen, &used, " (did you mean '%s'?)", nearest);
+    }
+    free(unknown);
+    return -1;
+}
+
+/* The keys of one point definition, inline or in a point library, and of its
+ * transform. */
+static int check_point_keys(toml_table_t *pt, char *err, size_t errlen) {
+    toml_datum_t id = toml_string_in(pt, "id");
+    char place[256];
+    snprintf(place, sizeof place, "point '%s'", id.ok ? id.u.s : "<unnamed>");
+    int rc = check_keys(pt, POINT_KEYS, place, err, errlen);
+    toml_table_t *transform = toml_table_in(pt, "transform");
+    if (rc == 0 && transform) {
+        snprintf(place, sizeof place, "the transform of point '%s'",
+                 id.ok ? id.u.s : "<unnamed>");
+        rc = check_keys(transform, TRANSFORM_KEYS, place, err, errlen);
+    }
+    if (id.ok)
+        free(id.u.s);
+    return rc;
+}
+
+/* The keys of a connector configuration, table by table (§3.3): the top level,
+ * [connector], [mqtt], every device -- a disabled one included, since a
+ * misspelt key is a mistake whether or not the device is switched on -- and
+ * its inline points. Mirrors `check_document` in the Rust loader. */
+static int check_document_keys(toml_table_t *root, char *err, size_t errlen) {
+    if (check_keys(root, TOP_KEYS, "the top level", err, errlen) != 0)
+        return -1;
+    toml_table_t *conn = toml_table_in(root, "connector");
+    if (conn && check_keys(conn, CONNECTOR_KEYS, "[connector]", err, errlen) != 0)
+        return -1;
+    toml_table_t *mqtt = toml_table_in(root, "mqtt");
+    if (mqtt && check_keys(mqtt, MQTT_KEYS, "[mqtt]", err, errlen) != 0)
+        return -1;
+    toml_array_t *devices = toml_array_in(root, "device");
+    int ndevices = devices ? toml_array_nelem(devices) : 0;
+    for (int i = 0; i < ndevices; i++) {
+        toml_table_t *dt = toml_table_at(devices, i);
+        if (!dt)
+            continue;
+        toml_datum_t name = toml_string_in(dt, "name");
+        char place[256];
+        snprintf(place, sizeof place, "device '%s'", name.ok ? name.u.s : "<unnamed>");
+        if (name.ok)
+            free(name.u.s);
+        if (check_keys(dt, DEVICE_KEYS, place, err, errlen) != 0)
+            return -1;
+        toml_array_t *points = toml_array_in(dt, "point");
+        int npoints = points ? toml_array_nelem(points) : 0;
+        for (int j = 0; j < npoints; j++) {
+            toml_table_t *pt = toml_table_at(points, j);
+            if (pt && check_point_keys(pt, err, errlen) != 0)
+                return -1;
+        }
+    }
+    return 0;
+}
 
 static char *dup_or(const char *s, const char *dflt) {
     return strdup(s ? s : dflt);
@@ -495,7 +687,17 @@ static toml_array_t *library_points(toml_table_t *root, const char *path,
             return NULL;
         }
     }
+    /* The known keys (§3.3), after the check above: a connector configuration
+     * pointed at by mistake deserves that message rather than "unknown key
+     * 'connector'". */
+    char place[PATH_MAX + 64];
+    snprintf(place, sizeof place, "point library '%s'", path);
+    if (check_keys(root, LIBRARY_TOP_KEYS, place, err, errlen) != 0)
+        return NULL;
     toml_table_t *library = toml_table_in(root, "library");
+    snprintf(place, sizeof place, "[library] of point library '%s'", path);
+    if (library && check_keys(library, LIBRARY_KEYS, place, err, errlen) != 0)
+        return NULL;
     toml_datum_t d = library ? toml_string_in(library, "protocol")
                              : (toml_datum_t){.ok = 0};
     if (!d.ok) {
@@ -524,9 +726,15 @@ static toml_array_t *library_points(toml_table_t *root, const char *path,
     int n = toml_array_nelem(points);
     char **ids = calloc(n ? (size_t)n : 1, sizeof *ids);
     const char *dup = NULL;
-    bool missing_id = false;
-    for (int i = 0; i < n && !dup && !missing_id; i++) {
+    bool missing_id = false, bad_key = false;
+    for (int i = 0; i < n && !dup && !missing_id && !bad_key; i++) {
         toml_table_t *pt = toml_table_at(points, i);
+        char why[512];
+        if (pt && check_point_keys(pt, why, sizeof why) != 0) {
+            snprintf(err, errlen, "point library '%s': %s", path, why);
+            bad_key = true;
+            break;
+        }
         toml_datum_t id = pt ? toml_string_in(pt, "id") : (toml_datum_t){.ok = 0};
         if (!id.ok) {
             missing_id = true;
@@ -546,7 +754,7 @@ static toml_array_t *library_points(toml_table_t *root, const char *path,
     for (int i = 0; i < n; i++)
         free(ids[i]);
     free(ids);
-    return (dup || missing_id) ? NULL : points;
+    return (dup || missing_id || bad_key) ? NULL : points;
 }
 
 /* True when `key` is present in `tbl` under any TOML type. `toml_raw_in` only
@@ -786,6 +994,14 @@ tdot_config_t *tdot_config_load(const char *path, char *err, size_t errlen) {
     cfg->root = root;
     cfg->path = strdup(path);
 
+    /* The known keys (§3.3), on the document as written and before anything is
+     * read from it, in the order the Rust loader checks them. */
+    char why[512];
+    if (check_document_keys(root, why, sizeof why) != 0) {
+        snprintf(err, errlen, "%s: %s", path, why);
+        goto fail;
+    }
+
     toml_table_t *conn = toml_table_in(root, "connector");
     if (!conn) {
         snprintf(err, errlen, "%s: missing [connector] section", path);
@@ -904,27 +1120,52 @@ tdot_config_t *tdot_config_load(const char *path, char *err, size_t errlen) {
     search_path_free(&probe);
 
     toml_array_t *devices = toml_array_in(root, "device");
-    cfg->ndevices = devices ? (size_t)toml_array_nelem(devices) : 0;
-    cfg->devices = calloc(cfg->ndevices ? cfg->ndevices : 1,
-                          sizeof(tdot_device_t));
-    for (size_t i = 0; i < cfg->ndevices; i++) {
+    size_t ndeclared = devices ? (size_t)toml_array_nelem(devices) : 0;
+    cfg->ndevices = 0; /* counts the enabled devices as they are loaded */
+    cfg->devices = calloc(ndeclared ? ndeclared : 1, sizeof(tdot_device_t));
+    for (size_t i = 0; i < ndeclared; i++) {
         toml_table_t *dt = toml_table_at(devices, (int)i);
-        tdot_device_t *dev = &cfg->devices[i];
         d = toml_string_in(dt, "name");
         if (!d.ok) {
             snprintf(err, errlen, "%s: device #%zu missing name", path, i + 1);
             goto fail;
         }
-        dev->name = d.u.s;
         /* §3.3: unique within a connector. Two same-named devices publish over
          * each other on one entity's topics, and they make "was this reference
-         * already here" ambiguous for the management guard's before-lookup. */
-        for (size_t k = 0; k < i; k++)
-            if (cfg->devices[k].name && strcmp(cfg->devices[k].name, dev->name) == 0) {
+         * already here" ambiguous for the management guard's before-lookup.
+         * Checked against every declared device, disabled ones included:
+         * switching one on must not produce a duplicate. */
+        for (size_t k = 0; k < i; k++) {
+            toml_datum_t other = toml_string_in(toml_table_at(devices, (int)k), "name");
+            bool same = other.ok && strcmp(other.u.s, d.u.s) == 0;
+            if (other.ok)
+                free(other.u.s);
+            if (same) {
                 snprintf(err, errlen, "%s: device '%s' is defined more than once", path,
-                         dev->name);
+                         d.u.s);
+                free(d.u.s);
                 goto fail;
             }
+        }
+        /* `enabled = false` (§3.3) takes the device out of the configuration
+         * before anything else about it is read -- its type, its address, its
+         * point libraries -- so a config can carry a ready-made device switched
+         * off, even one naming a library that is not installed yet. */
+        if (key_present(dt, "enabled")) {
+            toml_datum_t enabled = toml_bool_in(dt, "enabled");
+            if (!enabled.ok) {
+                snprintf(err, errlen, "%s: device %s: enabled must be true or false",
+                         path, d.u.s);
+                free(d.u.s);
+                goto fail;
+            }
+            if (!enabled.u.b) {
+                free(d.u.s);
+                continue;
+            }
+        }
+        tdot_device_t *dev = &cfg->devices[cfg->ndevices++];
+        dev->name = d.u.s;
         /* The device type (§3.1). Parsed before the libraries are resolved, so a
          * device's own declaration wins over the one its library names. A
          * present-but-unusable value is an error rather than an absent type:
