@@ -18,7 +18,6 @@ port = 1883
 [[device]]
 name             = "plc-@N@"
 protocol_address = { transport = "tcp", host = "simulator", port = @PORT@, unit_id = 1 }
-default_mode     = "typed"
 
   # Seeded with the device number by the simulator (sim/simulator.py), so a sample shows which
   # simulated device this instance is connected to.

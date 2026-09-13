@@ -12,17 +12,15 @@ pub type DeviceId = String;
 /// Point id, unique within a device.
 pub type PointId = String;
 
-/// Per-point output selection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Mode {
-    /// Emit the raw bytes only (no decoded value).
-    Raw,
-    /// Emit a decoded primitive value.
-    Typed,
-}
-
-/// The closed set of primitive datatypes the contract supports in `typed` mode.
+/// The closed set of datatypes a point may declare (§4). Every point declares one: there is
+/// no second type system alongside it.
+///
+/// `bytes` is the raw case — the value is the hex of what was read, and what each connector
+/// means by "the bytes" is defined in its own spec (the registers or coils for Modbus, the
+/// whole frame payload for CAN, the SDO payload for CANopen, the bytes at `byte_offset` for
+/// PROFIBUS-DP, the best-effort variant encoding for OPC UA). A connector that cannot deliver
+/// bytes for a point kind refuses `bytes` at configuration time, exactly as it refuses any
+/// datatype it does not list in its capabilities.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DataType {
@@ -228,8 +226,8 @@ pub struct Sample {
     pub device: DeviceId,
     pub protocol: &'static str,
     pub point: PointId,
-    pub mode: Mode,
-    pub datatype: Option<DataType>,
+    /// The point's datatype (§4). Always present: `bytes` is the raw case.
+    pub datatype: DataType,
     pub value: Option<Value>,
     /// Raw bytes read from the wire; always present.
     pub raw: Vec<u8>,
@@ -266,15 +264,9 @@ impl Sample {
         obj.insert("protocol".into(), serde_json::Value::String(self.protocol.into()));
         obj.insert("point".into(), serde_json::Value::String(self.point.clone()));
         obj.insert(
-            "mode".into(),
-            serde_json::Value::String(match self.mode {
-                Mode::Raw => "raw".into(),
-                Mode::Typed => "typed".into(),
-            }),
+            "datatype".into(),
+            serde_json::to_value(self.datatype).unwrap(),
         );
-        if let Some(dt) = self.datatype {
-            obj.insert("datatype".into(), serde_json::to_value(dt).unwrap());
-        }
         // No `value_repr`: `datatype` plus the JSON type of `value` say the same thing, and a
         // consumer that needs to know an int64 was widened to a string reads `datatype`.
         if let Some(v) = &self.value {
@@ -388,8 +380,7 @@ mod tests {
             device: "plc-1".into(),
             protocol: "modbus",
             point: "temp".into(),
-            mode: Mode::Typed,
-            datatype: Some(DataType::Uint16),
+            datatype: DataType::Uint16,
             value: Some(Value::Number(1.0)),
             raw: vec![0x00, 0x01],
             raw_group: 2,

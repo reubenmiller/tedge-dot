@@ -53,7 +53,6 @@ connect_timeout_s = 10
 [[device]]
 name             = "opc1"
 protocol_address = { endpoint = "opc.tcp://127.0.0.1:4840/", security_policy = "None", security_mode = "none" }
-default_mode     = "typed"
 points_from      = ["demo-sim"]
 
   # The points come from the packaged point library

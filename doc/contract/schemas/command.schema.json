@@ -26,18 +26,7 @@
         "boolean",
         "string"
       ],
-      "description": "Logical value for a typed write, in ENGINEERING units — the same units a sample's 'value' carries (§4.2). The runtime inverts the point's linear transform before the module encodes it, and echoes the engineering value back in the result."
-    },
-    "value_repr": {
-      "enum": [
-        "number",
-        "boolean",
-        "string"
-      ]
-    },
-    "raw": {
-      "type": "string",
-      "description": "Hex bytes for a raw write, written verbatim."
+      "description": "Logical value for a write, in ENGINEERING units — the same units a sample's 'value' carries (§4.2). The runtime inverts the point's linear transform before the module encodes it, and echoes the engineering value back in the result. For datatype 'bytes' it is the hex string written verbatim (§1: there is no separate 'raw' request field)."
     },
     "target": {
       "type": "string",
@@ -88,9 +77,6 @@
               "boolean",
               "string"
             ]
-          },
-          "raw": {
-            "type": "string"
           }
         }
       }
@@ -128,9 +114,6 @@
               "string"
             ]
           },
-          "raw": {
-            "type": "string"
-          },
           "reason": {
             "type": "string"
           }
@@ -165,13 +148,11 @@
     {
       "status": "init",
       "point": "setpoint",
-      "value": 21.5,
-      "value_repr": "number"
+      "value": 21.5
     },
     {
       "status": "init",
-      "point": "run_command",
-      "raw": "0001"
+      "point": "run_command"
     },
     {
       "status": "executing",

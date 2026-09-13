@@ -137,12 +137,6 @@
         "poll_interval": {
           "$ref": "#/$defs/duration"
         },
-        "default_mode": {
-          "enum": [
-            "raw",
-            "typed"
-          ]
-        },
         "points_from": {
           "type": "array",
           "items": {
@@ -211,12 +205,6 @@
           "type": "string",
           "minLength": 1
         },
-        "mode": {
-          "enum": [
-            "raw",
-            "typed"
-          ]
-        },
         "datatype": {
           "enum": [
             "bool",
@@ -232,7 +220,8 @@
             "float64",
             "string",
             "bytes"
-          ]
+          ],
+          "description": "The point's datatype (§4). 'bytes' is the raw case: the value is the hex of what was read, and what each connector means by 'the bytes' is defined in its own spec. A connector that cannot deliver bytes for a point kind refuses 'bytes' at configuration time, exactly as it refuses any datatype it does not advertise. Required on a fully resolved point — there is no second type system to fall back on."
         },
         "endianness": {
           "enum": [
@@ -302,8 +291,12 @@
           "additionalProperties": false,
           "description": "Engineering-unit bounds of the signal (§5.3). Enforced by the connector on WRITE — a value outside them fails before the device is touched — and rendered as the cloud form's minimum/maximum, so the form and the driver cannot disagree. Reads are not altered: a reading outside the range is still quality 'good'. Rejected on a point whose datatype is not numeric.",
           "properties": {
-            "min": { "type": "number" },
-            "max": { "type": "number" }
+            "min": {
+              "type": "number"
+            },
+            "max": {
+              "type": "number"
+            }
           }
         },
         "publish": {
@@ -332,13 +325,19 @@
         "measurement": {
           "description": "Where the signal lands as a measurement (§5.5): false keeps it out of the measurements altogether (e.g. a parameter whose value belongs on its twin fragment only), or a table naming its group and series.",
           "oneOf": [
-            { "const": false },
+            {
+              "const": false
+            },
             {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "group": { "type": "string" },
-                "series": { "type": "string" }
+                "group": {
+                  "type": "string"
+                },
+                "series": {
+                  "type": "string"
+                }
               }
             }
           ]
@@ -346,8 +345,13 @@
         "parameter": {
           "description": "Exposure of the signal as an operator-editable setting (§5.2). A writable point is a parameter by default; false opts it out, true opts a read-only point in, a string names an absolute set, and a table carries the details. The bounds are NOT here: they are the point's 'range'.",
           "oneOf": [
-            { "type": "boolean" },
-            { "type": "string", "minLength": 1 },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string",
+              "minLength": 1
+            },
             {
               "type": "object",
               "additionalProperties": false,
@@ -355,22 +359,44 @@
                 "group": {
                   "description": "Group name(s); the set is <device type, else protocol>_<group>_parameters.",
                   "oneOf": [
-                    { "type": "string" },
-                    { "type": "array", "items": { "type": "string" } }
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
                   ]
                 },
                 "set": {
                   "description": "Absolute set name(s), used verbatim; bypasses the naming rule.",
                   "oneOf": [
-                    { "type": "string" },
-                    { "type": "array", "items": { "type": "string" } }
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
                   ]
                 },
-                "title": { "type": "string" },
-                "description": { "type": "string" },
-                "enum": { "type": "array" },
+                "title": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "enum": {
+                  "type": "array"
+                },
                 "default": {},
-                "order": { "type": "integer" }
+                "order": {
+                  "type": "integer"
+                }
               }
             }
           ]
@@ -388,29 +414,11 @@
       "description": "A point definition. When the device inherits points from a library (§3.4) this may be a patch of one: only `id` is required, and any field it omits keeps the inherited value. A device that inherits nothing must define every point completely, which $defs/complete_point states."
     },
     "complete_point": {
-      "description": "The completeness rules a point must satisfy when nothing supplies its missing fields: a full address, and a datatype whenever the mode is typed (§3.3).",
+      "description": "The completeness rules a point must satisfy when nothing supplies its missing fields: a full address and a datatype (§3.3). `datatype` is unconditional since 0.2 — 'bytes' is the raw case, so every point has one.",
       "required": [
         "id",
-        "address"
-      ],
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "mode": {
-                "const": "typed"
-              }
-            },
-            "required": [
-              "mode"
-            ]
-          },
-          "then": {
-            "required": [
-              "datatype"
-            ]
-          }
-        }
+        "address",
+        "datatype"
       ]
     }
   },
@@ -443,11 +451,9 @@
             "port": 502,
             "unit_id": 1
           },
-          "default_mode": "typed",
           "point": [
             {
               "id": "boiler_temp_raw",
-              "mode": "typed",
               "datatype": "float32",
               "endianness": "big",
               "word_order": "big",
@@ -475,13 +481,13 @@
             },
             {
               "id": "run_command",
-              "mode": "raw",
               "access": "read_write",
               "address": {
                 "table": "coil",
                 "address": 0,
                 "count": 1
-              }
+              },
+              "datatype": "bytes"
             }
           ]
         },

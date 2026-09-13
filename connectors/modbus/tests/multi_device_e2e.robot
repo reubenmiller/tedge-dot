@@ -257,6 +257,6 @@ New Device
     ...                with the same points as the stack's own devices.
     [Arguments]    ${name}    ${port}
     ${device}=    Evaluate
-    ...    json.dumps({"name": $name, "protocol_address": {"transport": "tcp", "host": "simulator", "port": int($port), "unit_id": 1}, "default_mode": "typed", "point": [{"id": "device_id", "datatype": "uint16", "address": {"table": "holding", "address": 2100, "count": 1}}, {"id": "temp_u16", "datatype": "uint16", "access": "read_write", "address": {"table": "holding", "address": 3, "count": 1}}]})
+    ...    json.dumps({"name": $name, "protocol_address": {"transport": "tcp", "host": "simulator", "port": int($port), "unit_id": 1}, "point": [{"id": "device_id", "datatype": "uint16", "address": {"table": "holding", "address": 2100, "count": 1}}, {"id": "temp_u16", "datatype": "uint16", "access": "read_write", "address": {"table": "holding", "address": 3, "count": 1}}]})
     ...    modules=json
     RETURN    ${device}

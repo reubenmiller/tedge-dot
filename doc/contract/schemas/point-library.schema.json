@@ -57,7 +57,6 @@
       "point": [
         {
           "id": "boiler_temp",
-          "mode": "typed",
           "datatype": "float32",
           "address": {
             "table": "holding",

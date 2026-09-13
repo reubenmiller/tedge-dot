@@ -5,7 +5,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use tedge_dot_sdk::model::{DataType, Mode, Quality, Sample, Value};
+use tedge_dot_sdk::model::{DataType, Quality, Sample, Value};
 use time::OffsetDateTime;
 
 #[derive(Arbitrary, Debug)]
@@ -13,7 +13,7 @@ struct Input {
     unix_ts: i64,
     device: String,
     point: String,
-    typed: bool,
+    datatype_tag: u8,
     value_tag: u8,
     number: f64,
     text: String,
@@ -40,8 +40,14 @@ fuzz_target!(|input: Input| {
         device: input.device,
         protocol: "fuzz",
         point: input.point,
-        mode: if input.typed { Mode::Typed } else { Mode::Raw },
-        datatype: Some(DataType::Float64),
+        // Every datatype, including `bytes` — the raw case (§1), whose value is a hex string
+        // the envelope must serialize like any other.
+        datatype: match input.datatype_tag % 4 {
+            0 => DataType::Float64,
+            1 => DataType::Bytes,
+            2 => DataType::String,
+            _ => DataType::Uint16,
+        },
         value,
         raw: input.raw,
         raw_group: input.raw_group,

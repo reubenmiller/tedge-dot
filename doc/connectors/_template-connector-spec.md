@@ -32,7 +32,6 @@ this protocol polled, push, or both?
 {
   "protocol": "<protocol>",
   "version": "0.1.0",
-  "modes": ["raw", "typed"],
   "datatypes": ["..."],
   "point_kinds": ["..."],
   "command_verbs": ["write"],

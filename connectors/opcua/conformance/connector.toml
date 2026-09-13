@@ -24,7 +24,6 @@ name             = "plant-server"
 # traffic validates against the schemas with the field present.
 type             = "opcua-conformance-sim"
 protocol_address = { endpoint = "opc.tcp://127.0.0.1:4840" }
-default_mode     = "typed"
 
   # float64, read-only (B7 denies writes to it), unit echo.
   [[device.point]]
@@ -76,10 +75,12 @@ default_mode     = "typed"
   address   = { namespace = 2, identifier = "RawPressure" }
   transform = { divisor = 10 }
 
-  # raw mode: bytes only, no decoded value (B3).
+  # `bytes` is the raw case (§1): for OPC UA it is the best-effort encoding of the variant the
+  # node holds, which is exactly what raw mode returned. Read-only — a variant cannot be built
+  # from bytes, so a writable `bytes` point is refused at configuration time.
   [[device.point]]
   id        = "raw_pressure"
-  mode      = "raw"
+  datatype  = "bytes"
   subscribe = false
   address   = { namespace = 2, identifier = "RawPressure" }
 

@@ -45,16 +45,16 @@ fn a_self_contained_point_must_still_be_complete() {
     assert!(err.contains("address"), "{err}");
 
     let err = accepts(device(serde_json::json!({
-        "point": [{ "id": "t", "address": { "a": 1 }, "mode": "typed" }],
+        "point": [{ "id": "t", "address": { "a": 1 } }],
     })))
-    .expect_err("a typed point with nothing to inherit needs a datatype");
+    .expect_err("a point with nothing to inherit needs a datatype (§1: always required)");
     assert!(err.contains("datatype"), "{err}");
 }
 
 #[test]
 fn a_complete_self_contained_point_is_accepted() {
     accepts(device(serde_json::json!({
-        "point": [{ "id": "t", "address": { "a": 1 }, "mode": "typed", "datatype": "uint16" }],
+        "point": [{ "id": "t", "address": { "a": 1 }, "datatype": "uint16" }],
     })))
     .expect("the pre-existing shape must keep validating");
 }

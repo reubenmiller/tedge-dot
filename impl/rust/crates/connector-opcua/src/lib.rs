@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tedge_dot_sdk::{
     Access, Capabilities, CommandRequest, CommandResult, ConfigError, Connector, ConnectorConfig,
-    ConnectorError, DataType, DeviceId, LinkReport, LinkStatus, Mode, PointRef, Quality, Sample,
+    ConnectorError, DataType, DeviceId, LinkReport, LinkStatus, PointRef, Quality, Sample,
     SampleSink, Transform, Value,
 };
 use time::OffsetDateTime;
@@ -47,8 +47,7 @@ const MAX_SAFE_INT: i64 = 9_007_199_254_740_991;
 #[derive(Clone)]
 struct OpcuaPoint {
     node_id: NodeId,
-    mode: Mode,
-    datatype: Option<DataType>,
+    datatype: DataType,
     access: Access,
     unit: Option<String>,
     transform: Transform,
@@ -106,10 +105,16 @@ impl Connector for OpcuaConnector {
                 let node_id = node_id_from(&addr).map_err(|e| {
                     ConfigError::Invalid(format!("point '{}' address: {e}", p.id))
                 })?;
-                let mode = p.resolved_mode(d.default_mode);
-                if mode == Mode::Typed && p.datatype.is_none() {
+                // A `bytes` point reports the best-effort encoding of whatever variant the
+                // node holds — what raw mode did. It cannot be WRITTEN, though: a variant
+                // cannot be built from bytes, so a writable `bytes` point is refused here
+                // rather than failing on the first command.
+                if p.datatype == DataType::Bytes
+                    && Access::parse(p.access.as_deref()).can_write()
+                {
                     return Err(ConfigError::Invalid(format!(
-                        "point '{}' is typed but has no datatype",
+                        "point '{}' is writable with datatype 'bytes', which OPC UA cannot \
+                         encode: a variant needs a concrete datatype",
                         p.id
                     )));
                 }
@@ -117,7 +122,6 @@ impl Connector for OpcuaConnector {
                     p.id.clone(),
                     OpcuaPoint {
                         node_id,
-                        mode,
                         datatype: p.datatype,
                         access: Access::parse(p.access.as_deref()),
                         unit: p.unit.clone(),
@@ -135,7 +139,6 @@ impl Connector for OpcuaConnector {
         Capabilities {
             protocol: PROTOCOL,
             version: env!("CARGO_PKG_VERSION"),
-            modes: vec![Mode::Raw, Mode::Typed],
             datatypes: vec![
                 DataType::Bool,
                 DataType::Int8,
@@ -149,6 +152,8 @@ impl Connector for OpcuaConnector {
                 DataType::Float32,
                 DataType::Float64,
                 DataType::String,
+                // `bytes` is the raw case (§1): what raw mode delivered in 0.1.
+                DataType::Bytes,
             ],
             point_kinds: vec!["variable".into()],
             command_verbs: vec!["write".into()],
@@ -454,9 +459,7 @@ impl Connector for OpcuaConnector {
         if !model.access.can_write() {
             return Err(ConnectorError::AccessDenied(request.point.clone()));
         }
-        let datatype = model
-            .datatype
-            .ok_or_else(|| ConnectorError::Decode("write requires a point datatype".into()))?;
+        let datatype = model.datatype;
         let value = request
             .value
             .as_ref()
@@ -739,20 +742,19 @@ fn build_sample(id: &str, model: &OpcuaPoint, dv: &DataValue) -> Sample {
         Some(parts) => parts,
         None => return bad_sample(id, Some(model), "unsupported OPC-UA value type"),
     };
-    let (out_value, datatype) = match model.mode {
-        Mode::Raw => (None, model.datatype),
-        Mode::Typed => (
-            Some(model.transform.apply(value)),
-            Some(model.datatype.unwrap_or(native_dt)),
-        ),
+    // `bytes`: the value IS the hex of the best-effort variant encoding (§1). Anything else
+    // is the decoded value, scaled.
+    let _ = native_dt;
+    let out_value = match model.datatype {
+        DataType::Bytes => Some(Value::Text(tedge_dot_sdk::model::hex_grouped(&raw, 1))),
+        _ => Some(model.transform.apply(value)),
     };
     Sample {
         ts: data_value_ts(dv),
         device: String::new(),
         protocol: PROTOCOL,
         point: id.to_string(),
-        mode: model.mode,
-        datatype,
+        datatype: model.datatype,
         value: out_value,
         raw,
         raw_group: 1,
@@ -765,15 +767,14 @@ fn build_sample(id: &str, model: &OpcuaPoint, dv: &DataValue) -> Sample {
 }
 
 /// Build a `bad` quality sample carrying the error reason. A point we know nothing about
-/// reports as `raw`: the contract requires a `datatype` for `typed` and we have none.
+/// reports as `bytes` — the one datatype whose envelope is complete without a value.
 fn bad_sample(id: &str, model: Option<&OpcuaPoint>, error: &str) -> Sample {
     Sample {
         ts: OffsetDateTime::now_utc(),
         device: String::new(),
         protocol: PROTOCOL,
         point: id.to_string(),
-        mode: model.map(|m| m.mode).unwrap_or(Mode::Raw),
-        datatype: model.and_then(|m| m.datatype),
+        datatype: model.map(|m| m.datatype).unwrap_or(DataType::Bytes),
         value: None,
         raw: Vec::new(),
         raw_group: 1,

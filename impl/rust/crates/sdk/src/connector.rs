@@ -3,7 +3,7 @@
 
 use crate::config::ConnectorConfig;
 use crate::decode::{Endianness, WordOrder};
-use crate::model::{DataType, DeviceId, Mode, Sample, Transform};
+use crate::model::{DataType, DeviceId, Sample, Transform};
 use async_trait::async_trait;
 use thiserror::Error;
 
@@ -43,8 +43,9 @@ impl Access {
 #[derive(Clone, Debug)]
 pub struct PointRef {
     pub id: String,
-    pub mode: Mode,
-    pub datatype: Option<DataType>,
+    /// The point's datatype (§4). Always present: `bytes` is the raw case, so there is no
+    /// second type system to consult.
+    pub datatype: DataType,
     pub endianness: Endianness,
     pub word_order: WordOrder,
     pub access: Access,
@@ -61,7 +62,8 @@ pub struct PointRef {
 pub struct Capabilities {
     pub protocol: &'static str,
     pub version: &'static str,
-    pub modes: Vec<Mode>,
+    /// Every datatype the module can decode and encode. `bytes` in this list is what says the
+    /// module supports the raw case — it replaced the separate `modes` list of 0.1.
     pub datatypes: Vec<DataType>,
     pub point_kinds: Vec<String>,
     pub command_verbs: Vec<String>,
@@ -72,14 +74,6 @@ pub struct Capabilities {
 impl Capabilities {
     /// Serialize to the capability descriptor JSON (contract §7).
     pub fn to_json(&self) -> serde_json::Value {
-        let modes: Vec<&str> = self
-            .modes
-            .iter()
-            .map(|m| match m {
-                Mode::Raw => "raw",
-                Mode::Typed => "typed",
-            })
-            .collect();
         let datatypes: Vec<serde_json::Value> = self
             .datatypes
             .iter()
@@ -88,7 +82,6 @@ impl Capabilities {
         serde_json::json!({
             "protocol": self.protocol,
             "version": self.version,
-            "modes": modes,
             "datatypes": datatypes,
             "point_kinds": self.point_kinds,
             "command_verbs": self.command_verbs,

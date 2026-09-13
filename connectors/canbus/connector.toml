@@ -24,7 +24,6 @@ name             = "engine"
 # tenant-wide identifiers in the cloud, and its thin-edge entity type.
 type             = "canbus-sim"
 protocol_address = { interface = "vcan0", dbc_file = "/test.dbc" }
-default_mode     = "typed"
 
   [[device.point]]
   id       = "rpm"

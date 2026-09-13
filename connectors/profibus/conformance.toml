@@ -10,8 +10,7 @@
 
 [connector]
 protocol    = "profibus"
-modes       = ["raw", "typed"]
-datatypes   = ["bool", "int8", "uint8", "int16", "uint16", "int32", "uint32", "float32"]
+datatypes   = ["bool", "int8", "uint8", "int16", "uint16", "int32", "uint32", "float32", "bytes"]
 point_kinds = ["input", "output"]
 verbs       = ["write"]
 features    = ["polling", "bitfield"]

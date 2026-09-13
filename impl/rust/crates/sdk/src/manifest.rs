@@ -34,9 +34,10 @@ pub fn device_manifest(
     let mut points = Map::new();
     for point in &device.points {
         let mut entry = Map::new();
-        if let Some(datatype) = point.datatype {
-            entry.insert("datatype".into(), serde_json::to_value(datatype).unwrap());
-        }
+        entry.insert(
+            "datatype".into(),
+            serde_json::to_value(point.datatype).unwrap(),
+        );
         entry.insert(
             "access".into(),
             Value::String(Access::parse(point.access.as_deref()).as_str().into()),
@@ -164,7 +165,7 @@ protocol_address = { host = "127.0.0.1" }
 
   [[device.point]]
   id = "raw_only"
-  mode = "raw"
+  datatype = "bytes"
   address = { table = "holding", address = 9, count = 1 }
 "#,
         )
@@ -223,7 +224,11 @@ protocol_address = { host = "127.0.0.1" }
             points["hidden_rw"].get("parameter").is_none(),
             "parameter = false opts a writable point out"
         );
-        assert!(points["raw_only"].get("datatype").is_none());
+        assert_eq!(
+            points["raw_only"]["datatype"],
+            json!("bytes"),
+            "every point declares a datatype; `bytes` is the raw case"
+        );
     }
 
     #[test]

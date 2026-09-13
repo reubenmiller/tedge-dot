@@ -39,7 +39,6 @@ databits = 8
 [[device]]
 name             = "plc1"
 protocol_address = { transport = "tcp", host = "127.0.0.1", port = 5020, unit_id = 1 }
-default_mode     = "typed"
 points_from      = ["demo-sim"]
 
   # The points come from the packaged point library

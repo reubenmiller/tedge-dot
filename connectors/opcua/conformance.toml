@@ -11,8 +11,7 @@
 
 [connector]
 protocol    = "opcua"
-modes       = ["raw", "typed"]
-datatypes   = ["bool", "int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64", "float32", "float64", "string"]
+datatypes   = ["bool", "int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64", "float32", "float64", "string", "bytes"]
 point_kinds = ["variable"]
 verbs       = ["write"]
 features    = ["polling", "subscribe"]

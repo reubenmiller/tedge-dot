@@ -27,7 +27,6 @@ name             = "plc1"
 # tenant-wide identifiers in the cloud, and its thin-edge entity type.
 type             = "canopen-sim"
 protocol_address = { node_id = 1 }
-default_mode     = "typed"
 
   [[device.point]]
   id       = "analog_in"

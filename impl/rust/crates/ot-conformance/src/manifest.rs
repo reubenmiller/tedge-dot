@@ -25,7 +25,6 @@ pub struct Manifest {
 #[serde(deny_unknown_fields)]
 pub struct ConnectorClaims {
     pub protocol: String,
-    pub modes: Vec<String>,
     #[serde(default)]
     pub datatypes: Vec<String>,
     #[serde(default)]
@@ -101,7 +100,6 @@ mod tests {
             r#"
 [connector]
 protocol  = "modbus"
-modes     = ["raw", "typed"]
 datatypes = ["bool", "int16", "uint16", "int32", "uint32", "float32", "float64"]
 verbs     = ["write"]
 features  = ["polling", "bitfield"]
@@ -121,7 +119,7 @@ seed  = "conformance/seed/modbus.json"
 
     #[test]
     fn unknown_keys_are_rejected() {
-        let err = toml::from_str::<Manifest>("[connector]\nprotocol = \"x\"\nmodes = []\nbogus = 1\n")
+        let err = toml::from_str::<Manifest>("[connector]\nprotocol = \"x\"\nbogus = 1\n")
             .unwrap_err();
         assert!(err.to_string().contains("bogus"), "{err}");
     }

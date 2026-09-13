@@ -399,5 +399,7 @@ Sample Should Be Good
     [Arguments]    ${payload}
     ${quality}=    Get Json Field    ${payload}    quality
     Should Be Equal    ${quality}    good
-    ${mode}=    Get Json Field    ${payload}    mode
-    Should Be Equal    ${mode}    typed
+    # `mode` is gone (§1): `datatype` is the only type system, and every sample carries one.
+    ${sample}=    Evaluate    json.loads($payload)    modules=json
+    Dictionary Should Not Contain Key    ${sample}    mode
+    Dictionary Should Contain Key    ${sample}    datatype

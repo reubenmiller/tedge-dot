@@ -5,96 +5,167 @@
   "description": "Retained status, link, and capability descriptor messages published by a connector.",
   "type": "object",
   "oneOf": [
-    { "$ref": "#/$defs/health" },
-    { "$ref": "#/$defs/link" },
-    { "$ref": "#/$defs/capabilities" }
+    {
+      "$ref": "#/$defs/health"
+    },
+    {
+      "$ref": "#/$defs/link"
+    },
+    {
+      "$ref": "#/$defs/capabilities"
+    }
   ],
   "$defs": {
     "health": {
       "title": "Service health",
       "type": "object",
-      "required": ["status"],
+      "required": [
+        "status"
+      ],
       "additionalProperties": true,
       "properties": {
-        "status": { "enum": ["up", "down"] },
-        "time": { "type": "string", "format": "date-time" }
+        "status": {
+          "enum": [
+            "up",
+            "down"
+          ]
+        },
+        "time": {
+          "type": "string",
+          "format": "date-time"
+        }
       }
     },
     "link": {
       "title": "Device link status",
       "type": "object",
-      "required": ["status"],
+      "required": [
+        "status"
+      ],
       "additionalProperties": false,
       "properties": {
-        "status": { "enum": ["connected", "disconnected", "degraded"] },
+        "status": {
+          "enum": [
+            "connected",
+            "disconnected",
+            "degraded"
+          ]
+        },
         "type": {
           "type": "string",
           "minLength": 1,
           "description": "The device's declared type (§3.1), when it has one — on the link status because it is the registration trigger and a registration happens once; the device manifest (§8.2) carries it too."
         },
-        "since": { "type": "string", "format": "date-time" },
-        "reason": { "type": "string" }
+        "since": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "reason": {
+          "type": "string"
+        }
       }
     },
     "capabilities": {
       "title": "Capability descriptor",
       "type": "object",
-      "required": ["protocol", "version", "modes"],
+      "required": [
+        "protocol",
+        "version"
+      ],
       "additionalProperties": false,
       "properties": {
-        "protocol": { "type": "string", "minLength": 1 },
-        "version": { "type": "string", "minLength": 1 },
-        "modes": {
-          "type": "array",
-          "minItems": 1,
-          "items": { "enum": ["raw", "typed"] },
-          "uniqueItems": true
+        "protocol": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
         },
         "datatypes": {
           "type": "array",
           "items": {
             "enum": [
               "bool",
-              "int8", "uint8",
-              "int16", "uint16",
-              "int32", "uint32",
-              "int64", "uint64",
-              "float32", "float64",
-              "string", "bytes"
+              "int8",
+              "uint8",
+              "int16",
+              "uint16",
+              "int32",
+              "uint32",
+              "int64",
+              "uint64",
+              "float32",
+              "float64",
+              "string",
+              "bytes"
             ]
           },
-          "uniqueItems": true
+          "uniqueItems": true,
+          "description": "Every datatype the module can decode and encode. 'bytes' in this list is what says the module supports the raw case (§1) — it replaced the separate 'modes' list of 0.1."
         },
         "point_kinds": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "uniqueItems": true
         },
         "command_verbs": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "uniqueItems": true
         },
         "features": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "uniqueItems": true
         },
-        "subscribe": { "type": "boolean", "default": false }
+        "subscribe": {
+          "type": "boolean",
+          "default": false
+        }
       }
     }
   },
   "examples": [
-    { "status": "up", "time": "2026-05-30T09:59:00.000Z" },
-    { "status": "connected", "since": "2026-05-30T09:59:00.000Z" },
+    {
+      "status": "up",
+      "time": "2026-05-30T09:59:00.000Z"
+    },
+    {
+      "status": "connected",
+      "since": "2026-05-30T09:59:00.000Z"
+    },
     {
       "protocol": "modbus",
       "version": "0.1.0",
-      "modes": ["raw", "typed"],
-      "datatypes": ["bool", "int16", "uint16", "int32", "uint32", "float32", "float64"],
-      "point_kinds": ["coil", "discrete_input", "holding_register", "input_register"],
-      "command_verbs": ["write"],
-      "features": ["polling", "bitfield"],
+      "datatypes": [
+        "bool",
+        "int16",
+        "uint16",
+        "int32",
+        "uint32",
+        "float32",
+        "float64"
+      ],
+      "point_kinds": [
+        "coil",
+        "discrete_input",
+        "holding_register",
+        "input_register"
+      ],
+      "command_verbs": [
+        "write"
+      ],
+      "features": [
+        "polling",
+        "bitfield"
+      ],
       "subscribe": false
     }
   ]

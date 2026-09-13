@@ -80,7 +80,7 @@ mod tests {
 
     fn manifest(datatypes: &[&str], features: &[&str]) -> Manifest {
         let toml = format!(
-            "[connector]\nprotocol = \"modbus\"\nmodes = [\"typed\"]\ndatatypes = {:?}\nfeatures = {:?}\n",
+            "[connector]\nprotocol = \"modbus\"\ndatatypes = {:?}\nfeatures = {:?}\n",
             datatypes, features
         );
         toml::from_str(&toml).unwrap()

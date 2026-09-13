@@ -32,7 +32,6 @@ port = 1883
 [[device]]
 name             = "plc1"
 protocol_address = { transport = "tcp", host = "simulator", port = 502, unit_id = 1 }
-default_mode     = "typed"
 points_from      = ["plc-sim", "./points.d/modbus/plc-sim-extra.toml"]
 # ^ one library by NAME (resolved along the search path, where the image installs
 #   points.d as a package would) and one by relative PATH (resolved against this

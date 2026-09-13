@@ -32,11 +32,9 @@ port = 1883
 # name             = "engine-ecu"
 # type             = "acme-ecu-v1"   # the device TYPE: names its parameter sets (§5.2)
 # protocol_address = { interface = "can0", dbc_file = "/etc/tedge/can/vehicle.dbc" }
-# default_mode     = "typed"
 #
 #   [[device.point]]
 #   id       = "rpm"
-#   mode     = "typed"
 #   datatype = "uint16"
 #   access   = "read"
 #   address  = { message_name = "ENGINE_STATUS", signal_name = "RPM" }

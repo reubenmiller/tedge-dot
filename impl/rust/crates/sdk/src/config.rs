@@ -2,7 +2,7 @@
 //! (`connection`, `device.protocol_address`, `point.address`) are kept as raw JSON values and
 //! parsed by the connector module in `configure`.
 
-use crate::model::{DataType, Mode, Transform};
+use crate::model::{DataType, Transform};
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -91,8 +91,6 @@ pub struct DeviceConfig {
     pub device_type: Option<String>,
     #[serde(default)]
     pub poll_interval: Option<String>,
-    #[serde(default)]
-    pub default_mode: Option<Mode>,
     /// Point libraries this device inherits its points from, in order (§3.4). Names are
     /// resolved against the library search path; entries containing `/` or ending in `.toml`
     /// are paths, relative ones against the configuration file's directory. Resolution
@@ -108,10 +106,9 @@ pub struct DeviceConfig {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct PointConfig {
     pub id: String,
-    #[serde(default)]
-    pub mode: Option<Mode>,
-    #[serde(default)]
-    pub datatype: Option<DataType>,
+    /// The point's datatype (§4) — required. `bytes` is the raw case, so a point needs no
+    /// second field to say what kind of thing it is.
+    pub datatype: DataType,
     #[serde(default)]
     pub endianness: Option<String>,
     #[serde(default)]
@@ -236,13 +233,6 @@ impl PublishPolicy {
         self.on_change.unwrap_or(false)
             || self.deadband.unwrap_or(0.0) > 0.0
             || self.debounce.as_deref().and_then(parse_duration).is_some()
-    }
-}
-
-impl PointConfig {
-    /// Resolve the effective output mode, given the device default.
-    pub fn resolved_mode(&self, device_default: Option<Mode>) -> Mode {
-        self.mode.or(device_default).unwrap_or(Mode::Typed)
     }
 }
 

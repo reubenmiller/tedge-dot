@@ -15,7 +15,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 use tedge_dot_sdk::{
     decode_primitive, extract_bitfield, model::hex_grouped, Access, ConnectorConfig, DataType,
-    Endianness, Mode, Transform, Value as SdkValue, WordOrder,
+    Endianness, Transform, Value as SdkValue, WordOrder,
 };
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -31,8 +31,7 @@ const SILENT_PEER_TIMEOUT: Duration = Duration::from_secs(45);
 struct Point {
     device: String,
     id: String,
-    mode: Mode,
-    datatype: Option<DataType>,
+    datatype: DataType,
     endianness: Endianness,
     word_order: WordOrder,
     access: Access,
@@ -53,7 +52,6 @@ impl Point {
         PointSpec {
             address: self.address.clone(),
             datatype: self.datatype,
-            mode: self.mode,
         }
     }
 
@@ -86,7 +84,6 @@ fn resolve_points(config: &ConnectorConfig) -> Vec<Point> {
             points.push(Point {
                 device: device.name.clone(),
                 id: p.id.clone(),
-                mode: p.resolved_mode(device.default_mode),
                 datatype: p.datatype,
                 endianness: Endianness::parse(p.endianness.as_deref()),
                 word_order: WordOrder::parse(p.word_order.as_deref()),
@@ -111,16 +108,16 @@ fn resolve_points(config: &ConnectorConfig) -> Vec<Point> {
 /// Conformance configs must declare a `datatype` on every typed point (protocols like Modbus
 /// tolerate omitting it on bit tables, but the harness needs it to compute ground truth).
 fn expected_value(point: &Point, bytes: &[u8], _raw_group: usize) -> Result<Option<SdkValue>, String> {
-    if point.mode == Mode::Raw {
+    // `bytes` is the raw case: the value is the hex of what was read, built by the module
+    // rather than decoded, so there is no "expected decoded value" to compare against.
+    if point.datatype == DataType::Bytes {
         return Ok(None);
     }
     let value = if let Some((start_bit, bit_count)) = point.bitfield {
         let n = extract_bitfield(bytes, point.endianness, point.word_order, start_bit, bit_count);
         SdkValue::Number(n as f64)
     } else {
-        let dt = point
-            .datatype
-            .ok_or_else(|| format!("typed point '{}' must declare a datatype", point.id))?;
+        let dt = point.datatype;
         decode_primitive(bytes, dt, point.endianness, point.word_order)
             .map_err(|e| format!("cannot decode expected value for '{}': {e}", point.id))?
     };
@@ -561,12 +558,6 @@ pub(crate) fn manifest_caps_mismatches(
         ));
     }
     compare(
-        "modes",
-        manifest.connector.modes.iter().cloned().collect(),
-        set("modes"),
-        &mut mismatches,
-    );
-    compare(
         "datatypes",
         manifest.connector.datatypes.iter().cloned().collect(),
         set("datatypes"),
@@ -691,7 +682,7 @@ async fn check_b2_b3_b4_samples(ctx: &Ctx<'_>, layer: &mut Layer, from: usize) {
         if let Ok(detail) = &outcome {
             if invalid {
                 saw_bad = true;
-            } else if point.mode == Mode::Typed {
+            } else if point.datatype != DataType::Bytes {
                 saw_typed_value = true;
             } else {
                 saw_raw_only = true;
@@ -701,12 +692,17 @@ async fn check_b2_b3_b4_samples(ctx: &Ctx<'_>, layer: &mut Layer, from: usize) {
         layer.check(&id, &name, outcome);
     }
 
-    // B3 — both modes exercised with the right envelope shape.
-    if ctx.manifest_has_mode("typed") {
-        report_mode_probe(layer, "B3-typed", "a typed point yields value + datatype", saw_typed_value);
+    // B3 — both envelope shapes exercised: a decoded point and a `bytes` one.
+    if ctx.has_decoded_point() {
+        report_mode_probe(layer, "B3-typed", "a decoded point yields value + datatype", saw_typed_value);
     }
-    if ctx.manifest_has_mode("raw") {
-        report_mode_probe(layer, "B3-raw", "a raw point yields raw only (no value)", saw_raw_only);
+    if ctx.has_bytes_point() {
+        report_mode_probe(
+            layer,
+            "B3-bytes",
+            "a `bytes` point yields the hex of what was read as its value",
+            saw_raw_only,
+        );
     }
     // B4 — a simulated read failure yields a bad sample, not silence.
     report_mode_probe(
@@ -730,13 +726,17 @@ fn report_mode_probe(layer: &mut Layer, id: &str, name: &str, ok: bool) {
 }
 
 impl Ctx<'_> {
-    fn manifest_has_mode(&self, mode: &str) -> bool {
-        // the config decides which modes are exercised; only require what the config contains
-        self.points.iter().any(|p| match mode {
-            "typed" => p.mode == Mode::Typed && !self.sim.is_invalid(&p.spec()),
-            "raw" => p.mode == Mode::Raw && !self.sim.is_invalid(&p.spec()),
-            _ => false,
-        })
+    /// The config decides which shapes are exercised; only require what it contains.
+    fn has_decoded_point(&self) -> bool {
+        self.points
+            .iter()
+            .any(|p| p.datatype != DataType::Bytes && !self.sim.is_invalid(&p.spec()))
+    }
+
+    fn has_bytes_point(&self) -> bool {
+        self.points
+            .iter()
+            .any(|p| p.datatype == DataType::Bytes && !self.sim.is_invalid(&p.spec()))
     }
 }
 
@@ -767,12 +767,19 @@ fn assert_sample(
     if field("protocol") != serde_json::json!(ctx.protocol) {
         errors.push(format!("protocol echo: {:?}", field("protocol")));
     }
-    let expected_mode = match point.mode {
-        Mode::Raw => "raw",
-        Mode::Typed => "typed",
-    };
-    if field("mode") != serde_json::json!(expected_mode) {
-        errors.push(format!("mode: expected '{expected_mode}', got {:?}", field("mode")));
+    // `mode` is gone (§1): `datatype` is the only type system, and it is always present.
+    if !field("mode").is_null() {
+        errors.push(format!(
+            "a 0.2 sample must not carry 'mode' — `datatype` is the only type system: got {}",
+            field("mode")
+        ));
+    }
+    let expected_dt = serde_json::to_value(point.datatype).unwrap();
+    if field("datatype") != expected_dt {
+        errors.push(format!(
+            "datatype: expected {expected_dt}, got {:?}",
+            field("datatype")
+        ));
     }
     let ts = field("ts");
     let ts_str = ts.as_str().unwrap_or_default();
@@ -832,19 +839,17 @@ fn assert_sample(
                                 expected.repr()
                             ));
                         }
-                        if let Some(datatype) = point.datatype {
-                            let expected_dt = serde_json::to_value(datatype).unwrap();
-                            if field("datatype") != expected_dt {
-                                errors.push(format!(
-                                    "datatype: expected {expected_dt}, got {:?}",
-                                    field("datatype")
-                                ));
-                            }
-                        }
                     }
                     Ok(None) => {
-                        if !field("value").is_null() {
-                            errors.push("raw mode must not carry a value".into());
+                        // A `bytes` point: the value is the hex of what was read, which the
+                        // `raw` check above already compared against the golden bytes.
+                        let expected = hex_grouped(&data.bytes, data.raw_group);
+                        if field("value") != serde_json::json!(expected) {
+                            errors.push(format!(
+                                "a bytes point's value must be the hex of what was read: \
+                                 expected {expected:?}, got {}",
+                                field("value")
+                            ));
                         }
                     }
                     Err(e) => errors.push(e),
@@ -876,7 +881,7 @@ async fn check_b2_seq_monotonic(ctx: &Ctx<'_>, layer: &mut Layer, from: usize) {
     let Some(point) = ctx
         .points
         .iter()
-        .find(|p| p.mode == Mode::Typed && !ctx.sim.is_invalid(&p.spec()))
+        .find(|p| p.datatype != DataType::Bytes && !ctx.sim.is_invalid(&p.spec()))
     else {
         layer.skip("B2-seq", "per-point seq is monotonic", "no good typed point configured".into());
         return;
@@ -939,16 +944,13 @@ async fn check_b2_seq_monotonic(ctx: &Ctx<'_>, layer: &mut Layer, from: usize) {
 /// Returns `(value to send, its repr, the engineering value a read must report)`.
 fn write_probe(point: &Point) -> Option<(serde_json::Value, &'static str, SdkValue)> {
     let (wire, repr) = match point.datatype {
-        Some(DataType::Bool) => (SdkValue::Bool(true), "boolean"),
-        Some(DataType::Float32) | Some(DataType::Float64) => (SdkValue::Number(99.5), "number"),
-        Some(DataType::Int8) | Some(DataType::Uint8) => (SdkValue::Number(42.0), "number"),
-        Some(DataType::String) => (
-            SdkValue::Text("conformance-probe".to_string()),
-            "string",
-        ),
-        Some(DataType::Bytes) => return None,
-        Some(_) => (SdkValue::Number(12345.0), "number"),
-        None => return None,
+        DataType::Bool => (SdkValue::Bool(true), "boolean"),
+        DataType::Float32 | DataType::Float64 => (SdkValue::Number(99.5), "number"),
+        DataType::Int8 | DataType::Uint8 => (SdkValue::Number(42.0), "number"),
+        DataType::String => (SdkValue::Text("conformance-probe".to_string()), "string"),
+        // A `bytes` write carries a hex payload, not a probe value of a primitive type.
+        DataType::Bytes => return None,
+        _ => (SdkValue::Number(12345.0), "number"),
     };
     // What a read of that wire value reports — and therefore what a write of the same signal
     // must carry, and what the result and the next sample must say.
@@ -982,7 +984,7 @@ async fn check_b6_write_roundtrip(ctx: &Ctx<'_>, layer: &mut Layer) {
     let writable: Vec<&Point> = ctx
         .points
         .iter()
-        .filter(|p| p.access.can_write() && p.mode == Mode::Typed && p.bitfield.is_none())
+        .filter(|p| p.access.can_write() && p.datatype != DataType::Bytes && p.bitfield.is_none())
         .collect();
     if writable.is_empty() {
         layer.fail(
@@ -1080,10 +1082,10 @@ async fn check_b6_write_roundtrip(ctx: &Ctx<'_>, layer: &mut Layer) {
     // quietly disappear again the next time a conformance configuration is edited.
     let transformed = ctx.points.iter().any(|p| {
         p.access.can_write()
-            && p.mode == Mode::Typed
+            && p.datatype != DataType::Bytes
             && p.bitfield.is_none()
             && !p.transform.is_identity()
-            && p.datatype.map(|d| d != DataType::Bytes).unwrap_or(false)
+            && p.datatype != DataType::Bytes
     });
     if transformed {
         layer.pass(
@@ -1107,7 +1109,7 @@ async fn check_b7_access_control(ctx: &Ctx<'_>, layer: &mut Layer) {
     let Some(point) = ctx
         .points
         .iter()
-        .find(|p| p.access == Access::Read && p.mode == Mode::Typed && !ctx.sim.is_invalid(&p.spec()))
+        .find(|p| p.access == Access::Read && p.datatype != DataType::Bytes && !ctx.sim.is_invalid(&p.spec()))
     else {
         layer.fail(
             "B7-access",
@@ -1175,7 +1177,7 @@ async fn check_b7_range(ctx: &Ctx<'_>, layer: &mut Layer) {
     let id = "B7-range";
     let what = "a write outside the point's range fails and never reaches the device";
     let Some(point) = ctx.points.iter().find(|p| {
-        p.access.can_write() && p.mode == Mode::Typed && p.bitfield.is_none() && p.range.is_some()
+        p.access.can_write() && p.datatype != DataType::Bytes && p.bitfield.is_none() && p.range.is_some()
     }) else {
         layer.skip(id, what, "the conformance config declares no writable point with a range".into());
         return;
@@ -1249,7 +1251,7 @@ async fn check_b8_hot_reload(ctx: &Ctx<'_>, layer: &mut Layer, config_path: &std
         let template = ctx
             .points
             .iter()
-            .find(|p| p.mode == Mode::Typed && !ctx.sim.is_invalid(&p.spec()) && p.bitfield.is_none())
+            .find(|p| p.datatype != DataType::Bytes && !ctx.sim.is_invalid(&p.spec()) && p.bitfield.is_none())
             .ok_or("no good typed point to mirror")?;
         let points = device
             .get_mut("point")
@@ -1433,8 +1435,9 @@ async fn check_link_transition(
     );
 }
 
-/// B9 (dynamic half) — capability honesty: the connector never emitted a mode or datatype it
-/// did not advertise.
+/// B9 (dynamic half) — capability honesty: the connector never emitted a datatype it did not
+/// advertise. `modes` is gone (§1): `datatypes` containing `bytes` is what says a module does
+/// the raw case, so one list covers what two used to.
 fn check_b9_capability_honesty(
     ctx: &Ctx<'_>,
     caps: &serde_json::Value,
@@ -1447,7 +1450,6 @@ fn check_b9_capability_honesty(
             .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
             .unwrap_or_default()
     };
-    let modes = advertised("modes");
     let datatypes = advertised("datatypes");
 
     let mut violations = Vec::new();
@@ -1456,11 +1458,6 @@ fn check_b9_capability_honesty(
             continue;
         }
         let Ok(json) = record.json() else { continue };
-        if let Some(mode) = json.get("mode").and_then(|m| m.as_str()) {
-            if !modes.contains(mode) {
-                violations.push(format!("sample on '{}' uses unadvertised mode '{mode}'", record.topic));
-            }
-        }
         if let Some(dt) = json.get("datatype").and_then(|d| d.as_str()) {
             if !datatypes.contains(dt) {
                 violations.push(format!(

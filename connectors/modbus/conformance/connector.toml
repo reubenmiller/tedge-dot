@@ -24,7 +24,6 @@ name             = "plc1"
 # traffic validates against the schemas with the field present.
 type             = "modbus-conformance-sim"
 protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id = 1 }
-default_mode     = "typed"
 
   # uint16, read-only (B7 denies writes to it), unit echo. Carries BOTH labels, so
   # the retained device manifest (§8.2) carries them and gets schema-validated here
@@ -68,11 +67,12 @@ default_mode     = "typed"
   datatype = "uint16"
   address  = { table = "holding", address = 9, count = 1, start_bit = 5, bit_count = 4 }
 
-  # raw mode: bytes only, no decoded value (B3).
+  # `bytes` is the raw case (§1): the value is the hex of the registers read, and B3 keys on
+  # `datatypes` containing `bytes` where it used to key on `modes` containing `raw`.
   [[device.point]]
-  id      = "raw_regs"
-  mode    = "raw"
-  address = { table = "holding", address = 6, count = 2 }
+  id       = "raw_regs"
+  datatype = "bytes"
+  address  = { table = "holding", address = 6, count = 2 }
 
   # reading this address raises a Modbus exception -> quality "bad" (B4).
   [[device.point]]
