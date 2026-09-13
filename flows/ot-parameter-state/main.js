@@ -9,7 +9,7 @@
 //
 // A *parameter* is a point the device manifest (contract §8.2) lists with a `parameter.sets`
 // entry: the connector derives the sets once — a point whose `access` permits writes, or that
-// opts in via meta.parameter, grouped by the RFC 0005 naming rule — and publishes the result,
+// opts in via its `parameter` field, grouped by the RFC 0005 naming rule — and publishes the result,
 // so this flow never re-derives a name and never needs the connector's configuration file.
 // Each set is one twin fragment keyed by point id: the same sets `tedge-dot describe` declares
 // in the cloud.

@@ -62,12 +62,12 @@ Cumulocity, so without a type two different Modbus device types would claim the
 same one. It also becomes the thin-edge entity type of the registered child
 device.
 
-Points choose their group with `meta.parameter.group`, and a point may name several:
+Points choose their group with `parameter.group`, and a point may name several:
 
 ```toml
 [[point]]
 id   = "coil_rw"
-meta = { parameter = { group = ["control", "commissioning"] } }
+parameter = { group = ["control", "commissioning"] }
 ```
 
 gives `..._control_parameters` and `..._commissioning_parameters`, both carrying that point —

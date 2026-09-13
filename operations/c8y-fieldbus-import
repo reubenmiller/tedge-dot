@@ -10,7 +10,7 @@
 #   2. fetches the c8y_ModbusDeviceType managed object referenced by the operation's `type`
 #      inventory path and translates its c8y_Registers / c8y_Coils definitions into OT
 #      Connector Contract points (address/datatype/transform/unit; measurementMapping into
-#      the point's meta.measurement table, honoured by the ot-measurement flow);
+#      the point's typed `measurement` field, honoured by the ot-measurement flow);
 #   3. publishes one generic `ot_define_device` thin-edge command (bridged to the connector's
 #      `define-device` management verb by ot-command-forward) and waits until the connector
 #      reports it applied — i.e. the device/points are persisted into the connector TOML.
@@ -76,17 +76,17 @@ die() {
 #       "offset" is a decimal-point shift, applied by the legacy reader as value * 10^offset,
 #       which is exactly the SDK's 10^decimal_shift term (NOT transform.offset).
 #   unit                  -> unit
-#   measurementMapping    -> meta.measurement = { group: .type, series: .series }
+#   measurementMapping    -> measurement = { group: .type, series: .series }  (a typed point field, §5.5)
 #   holding registers get access read_write (legacy c8y_SetRegister writability parity).
 # Coil mapping (beyond legacy parity — the legacy plugin ignored c8y_Coils):
 #   number -> address.address, input -> table (discrete_input|coil), datatype bool,
 #   writable coils (table coil) get access read_write, measurementMapping as above.
 # shellcheck disable=SC2016 # $name/$ip/... are jq --arg variables, not shell expansions
 JQ_TRANSLATE='
-def meta_of($r):
+def measurement_of($r):
   if ($r.measurementMapping.type? // "") != ""
-  then { meta: { measurement: { group: $r.measurementMapping.type,
-                                series: ($r.measurementMapping.series // $r.name) } } }
+  then { measurement: { group: $r.measurementMapping.type,
+                        series: ($r.measurementMapping.series // $r.name) } }
   else {} end;
 
 def transform_of($r):
@@ -121,7 +121,7 @@ def reg_point:
       + (if $table == "holding" then { access: "read_write" } else {} end)
       + (if ($r.unit // "") != "" then { unit: $r.unit } else {} end)
       + transform_of($r)
-      + meta_of($r)
+      + measurement_of($r)
     end;
 
 def coil_point:
@@ -131,7 +131,7 @@ def coil_point:
       datatype: "bool",
       address: { table: $table, address: $c.number, count: 1 } }
     + (if $table == "coil" then { access: "read_write" } else {} end)
-    + meta_of($c);
+    + measurement_of($c);
 
 {
   name: $name,

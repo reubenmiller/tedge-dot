@@ -90,12 +90,14 @@ default_mode     = "typed"
   # Incremented every second by the simulator; delivered via OPC-UA subscription
   # (monitored item) rather than polling — the other points opt out with subscribe = false
   # (static nodes only notify once, and bad_point would reject the device subscription).
-  # The free-form meta table is echoed verbatim in every sample envelope.
+  # The free-form meta table is the site's own tags, published on the device manifest (§8.2);
+  # `publish` is the typed per-signal policy the runtime applies to this point's stream (§5.4).
   [[device.point]]
   id       = "ticks"
   datatype = "uint32"
   address  = { node_id = "ns=2;s=Ticks" }
-  meta     = { on_change = true, source = "sim" }
+  publish  = { on_change = true }
+  meta     = { source = "sim" }
 
   # Subscribed, but pointing at the STATIC Temperature node, and it exists purely to make the
   # push tests discriminating.

@@ -236,10 +236,11 @@ Pushed Sample Carries No Point Meta Either
     FOR    ${gone}    IN    meta    unit    access    type    value_repr    ts_ms    raw    addr
         Dictionary Should Not Contain Key    ${sample}    ${gone}
     END
-    # The meta a flow needs is on the manifest, for the subscribed point as for any other.
+    # The typed `publish` policy and the site's own `meta` are on the manifest, for the
+    # subscribed point as for any other.
     ${manifest}=    Wait For Retained    ${MANIFEST_TOPIC}    timeout=${READY_TIMEOUT}
     ${points}=    Get Json Field    ${manifest}    points
-    Should Be Equal    ${points}[ticks][meta][on_change]    ${True}
+    Should Be Equal    ${points}[ticks][publish][on_change]    ${True}
     Should Be Equal    ${points}[ticks][meta][source]    sim
 
 Polled Sample Carries The Device Name

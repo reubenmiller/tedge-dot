@@ -2,7 +2,7 @@
 //! and how to declare them in Cumulocity's Digital Twin Manager (DTM).
 //!
 //! A parameter is a point whose `access` permits writes, plus any point that opts in through
-//! `meta.parameter` (`meta.parameter = false` opts a writable point out). Parameters are grouped
+//! the `parameter` field (`parameter = false` opts a writable point out). Parameters are grouped
 //! into **sets**: one set is one twin fragment on the device (published by the
 //! `ot-parameter-state` flow with the current values) and one DTM property definition in the
 //! tenant (rendered by `tedge-dot describe`). The keys of a set are the point ids, so parameter
@@ -22,12 +22,14 @@
 //! with no declared type falls back to `modbus_control_parameters`, which is fine for a fleet of
 //! one type and collides for a fleet of several — the reason to declare the type.
 //!
-//! `meta.parameter.group` names a second set for the same device type (`commissioning` ->
-//! `acme_meter_v2_commissioning_parameters`); `meta.parameter.set` bypasses the naming rule
+//! `parameter.group` names a second set for the same device type (`commissioning` ->
+//! `acme_meter_v2_commissioning_parameters`); `parameter.set` bypasses the naming rule
 //! entirely and is used verbatim, which is how points of *different* device types can be made to
 //! share one set, or an existing tenant identifier can be matched.
 //!
-//! `meta.parameter` (all optional; either a string naming the set, `true`, or a table):
+//! `parameter` (all optional; either a string naming the set, `true`, `false`, or a table).
+//! The bounds are **not** part of it: they are the point's `range` (§5.3), the one table the
+//! cloud form renders *and* the connector enforces on write.
 //!
 //! ```toml
 //! [[device]]
@@ -38,7 +40,8 @@
 //! datatype = "int16"
 //! access   = "read_write"
 //! unit     = "°C"
-//! meta.parameter = { title = "Setpoint", min = 0, max = 120, order = 1 }
+//! range     = { min = 0, max = 120 }
+//! parameter = { title = "Setpoint", order = 1 }
 //! # -> set "acme_boiler_v2_control_parameters"
 //! ```
 
@@ -113,7 +116,7 @@ impl SetNaming {
         }
     }
 
-    /// Every set a point belongs to, given its `meta.parameter` options.
+    /// Every set a point belongs to, given its `parameter` options.
     ///
     /// `set` and `group` each accept a string or an array of them, so one point can appear in
     /// several sets — operators group signals by what they are *for*, and the same setpoint
@@ -184,12 +187,16 @@ pub struct Parameter {
     pub datatype: Option<DataType>,
     pub access: Access,
     pub unit: Option<String>,
-    /// The point's own `name`/`description` (§3.1). `meta.parameter.title` and
-    /// `meta.parameter.description` override them, so a point can carry a general-purpose
+    /// The point's own `name`/`description` (§3.1). `parameter.title` and
+    /// `parameter.description` override them, so a point can carry a general-purpose
     /// label and still say something different in the parameter UI.
     pub name: Option<String>,
     pub description: Option<String>,
-    /// The `meta.parameter` table (normalized to an object).
+    /// The point's engineering-unit bounds (§5.3), which the cloud form renders as
+    /// `minimum`/`maximum` — and which the connector now also enforces on write. In 0.1 these
+    /// were `meta.parameter.min`/`max`, trusted by the form and by nothing else.
+    pub range: Option<crate::config::Range>,
+    /// The `parameter` table (normalized to an object).
     pub options: Map<String, Value>,
 }
 
@@ -200,7 +207,9 @@ pub struct Parameter {
 /// is what puts it in each of those definitions and fragments.
 pub fn parameters_of(point: &PointConfig, naming: &SetNaming) -> Vec<Parameter> {
     let access = Access::parse(point.access.as_deref());
-    let options: Option<Map<String, Value>> = match point.meta.as_ref().and_then(|m| m.get("parameter")) {
+    // The typed `parameter` field (§5.2). It was `meta.parameter` in 0.1; `meta` is free-form
+    // again, and a stale `meta.parameter` is warned about by the loader rather than read here.
+    let options: Option<Map<String, Value>> = match point.parameter.as_ref() {
         None => None,
         Some(Value::Bool(false)) => return Vec::new(), // explicit opt-out
         Some(Value::Bool(true)) => Some(Map::new()),
@@ -227,6 +236,7 @@ pub fn parameters_of(point: &PointConfig, naming: &SetNaming) -> Vec<Parameter> 
             unit: point.unit.clone(),
             name: point.name.clone(),
             description: point.description.clone(),
+            range: point.range,
             options: options.clone(),
         })
         .collect()
@@ -305,7 +315,7 @@ pub fn untyped_devices_across(configs: &[ConnectorConfig], protocol: &str) -> Ve
 /// there is no second notion of "qualifier" to drift from the real one — the C implementation
 /// compares the same strings. One message per colliding group, in configuration order.
 ///
-/// Deliberately not reported for an absolute `meta.parameter.set` shared by several device
+/// Deliberately not reported for an absolute `parameter.set` shared by several device
 /// types: that is the documented way to share a set on purpose (§5.2).
 pub fn type_warnings(config: &ConnectorConfig) -> Vec<String> {
     type_warnings_across(std::slice::from_ref(config))
@@ -452,7 +462,7 @@ pub fn c8y_dtm_definitions_across(
 }
 
 /// JSON-schema property for one parameter (type from the datatype, limits from the datatype
-/// range, everything else from `meta.parameter`).
+/// range, everything else from `parameter`).
 pub fn property_schema(param: &Parameter) -> Value {
     let mut schema = Map::new();
     let (ty, min, max): (&str, Option<f64>, Option<f64>) = match param.datatype {
@@ -499,8 +509,10 @@ pub fn property_schema(param: &Parameter) -> Value {
     if !description.is_empty() {
         schema.insert("description".into(), json!(description));
     }
-    let min = param.options.get("min").and_then(|v| v.as_f64()).or(min);
-    let max = param.options.get("max").and_then(|v| v.as_f64()).or(max);
+    // The declared `range` (§5.3) narrows the datatype's own bounds. It is the same table the
+    // connector enforces on write, so the form and the driver cannot disagree about the limit.
+    let min = param.range.and_then(|r| r.min).or(min);
+    let max = param.range.and_then(|r| r.max).or(max);
     if let Some(min) = min {
         schema.insert("minimum".into(), json!(min));
     }
@@ -558,7 +570,8 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id 
   name = "Boiler temp"
   description = "Outlet temperature after the heat exchanger"
   address = { table = "holding", address = 3, count = 1 }
-  meta = { parameter = { title = "Temperature setpoint", min = 0, max = 100, order = 7 } }
+  parameter = { title = "Temperature setpoint", order = 7 }
+  range     = { min = 0, max = 100 }
 
   [[device.point]]
   id = "coil_rw"
@@ -572,7 +585,7 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id 
   datatype = "float32"
   access = "write"
   address = { table = "holding", address = 10, count = 2 }
-  meta = { parameter = "pump" }
+  parameter = "pump"
 
   [[device.point]]
   id = "level_f32"
@@ -584,21 +597,21 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id 
   id = "status_word"
   datatype = "uint16"
   address = { table = "holding", address = 20, count = 1 }
-  meta = { parameter = true }
+  parameter = true
 
   [[device.point]]
   id = "hidden_rw"
   datatype = "uint16"
   access = "read_write"
   address = { table = "holding", address = 21, count = 1 }
-  meta = { parameter = false }
+  parameter = false
 
   [[device.point]]
   id = "commission_code"
   datatype = "uint16"
   access = "read_write"
   address = { table = "holding", address = 22, count = 1 }
-  meta = { parameter = { group = "commissioning" } }
+  parameter = { group = "commissioning" }
 
   # In two groups at once: operators see it on the daily screen and the
   # commissioning one, and both fragments carry its value.
@@ -607,7 +620,7 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id 
   datatype = "uint16"
   access = "read_write"
   address = { table = "holding", address = 23, count = 1 }
-  meta = { parameter = { group = ["control", "commissioning"] } }
+  parameter = { group = ["control", "commissioning"] }
 
 # A device of an undeclared type: its sets fall back to the protocol.
 [[device]]
@@ -627,7 +640,7 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id 
 
     /// A set name is qualified by the *device type*, because that is what decides which points
     /// exist; the protocol is only the fallback for a device that does not declare one. An
-    /// absolute `meta.parameter.set` is used verbatim, a `group` names a second set of the same
+    /// absolute `parameter.set` is used verbatim, a `group` names a second set of the same
     /// device type.
     #[test]
     fn parameters_select_writable_and_opted_in_points() {
@@ -700,33 +713,33 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id 
         };
 
         assert_eq!(
-            sets(&point("meta = { parameter = { group = [\"control\", \"commissioning\"] } }")),
+            sets(&point("parameter = { group = [\"control\", \"commissioning\"] }")),
             [
                 "acme_boiler_v2_control_parameters",
                 "acme_boiler_v2_commissioning_parameters"
             ]
         );
         assert_eq!(
-            sets(&point("meta = { parameter = { set = [\"plant_a\", \"plant_b\"] } }")),
+            sets(&point("parameter = { set = [\"plant_a\", \"plant_b\"] }")),
             ["plant_a", "plant_b"]
         );
         // An absolute set still wins over the groups.
         assert_eq!(
             sets(&point(
-                "meta = { parameter = { set = \"pump\", group = [\"a\", \"b\"] } }"
+                "parameter = { set = \"pump\", group = [\"a\", \"b\"] }"
             )),
             ["pump"]
         );
         // Group names that fold to the same set name yield one set, not two.
         assert_eq!(
-            sets(&point("meta = { parameter = { group = [\"a b\", \"a-b\"] } }")),
+            sets(&point("parameter = { group = [\"a b\", \"a-b\"] }")),
             ["acme_boiler_v2_a_b_parameters"]
         );
         // An empty or unusable list is an absent one: the default group, never no set at all.
         for meta in [
-            "meta = { parameter = { group = [] } }",
-            "meta = { parameter = { group = [1, true] } }",
-            "meta = { parameter = { set = [] } }",
+            "parameter = { group = [] }",
+            "parameter = { group = [1, true] }",
+            "parameter = { set = [] }",
         ] {
             assert_eq!(
                 sets(&point(meta)),
@@ -735,7 +748,7 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id 
             );
         }
         // ...and opting out still beats every list.
-        assert!(sets(&point("meta = { parameter = false }")).is_empty());
+        assert!(sets(&point("parameter = false")).is_empty());
     }
 
     /// Two device types that differ only in punctuation fold to one qualifier, so their sets
@@ -819,9 +832,9 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id 
         assert_eq!(props["temp_u16"]["minimum"], 0.0);
         assert_eq!(props["temp_u16"]["maximum"], 100.0);
         assert_eq!(props["temp_u16"]["order"], 7);
-        // meta.parameter.title wins over the point's `name`...
+        // parameter.title wins over the points `name`...
         assert_eq!(props["temp_u16"]["title"], "Temperature setpoint");
-        // ...while the point's `description` is used (no meta.parameter.description here) and
+        // ...while the point's `description` is used (no parameter.description here) and
         // still composes with the unit.
         assert_eq!(
             props["temp_u16"]["description"],

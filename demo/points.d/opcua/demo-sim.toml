@@ -35,7 +35,8 @@ datatype    = "uint32"
 address     = { node_id = "ns=2;s=Count" }
 
 # Writable, so it appears as a Cumulocity device parameter (RFC 0003);
-# meta.parameter adds the limits the plain datatype range cannot express.
+# `range` adds the limits the plain datatype cannot express — the cloud form shows them
+# and the connector enforces them on write (§5.3).
 [[point]]
 id          = "setpoint"
 name        = "Setpoint"
@@ -43,7 +44,7 @@ description = "Operator-settable target value"
 datatype    = "int32"
 access      = "read_write"
 address     = { node_id = "ns=2;s=Setpoint" }
-meta        = { parameter = { min = -1000, max = 1000 } }
+range       = { min = -1000, max = 1000 }
 
 [[point]]
 id          = "running"

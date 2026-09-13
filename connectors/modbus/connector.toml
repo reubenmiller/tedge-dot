@@ -66,7 +66,7 @@ points_from      = ["plc-sim", "./points.d/modbus/plc-sim-extra.toml"]
   access   = "read_write"
   address  = { table = "coil", address = 48, count = 1 }
 
-  # A parameter kept off the measurements (`meta.measurement = false`): sampled, and on the
+  # A parameter kept off the measurements (`measurement = false`): sampled, and on the
   # parameter twin fragment like temp_u16 (it reads the same register), but never published as a
   # measurement series by ot-measurement.
   [[device.point]]
@@ -74,7 +74,7 @@ points_from      = ["plc-sim", "./points.d/modbus/plc-sim-extra.toml"]
   datatype = "uint16"
   access   = "read_write"
   address  = { table = "holding", address = 3, count = 1 }
-  meta     = { measurement = false }
+  measurement = false
 
   # Writable AND scaled: a write carries engineering units and the runtime inverts the
   # transform before the module encodes the register (§4.2). Register 3 holds 17001, so this
@@ -87,6 +87,33 @@ points_from      = ["plc-sim", "./points.d/modbus/plc-sim-extra.toml"]
   address   = { table = "holding", address = 3, count = 1 }
   transform = { decimal_shift = -3 }
   unit      = "kV"
+
+  # Typed signal metadata (§5). `range` is enforced on WRITE by the runtime, in engineering
+  # units, before the device is touched — the limit a cloud form renders is now the limit a
+  # script meets too. `meta` is what it always was: the site's own tags, untouched.
+  #
+  # Deliberately NO `publish` here: this point is polled and asserted on repeatedly, and a
+  # publish policy would (correctly) suppress the repeats. `quiet_u16` below covers that.
+  [[device.point]]
+  id          = "bounded_u16"
+  datatype    = "uint16"
+  access      = "read_write"
+  address     = { table = "holding", address = 52, count = 1 }
+  range       = { min = 10, max = 500 }
+  measurement = { group = "Plant", series = "Bounded" }
+  meta        = { asset_tag = "B-17" }
+
+  # `publish` (§5.4) applied by the RUNTIME, not by a flow. Writable so the suite can make the
+  # value change on demand: `on_change` must let that one change through and then suppress
+  # every identical re-read, while the points around it keep publishing every poll. Waiting
+  # for the value to change is what makes the test deterministic — a point that only ever
+  # publishes once, at startup, races the test client's subscription.
+  [[device.point]]
+  id       = "quiet_u16"
+  datatype = "uint16"
+  access   = "read_write"
+  address  = { table = "holding", address = 54, count = 1 }
+  publish  = { on_change = true }
 
 # Switched off (§3.3): a disabled device is not loaded at all — never connected, polled or
 # advertised — and nothing else about it is read, so the point library it names need not be

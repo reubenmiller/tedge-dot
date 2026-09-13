@@ -51,10 +51,21 @@ pub const LIBRARY_PATH_ENV: &str = "TEDGE_DOT_POINT_LIBRARY_PATH";
 /// configuration, which is the mistake worth naming explicitly.
 const CONNECTOR_ONLY_KEYS: [&str; 4] = ["connector", "mqtt", "connection", "device"];
 
-/// Point fields that are merged key by key when a later definition overrides an earlier one.
-/// Everything else — `address` included — is replaced wholesale, because a partial protocol
-/// address is not a meaningful thing to inherit.
-const DEEP_MERGED_KEYS: [&str; 2] = ["meta", "transform"];
+/// Point fields that are merged key by key when a later definition overrides an earlier one,
+/// so a site can set `publish.deadband` on an inherited point without restating `on_change`
+/// and `min_interval`. Everything else — `address` included — is replaced wholesale, because a
+/// partial protocol address is not a meaningful thing to inherit.
+///
+/// The scalar forms (`measurement = false`, `parameter = false | true | "<set>"`) replace what
+/// was inherited, as any scalar does: the merge only applies when both sides are tables.
+const DEEP_MERGED_KEYS: [&str; 6] = [
+    "meta",
+    "transform",
+    "range",
+    "publish",
+    "measurement",
+    "parameter",
+];
 
 // The keys a contract-level table may carry (§3.3). Anything else is refused, with the nearest
 // known key suggested, so a misspelt setting — `polling_interval` for `poll_interval` — is
@@ -96,10 +107,39 @@ const POINT_KEYS: &[&str] = &[
     "name",
     "description",
     "transform",
+    "range",
+    "publish",
+    "measurement",
+    "parameter",
     "meta",
     "subscribe",
 ];
 const TRANSFORM_KEYS: &[&str] = &["multiplier", "divisor", "decimal_shift", "offset"];
+const RANGE_KEYS: &[&str] = &["min", "max"];
+const PUBLISH_KEYS: &[&str] = &["on_change", "deadband", "min_interval", "debounce"];
+const MEASUREMENT_KEYS: &[&str] = &["group", "series"];
+const PARAMETER_KEYS: &[&str] = &[
+    "group",
+    "set",
+    "title",
+    "description",
+    "enum",
+    "default",
+    "order",
+];
+
+/// The `meta` keys that had a fixed meaning in 0.1 and are typed point fields in 0.2. `meta` is
+/// free-form again, so these are still *accepted* — but they no longer do anything, which is a
+/// silent behaviour change, so the loader warns for one release and names the field each moved
+/// to (§5).
+const LEGACY_META_KEYS: [(&str, &str); 6] = [
+    ("on_change", "publish.on_change"),
+    ("deadband", "publish.deadband"),
+    ("min_interval", "publish.min_interval"),
+    ("debounce", "publish.debounce"),
+    ("measurement", "measurement"),
+    ("parameter", "parameter"),
+];
 const LIBRARY_TOP_KEYS: &[&str] = &["library", "point"];
 const LIBRARY_KEYS: &[&str] = &["protocol", "type", "description", "version"];
 
@@ -182,14 +222,54 @@ fn check_document(doc: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// The keys of one point definition, inline or in a point library, and of its transform.
+/// The keys of one point definition, inline or in a point library, and of its typed tables.
+///
+/// The typed tables of §5 are checked exactly like `transform`: the contract's own validation
+/// policy — "a misspelt setting would otherwise be accepted and do nothing" — is the reason
+/// they stopped being `meta` keys, so `publish = { on_chnage = true }` must be refused, not
+/// quietly ignored. `measurement` and `parameter` also have scalar forms, which are left to
+/// the typed parse.
 fn check_point_keys(point: &Value) -> Result<(), String> {
     let id = point.get("id").and_then(Value::as_str).unwrap_or("<unnamed>");
     check_keys(point, POINT_KEYS, &format!("point '{id}'"))?;
-    if let Some(transform) = point.get("transform") {
-        check_keys(transform, TRANSFORM_KEYS, &format!("the transform of point '{id}'"))?;
+    for (key, known) in [
+        ("transform", TRANSFORM_KEYS),
+        ("range", RANGE_KEYS),
+        ("publish", PUBLISH_KEYS),
+        ("measurement", MEASUREMENT_KEYS),
+        ("parameter", PARAMETER_KEYS),
+    ] {
+        if let Some(table) = point.get(key) {
+            check_keys(table, known, &format!("the {key} of point '{id}'"))?;
+        }
     }
     Ok(())
+}
+
+/// Warn once per point that still carries a 0.1 convention in `meta`.
+///
+/// These keys are no longer read by anything, so the point would silently lose the behaviour
+/// it declares. Naming the field each moved to turns a silent regression into one line of log
+/// at startup. Dropped after one release, when `meta` is only ever a site's own tags.
+fn warn_legacy_meta(config: &ConnectorConfig) {
+    for device in &config.devices {
+        for point in &device.points {
+            let Some(meta) = point.meta.as_ref().and_then(|m| m.as_object()) else {
+                continue;
+            };
+            for (legacy, replacement) in LEGACY_META_KEYS {
+                if meta.contains_key(legacy) {
+                    tracing::warn!(
+                        "device '{}': point '{}': meta.{legacy} is no longer read — \
+                         it is the point field '{replacement}' since contract 0.2, and the \
+                         value in meta now does nothing",
+                        device.name,
+                        point.id
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Load a connector configuration file, resolving every device's point-library references.
@@ -222,7 +302,33 @@ pub fn resolve(text: &str, base_dir: &Path) -> Result<ConnectorConfig, String> {
         .try_into()
         .map_err(|e: toml::de::Error| format!("failed to parse config: {e}"))?;
     check_writable_transforms(&config)?;
+    check_ranges(&config)?;
+    warn_legacy_meta(&config);
     Ok(config)
+}
+
+/// Refuse `range` on a point whose datatype is not numeric (§5.3): bounds on a `bool`, a
+/// `string` or a `bytes` payload mean nothing, and accepting them would be exactly the silent
+/// no-op that typing these fields was meant to end.
+fn check_ranges(config: &ConnectorConfig) -> Result<(), String> {
+    for device in &config.devices {
+        for point in &device.points {
+            if point.range.is_none() {
+                continue;
+            }
+            let numeric = point
+                .datatype
+                .map(|d| d.value_range().is_some())
+                .unwrap_or(false);
+            if !numeric {
+                return Err(format!(
+                    "device '{}': point '{}' declares a range, but its datatype is not numeric",
+                    device.name, point.id
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Refuse a writable point whose `transform` cannot be inverted (contract §4.2).
@@ -1238,6 +1344,186 @@ protocol_address = {{ host = "127.0.0.1" }}
         );
         // Read-only: legal, because nothing is ever written back through it.
         resolve(&config("read"), dir.path()).unwrap();
+    }
+
+    /// §5 — the typed signal tables get the same validation as every other key, which is the
+    /// whole argument for typing them: `meta = { on_chnage = true }` was accepted in 0.1 and
+    /// did nothing, precisely where a site's per-signal behaviour lives.
+    #[test]
+    fn the_typed_signal_tables_are_validated() {
+        let dir = Dir::new("typed-signal-tables");
+        let config = |point: &str| {
+            format!(
+                r#"
+[connector]
+protocol = "modbus"
+
+[[device]]
+name = "plc-1"
+protocol_address = {{ host = "127.0.0.1" }}
+
+  [[device.point]]
+  id = "t"
+  datatype = "uint16"
+  access = "read_write"
+  address = {{ table = "holding", address = 3, count = 1 }}
+{point}
+"#
+            )
+        };
+        let refused = |point: &str| resolve(&config(point), dir.path()).unwrap_err();
+
+        assert_eq!(
+            refused("  publish = { on_chnage = true }"),
+            "unknown key 'on_chnage' in the publish of point 't' (did you mean 'on_change'?)"
+        );
+        // No suggestion here: 'minimum' is too far from 'min' to be confidently what was meant,
+        // and the rule is the same one that keeps an unrelated word from suggesting anything.
+        assert_eq!(
+            refused("  range = { minimum = 0 }"),
+            "unknown key 'minimum' in the range of point 't'"
+        );
+        assert_eq!(
+            refused("  measurement = { serie = \"T\" }"),
+            "unknown key 'serie' in the measurement of point 't' (did you mean 'series'?)"
+        );
+        // `min`/`max` moved to `range`, so leaving them on `parameter` is now a typo.
+        assert_eq!(
+            refused("  parameter = { min = 0 }"),
+            "unknown key 'min' in the parameter of point 't'"
+        );
+
+        // The valid spellings load, including the scalar forms.
+        for point in [
+            "  publish = { on_change = true, deadband = 0.5, min_interval = \"10s\", debounce = \"2s\" }",
+            "  range = { min = 0, max = 100 }",
+            "  measurement = false",
+            "  measurement = { group = \"Environment\", series = \"Temperature\" }",
+            "  parameter = false",
+            "  parameter = true",
+            "  parameter = \"pump\"",
+            "  parameter = { group = [\"control\"], title = \"Setpoint\", order = 1 }",
+            "  meta = { asset_tag = \"B-17\", commissioned = \"2026-03\" }",
+        ] {
+            resolve(&config(point), dir.path()).unwrap_or_else(|e| panic!("{point}: {e}"));
+        }
+
+        // A range on a non-numeric datatype is a no-op, so it is refused rather than accepted.
+        let err = resolve(
+            &config("  range = { min = 0 }").replace("uint16", "bool"),
+            dir.path(),
+        )
+        .unwrap_err();
+        assert!(err.contains("declares a range, but its datatype is not numeric"), "{err}");
+    }
+
+    /// §5 — the four typed tables merge key by key across a point library and an inline
+    /// override, exactly as `meta` and `transform` do: a site sets `publish.deadband` on an
+    /// inherited point without restating `on_change`. The scalar forms replace, as any scalar
+    /// does, which is what makes `measurement = false` an override rather than a merge.
+    #[test]
+    fn the_typed_signal_tables_merge_key_by_key() {
+        let dir = Dir::new("typed-merge");
+        dir.write(
+            "points.d/modbus/pack.toml",
+            r#"
+[library]
+protocol = "modbus"
+
+[[point]]
+id = "t"
+datatype = "uint16"
+access = "read_write"
+address = { table = "holding", address = 3, count = 1 }
+publish = { on_change = true, min_interval = "10s" }
+range = { min = 0, max = 100 }
+measurement = { group = "Environment", series = "Temperature" }
+parameter = { group = "control", title = "Setpoint" }
+"#,
+        );
+        let cfg = resolve(
+            r#"
+[connector]
+protocol = "modbus"
+point_library_path = ["./points.d"]
+
+[[device]]
+name = "plc-1"
+protocol_address = { host = "127.0.0.1" }
+points_from = ["pack"]
+
+  [[device.point]]
+  id = "t"
+  publish = { deadband = 0.5 }
+  range = { max = 50 }
+  parameter = { title = "Overridden" }
+"#,
+            dir.path(),
+        )
+        .unwrap();
+        let point = &cfg.devices[0].points[0];
+        let publish = point.publish.as_ref().unwrap();
+        assert_eq!(publish.deadband, Some(0.5), "the override");
+        assert_eq!(publish.on_change, Some(true), "kept from the library");
+        assert_eq!(publish.min_interval.as_deref(), Some("10s"), "kept too");
+        let range = point.range.unwrap();
+        assert_eq!(range.max, Some(50.0), "the override");
+        assert_eq!(range.min, Some(0.0), "kept from the library");
+        assert_eq!(point.parameter.as_ref().unwrap()["title"], "Overridden");
+        assert_eq!(
+            point.parameter.as_ref().unwrap()["group"],
+            "control",
+            "a key the override did not mention is kept"
+        );
+        // Untouched by the override, so it survives whole.
+        assert_eq!(
+            point.measurement.as_ref().unwrap()["series"],
+            "Temperature"
+        );
+    }
+
+    /// A scalar override replaces the inherited table rather than merging into it — there is
+    /// nothing to merge a `false` into.
+    #[test]
+    fn a_scalar_override_replaces_an_inherited_table() {
+        let dir = Dir::new("typed-merge-scalar");
+        dir.write(
+            "points.d/modbus/pack.toml",
+            r#"
+[library]
+protocol = "modbus"
+
+[[point]]
+id = "t"
+datatype = "uint16"
+access = "read_write"
+address = { table = "holding", address = 3, count = 1 }
+measurement = { group = "Environment" }
+parameter = { group = "control" }
+"#,
+        );
+        let cfg = resolve(
+            r#"
+[connector]
+protocol = "modbus"
+point_library_path = ["./points.d"]
+
+[[device]]
+name = "plc-1"
+protocol_address = { host = "127.0.0.1" }
+points_from = ["pack"]
+
+  [[device.point]]
+  id = "t"
+  measurement = false
+  parameter = false
+"#,
+            dir.path(),
+        )
+        .unwrap();
+        let point = &cfg.devices[0].points[0];
+        assert_eq!(point.measurement, Some(serde_json::Value::Bool(false)));
+        assert_eq!(point.parameter, Some(serde_json::Value::Bool(false)));
     }
 
     /// A key the contract does not define is refused (§3.3), naming the table and — when one is

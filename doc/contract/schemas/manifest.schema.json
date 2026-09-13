@@ -78,9 +78,43 @@
           "description": {
             "type": "string"
           },
+          "range": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Engineering-unit bounds (§5.3): what the cloud form renders as minimum/maximum AND what the connector enforces on write, so the two cannot disagree.",
+            "properties": {
+              "min": { "type": "number" },
+              "max": { "type": "number" }
+            }
+          },
+          "publish": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "The per-signal publish policy the connector runtime has ALREADY applied to this point's sample stream (§5.4). Published so a consumer can tell 'nothing changed' from 'nothing was read'.",
+            "properties": {
+              "on_change": { "type": "boolean" },
+              "deadband": { "type": "number" },
+              "min_interval": { "type": "string" },
+              "debounce": { "type": "string" }
+            }
+          },
+          "measurement": {
+            "description": "Where the signal lands as a measurement (§5.5): false to keep it out of the measurements, or a table naming its group and series.",
+            "oneOf": [
+              { "const": false },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "group": { "type": "string" },
+                  "series": { "type": "string" }
+                }
+              }
+            ]
+          },
           "meta": {
             "type": "object",
-            "description": "The point's free-form meta table, verbatim."
+            "description": "The point's free-form meta table, verbatim — the site's own tags."
           },
           "parameter": {
             "type": "object",
@@ -123,13 +157,25 @@
           "access": "read",
           "unit": "°C",
           "name": "Boiler temp",
+          "publish": {
+            "on_change": true,
+            "deadband": 0.5
+          },
+          "measurement": {
+            "group": "Environment",
+            "series": "Temperature"
+          },
           "meta": {
-            "on_change": true
+            "asset_tag": "B-17"
           }
         },
         "setpoint": {
           "datatype": "uint16",
           "access": "read_write",
+          "range": {
+            "min": 0,
+            "max": 30000
+          },
           "parameter": {
             "sets": [
               "acme_meter_v2_control_parameters"

@@ -105,6 +105,20 @@ default_mode     = "typed"
   transform = { decimal_shift = -3 }
   unit      = "kV"
 
+  # Typed signal metadata (§5): `range` is enforced on write by the runtime, `publish` is
+  # applied by the runtime to this point's sample stream, and both must appear on the device
+  # manifest (B1-manifest) so a consumer sees the limits and the policy that produced the
+  # stream. B7-range writes outside these bounds and requires a failure with nothing applied.
+  [[device.point]]
+  id        = "bounded_u16"
+  datatype  = "uint16"
+  access    = "read_write"
+  address   = { table = "holding", address = 26, count = 1 }
+  range     = { min = 10, max = 500 }
+  publish   = { on_change = true, min_interval = "1s" }
+  measurement = { group = "Conformance", series = "Bounded" }
+  meta      = { asset_tag = "B-17" }
+
   # writable coil (B6 boolean round-trip).
   [[device.point]]
   id       = "coil_rw"
