@@ -142,7 +142,9 @@ A Device Is Switched Off And On Again With Set-Config
 A Device Polls At Its Own Interval
     [Documentation]    A device's `poll_interval` overrides the connector's (§3): set to 4s on plc-9
     ...                and persisted to its file, its points are sampled every four seconds while
-    ...                plc-10 keeps the connector's one second. Keys are checked by name (§3.3), so
+    ...                plc-10, in another instance with the same one-second connector interval,
+    ...                keeps it (inheritance within one instance is unit-tested by the schedule
+    ...                builders). Keys are checked by name (§3.3), so
     ...                the misspelling `polling_interval` is refused, naming the key it resembles,
     ...                instead of being accepted and silently ignored.
     ${service}=    Set Variable    te/device/main/service/tedge-dot-9/ot/cmd/set-config

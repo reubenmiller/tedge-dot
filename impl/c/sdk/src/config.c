@@ -3,6 +3,7 @@
 
 #include <ctype.h>
 #include <limits.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,38 +70,81 @@ static size_t edit_distance(const char *a, const char *b) {
     return distance;
 }
 
-/* Refuse the first key of `tbl` that is not in `known` (NULL-terminated),
- * naming the table (`place`) and, when one is close enough to be what was
- * meant, the known key it most resembles: within an edit distance of a third
- * of the key's length, and at least 2. Returns 0, or -1 with `err` filled. */
+/* The known key an unknown one most resembles, when it is close enough to be
+ * what was meant: within an edit distance of a third of the key's length, and
+ * at least 2. Ties go to the first known key. NULL when none is. */
+static const char *nearest_key(const char *key, const char *const *known) {
+    const char *nearest = NULL;
+    size_t nearest_distance = 0;
+    for (const char *const *k = known; *k; k++) {
+        size_t distance = edit_distance(key, *k);
+        if (!nearest || distance < nearest_distance) {
+            nearest = *k;
+            nearest_distance = distance;
+        }
+    }
+    size_t limit = strlen(key) / 3 < 2 ? 2 : strlen(key) / 3;
+    return nearest && nearest_distance <= limit ? nearest : NULL;
+}
+
+static int compare_keys(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+/* Append to `err` as snprintf would, never past `errlen`. */
+static void append(char *err, size_t errlen, size_t *used, const char *fmt, ...) {
+    if (*used >= errlen)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(err + *used, errlen - *used, fmt, ap);
+    va_end(ap);
+    *used = n < 0 ? errlen : *used + (size_t)n;
+}
+
+/* Refuse the keys of `tbl` that are not in `known` (NULL-terminated), naming
+ * the table (`place`) and, for each, the known key it most resembles (see
+ * nearest_key). Every unknown key is listed, in byte order, as the Rust loader
+ * lists them: tomlc99 keeps file order, the Rust parser sorts. Returns 0, or -1
+ * with `err` filled. */
 static int check_keys(toml_table_t *tbl, const char *const *known,
                       const char *place, char *err, size_t errlen) {
-    for (int i = 0;; i++) {
+    int nkeys = 0;
+    while (toml_key_in(tbl, nkeys))
+        nkeys++;
+    const char **unknown = malloc((size_t)(nkeys ? nkeys : 1) * sizeof *unknown);
+    if (!unknown) {
+        snprintf(err, errlen, "out of memory checking the keys of %s", place);
+        return -1;
+    }
+    size_t n = 0;
+    for (int i = 0; i < nkeys; i++) {
         const char *key = toml_key_in(tbl, i);
-        if (!key)
-            return 0;
         bool is_known = false;
         for (const char *const *k = known; *k && !is_known; k++)
             is_known = strcmp(*k, key) == 0;
-        if (is_known)
-            continue;
-        const char *nearest = NULL;
-        size_t nearest_distance = 0;
-        for (const char *const *k = known; *k; k++) {
-            size_t distance = edit_distance(key, *k);
-            if (!nearest || distance < nearest_distance) {
-                nearest = *k;
-                nearest_distance = distance;
-            }
-        }
-        size_t limit = strlen(key) / 3 < 2 ? 2 : strlen(key) / 3;
-        if (nearest && nearest_distance <= limit)
-            snprintf(err, errlen, "unknown key '%s' in %s (did you mean '%s'?)",
-                     key, place, nearest);
-        else
-            snprintf(err, errlen, "unknown key '%s' in %s", key, place);
-        return -1;
+        if (!is_known)
+            unknown[n++] = key;
     }
+    if (n == 0) {
+        free(unknown);
+        return 0;
+    }
+    qsort(unknown, n, sizeof *unknown, compare_keys);
+    size_t used = 0;
+    if (n == 1)
+        append(err, errlen, &used, "unknown key '%s' in %s", unknown[0], place);
+    else
+        append(err, errlen, &used, "unknown keys in %s: ", place);
+    for (size_t i = 0; i < n; i++) {
+        const char *nearest = nearest_key(unknown[i], known);
+        if (n > 1)
+            append(err, errlen, &used, "%s'%s'", i ? ", " : "", unknown[i]);
+        if (nearest)
+            append(err, errlen, &used, " (did you mean '%s'?)", nearest);
+    }
+    free(unknown);
+    return -1;
 }
 
 /* The keys of one point definition, inline or in a point library, and of its
