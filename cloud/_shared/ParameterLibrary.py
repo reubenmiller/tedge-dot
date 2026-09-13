@@ -2,7 +2,7 @@
 
 Manages Digital Twin Manager (DTM) property definitions — the tenant-side declaration of
 which parameter sets a device exposes. The definitions themselves are rendered by
-`tedge-dot describe` so the suite posts exactly what a tenant admin would.
+`tedge-dot manifest --format c8y-dtm` so the suite posts exactly what a tenant admin would.
 
 Auth comes from the same environment variables as robotframework-c8y
 (C8Y_BASEURL, C8Y_USER, C8Y_PASSWORD, C8Y_TENANT), via c8y_test_core.
@@ -39,7 +39,7 @@ class ParameterLibrary:
         self, definition: Union[str, Dict[str, Any]], force: bool = False
     ) -> Dict[str, Any]:
         """Make the tenant's DTM property definition match the given one (as rendered by
-        `tedge-dot describe`).
+        `tedge-dot manifest --format c8y-dtm`).
 
         An identifier that already exists is NOT assumed to be correct: the stored schema is
         compared with the wanted one and re-created when it differs, so a definition left over

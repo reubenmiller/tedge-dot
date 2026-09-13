@@ -382,10 +382,14 @@ c-test *args="":
     cmake --build impl/c/build
     ctest --test-dir impl/c/build --output-on-failure {{args}}
 
-# Check that `tedge-dot describe` renders identical Cumulocity DTM definitions in the Rust
-# and C builds. With no argument every connector config in the repo is compared.
-# Usage: just c-describe-parity [config.toml ...]
-c-describe-parity *configs="":
+# Check that `tedge-dot manifest` agrees between the Rust and C builds — the manifests
+# themselves, and the Cumulocity DTM definitions rendered from them. With no argument every
+# connector config in the repo is compared.
+#
+# The script keeps its old name: it is under impl/c/, frozen at contract 0.1 with the rest of
+# the C tree (RFC 0006 §9), and the one-pass C port renames it along with everything else.
+# Usage: just c-manifest-parity [config.toml ...]
+c-manifest-parity *configs="":
     ./impl/c/ci/describe-parity.sh {{configs}}
 
 # Debian architectures the C implementation is built and packaged for.

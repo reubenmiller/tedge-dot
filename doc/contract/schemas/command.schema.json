@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://thin-edge.io/ot-connector/command.schema.json",
   "title": "OT Connector Command Message",
-  "description": "Request/result messages on te/device/<device>/ot/<protocol>/cmd/<verb>/<id>, or for the management verbs te/device/main/service/<service>/ot/cmd/<verb>/<id> (retained). The 'init' state is set by the requester; the connector advances the state machine on the same topic.",
+  "description": "Request/result messages on the thin-edge command topics the connector answers (§6): te/device/<device>///cmd/<command type>/<id>, or te/device/main/service/<service>/cmd/<command type>/<id> for a management verb addressed to one instance (retained). The 'init' state is set by the requester; the connector advances the state machine on the same topic.",
   "type": "object",
   "required": [
     "status"

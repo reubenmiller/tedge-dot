@@ -8,12 +8,14 @@
       `datatype` → §7 thin-edge commands → §8 `manifest --format`. §6 was withdrawn.
 * [ ] Port `impl/c/` to contract 0.2 in one pass once it is ratified and shipped in Rust
       (RFC 0006 §9, option A), then re-enable the `c`, `e2e-c` and `packaging-parity` CI jobs
-      and resume `just c-describe-parity` (→ `c-manifest-parity`). That pass must also pick up
-      the shared flows §7 renamed underneath the freeze: `impl/c/packaging/nfpm.yaml` still
-      installs `flows/ot-command-forward/` and `flows/ot-command-result/`, which no longer
-      exist — they are now `ot-parameter-update/` and `ot-parameter-result/`. The frozen file
-      was left alone deliberately; its packaging job is gated off, so nothing builds it in the
-      meantime.
+      and resume the parity check, now `just c-manifest-parity`. Three things changed under
+      the freeze and are deliberately NOT fixed in `impl/c/`, for that one pass to pick up:
+      `packaging/nfpm.yaml` still installs `flows/ot-command-forward/` and
+      `flows/ot-command-result/`, renamed to `ot-parameter-update/` and `ot-parameter-result/`
+      by §7; `src/main.c` still has `describe` with `--set`/`--compact` instead of `manifest`
+      with `--format`; and `ci/describe-parity.sh` keeps its name (the just recipe is already
+      `c-manifest-parity`) and still compares `describe` output. The gated-off `c`, `e2e-c`
+      and `packaging-parity` jobs mean nothing builds or runs any of it in the meantime.
 
 * [ ] Ship profibus in the `tedge-dot-rs` package: the `profibus` cargo feature is excluded
       from the goreleaser builds because its serial dependency (`serialport` via `profirust`)

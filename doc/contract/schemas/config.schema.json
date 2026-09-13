@@ -23,7 +23,7 @@
         "service_name": {
           "type": "string",
           "minLength": 1,
-          "description": "Connector service name; defaults to 'tedge-dot-<protocol>'. It addresses the connector's management commands (te/device/main/service/<service>/ot/cmd/<verb>/<id>), so it must be unique on the broker and cannot be changed by set-config."
+          "description": "Connector service name; defaults to 'tedge-dot-<protocol>'. It addresses the connector's management commands — on its own service topic, or as the 'service' field of one on a device topic (§6.6) — so it must be unique on the broker and cannot be changed by set-config."
         },
         "poll_interval": {
           "$ref": "#/$defs/duration",

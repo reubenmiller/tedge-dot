@@ -527,9 +527,7 @@ pub async fn run_until_reloadable(
     connector
         .configure(&config)
         .map_err(|e| format!("configure failed: {e}"))?;
-    let mut caps = connector.capabilities();
-    augment_management_caps(&mut caps);
-    augment_batch_caps(&mut caps);
+    let caps = effective_capabilities(&connector.capabilities());
 
     // 2. MQTT setup.
     let health_topic = format!("te/device/main/service/{service}/status/health");
@@ -1660,6 +1658,19 @@ async fn handle_command(
 
 /// Advertise the runtime-provided `write-batch` verb for every module that implements
 /// `write` (the runtime executes the batch as a sequence of `write` calls).
+/// What the connector actually answers: the module's own capabilities plus the verbs the
+/// runtime implements on its behalf (the management verbs, and `write-batch` over `write`).
+///
+/// Anything that has to say what a connector does WITHOUT running it — `tedge-dot manifest`,
+/// which lists a device's command types — must ask this rather than the module, or it will
+/// advertise a shorter list than the running service does.
+pub fn effective_capabilities(caps: &Capabilities) -> Capabilities {
+    let mut caps = caps.clone();
+    augment_management_caps(&mut caps);
+    augment_batch_caps(&mut caps);
+    caps
+}
+
 fn augment_batch_caps(caps: &mut Capabilities) {
     if caps.command_verbs.iter().any(|v| v == "write")
         && !caps.command_verbs.iter().any(|v| v == "write-batch")

@@ -11,9 +11,9 @@
 #      inventory path and translates its c8y_Registers / c8y_Coils definitions into OT
 #      Connector Contract points (address/datatype/transform/unit; measurementMapping into
 #      the point's typed `measurement` field, honoured by the ot-measurement flow);
-#   3. publishes one generic `ot_define_device` thin-edge command (bridged to the connector's
-#      `define-device` management verb by ot-command-forward) and waits until the connector
-#      reports it applied — i.e. the device/points are persisted into the connector TOML.
+#   3. publishes one generic `ot_define_device` thin-edge command (the connector answers it
+#      itself, claiming it by the payload's `service`; contract §6.6) and waits until the
+#      connector reports it applied — i.e. the device/points are persisted into the connector TOML.
 #
 # Why a shim script and not the `ot-fieldbus-import` flow sketched in RFC 0002: the tedge
 # flows JS runtime (tedge 2.x) exposes no HTTP client — no fetch(), no XMLHttpRequest, no

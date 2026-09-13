@@ -108,6 +108,27 @@ Device Manifest Describes The Device And Its Points
     # `meta` is free-form again: the site's own tags, published verbatim and read by nobody.
     Should Be Equal    ${points}[bounded_u16][meta]    ${{ {"asset_tag": "B-17"} }}
 
+The Manifest CLI Prints What The Service Publishes
+    [Documentation]    `tedge-dot manifest` (§8) prints the manifests a configuration would
+    ...                publish, off the same code, with no broker and no device — so a tenant
+    ...                admin can render the parameter definitions before anything is deployed.
+    ...                Compared field for field against the retained message, because the two
+    ...                drifting apart is the failure this whole command exists to prevent.
+    ...                `info` is the exception: it comes from a live `connect`, which a CLI
+    ...                that talks to nothing cannot have.
+    ${retained}=    Wait For Message Containing    ${MANIFEST_TOPIC}    "info"    timeout=${READY_TIMEOUT}
+    ${printed}=    DeviceLibrary.Execute Command
+    ...    cmd=tedge-dot manifest -c /etc/connector.toml -d ${DEVICE}    strip=${True}
+    ${documents}=    Evaluate    json.loads($printed)    modules=json
+    Length Should Be    ${documents}    1    one device asked for, one manifest printed
+    # The CLI has no topic to carry the device name, so it adds it to the document.
+    Should Be Equal    ${documents}[0][device]    ${DEVICE}
+    ${actual}=    Evaluate
+    ...    {k: v for k, v in $documents[0].items() if k not in ("device", "info")}    modules=json
+    ${expected}=    Evaluate
+    ...    {k: v for k, v in json.loads($retained).items() if k != "info"}    modules=json
+    Should Be Equal    ${actual}    ${expected}
+
 Capability Descriptor Describes The Build Only
     [Documentation]    What the configuration says about a device is on its manifest; the
     ...                capability descriptor (§7) is a property of the build and carries no
@@ -399,13 +420,16 @@ Write Batch Rejects An Empty Request
     ${reason}=    Get Json Field    ${result}    reason
     Should Contain    ${reason}    no writes
 
-Describe Renders The Parameter Set Definition
-    [Documentation]    `tedge-dot describe` renders this config's writable points as the
-    ...                Cumulocity DTM property definition a tenant admin registers once, with
-    ...                the same keys the parameter twin fragment carries. Runs against whichever
-    ...                implementation the stack was built with (IMPL=rust|c).
+The Manifest CLI Renders The Parameter Set Definition
+    [Documentation]    `tedge-dot manifest --format c8y-dtm` (§8.1) renders this config's
+    ...                writable points as the Cumulocity DTM property definition a tenant admin
+    ...                registers once, with the same keys the parameter twin fragment carries —
+    ...                from the device manifest, not from the configuration file, which is what
+    ...                keeps the vendor's schema out of the cloud-agnostic SDK. One compact
+    ...                document per line, because the DTM service takes one per request. Runs
+    ...                against whichever implementation the stack was built with (IMPL=rust|c).
     ${output}=    DeviceLibrary.Execute Command
-    ...    cmd=tedge-dot describe -c /etc/connector.toml --compact    strip=${True}
+    ...    cmd=tedge-dot manifest -c /etc/connector.toml --format c8y-dtm    strip=${True}
     # The first JSON line, not the first line: a warning on stderr (§5.2) can be interleaved.
     ${definition}=    Evaluate    json.loads([l for l in $output.splitlines() if l.startswith("{")][0])    modules=json
     Should Be Equal    ${definition}[identifier]    ${PARAM_SET}
@@ -414,25 +438,34 @@ Describe Renders The Parameter Set Definition
     Dictionary Should Contain Key    ${properties}    coil_rw
     Dictionary Should Not Contain Key    ${properties}    level_f32
     Should Be Equal    ${properties}[coil_rw][type]    boolean
+    # `range` becomes the form's bounds: the same table the connector enforces on write (§5.3).
+    Should Be Equal    ${properties}[bounded_u16][minimum]    ${10}
+    Should Be Equal    ${properties}[bounded_u16][maximum]    ${500}
+    # The configured order survives into the form: the manifest resolved it (§8.2), because a
+    # JSON object has none of its own to preserve.
+    Should Be Equal    ${properties}[temp_u16][order]    ${1}
+    Should Be Equal    ${properties}[coil_rw][order]    ${2}
     Should Be Equal    ${definition}[contexts]    ${{['asset', 'event', 'operation']}}
 
-Describe Renders Every Config In A Directory
-    [Documentation]    `tedge-dot describe` takes a directory, like `run`: one service runs every
+The Manifest CLI Renders Every Config In A Directory
+    [Documentation]    `tedge-dot manifest` takes a directory, like `run`: one service runs every
     ...                connector config it finds there, so the definitions a tenant admin registers
     ...                have to cover all of them. The second config here is another device type on
-    ...                another protocol — describe needs neither the protocol module nor a device.
-    Write Describe Configs    /tmp/describe-dir
-    ${identifiers}=    Describe Identifiers    -c /tmp/describe-dir
+    ...                another protocol — the CLI needs no device, and no protocol module either
+    ...                (a protocol this build does not carry costs the manifest its `commands`
+    ...                and nothing else).
+    Write Manifest Configs    /tmp/manifest-dir
+    ${identifiers}=    Definition Identifiers    -c /tmp/manifest-dir
     Should Be Equal    ${identifiers}    ${{[$PARAM_SET, "acme_boiler_control_parameters"]}}
     # A device filter applies across every file, not only the first one.
-    ${identifiers}=    Describe Identifiers    -c /tmp/describe-dir -d boiler-*
+    ${identifiers}=    Definition Identifiers    -c /tmp/manifest-dir -d boiler-*
     Should Be Equal    ${identifiers}    ${{["acme_boiler_control_parameters"]}}
 
-Describe Defaults To The Connector Config Directory
-    [Documentation]    Without `-c`, describe renders the directory the packaged service runs
+The Manifest CLI Defaults To The Connector Config Directory
+    [Documentation]    Without `-c`, the CLI reads the directory the packaged service runs
     ...                (/etc/tedge/plugins/ot) — every connector in it, not just modbus.toml.
-    Write Describe Configs    /etc/tedge/plugins/ot
-    ${identifiers}=    Describe Identifiers
+    Write Manifest Configs    /etc/tedge/plugins/ot
+    ${identifiers}=    Definition Identifiers
     Should Be Equal    ${identifiers}    ${{[$PARAM_SET, "acme_boiler_control_parameters"]}}
 
 Flows Register The Device And Advertise The Parameter Capability
@@ -628,7 +661,7 @@ Defines A Device From A Point Library Alone
 
 
 *** Keywords ***
-Write Describe Configs
+Write Manifest Configs
     [Documentation]    Fill `dir` with two connector configs: this stack's own (plus the point
     ...                libraries it references by relative path) and a second one declaring another
     ...                device type, on another protocol, with one writable point.
@@ -650,11 +683,12 @@ Write Describe Configs
     ${content}=    Evaluate    shlex.quote(chr(10).join($lines) + chr(10))    modules=shlex
     DeviceLibrary.Execute Command    cmd=printf '%s' ${content} > ${dir}/opcua.toml
 
-Describe Identifiers
-    [Documentation]    The set identifiers `tedge-dot describe` renders for `args`, in output order.
+Definition Identifiers
+    [Documentation]    The set identifiers `manifest --format c8y-dtm` renders for `args`, in
+    ...                output order.
     [Arguments]    ${args}=${EMPTY}
     ${output}=    DeviceLibrary.Execute Command
-    ...    cmd=tedge-dot describe ${args} --compact    strip=${True}
+    ...    cmd=tedge-dot manifest ${args} --format c8y-dtm    strip=${True}
     ${identifiers}=    Evaluate
     ...    [json.loads(l)["identifier"] for l in $output.splitlines() if l.startswith("{")]
     ...    modules=json

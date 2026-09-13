@@ -3,24 +3,22 @@
 These files translate the legacy Cumulocity operations the Python Modbus plugin shipped (under
 the repo-root [`operations/`](../../operations/)) into the **generic OT command model** of the
 new connector. They are the Cumulocity-specific glue: each one maps a cloud operation onto a
-protocol-neutral `ot_<verb>` thin-edge command. The [`ot-command-forward`](../flows/) flow then
-bridges that command to the connector's `cmd/<verb>` topic, the connector (or the SDK runtime, for
-management verbs) acts on it, and [`ot-command-result`](../flows/) mirrors the result back so the
-cloud operation completes.
+protocol-neutral `ot_<verb>` thin-edge command. The connector subscribes to those command topics
+and answers them itself (contract §6, RFC 0006 §7): no flow stands between the operation and the
+driver, so the operation completes when the driver says it did.
 
 Management verbs (`set-config`, `define-device`, `remove-device`) change one connector instance's
-configuration, so they go to that instance's service topic
-(`te/device/main/service/<service>/ot/cmd/<verb>/<id>`, contract §6.3) rather than a device topic.
-`ot-command-forward` uses the command's `service` field, else `tedge-dot-<protocol>` — the default
-`service_name` of a connector config. When the connector's config sets another `service_name`
-(e.g. several configurations of one protocol), name the service: `c8y-fieldbus-import` sets it
-from `FIELDBUS_SERVICE`; the `c8y_ModbusConfiguration`/`c8y_SerialConfiguration` templates
-always use the default.
+configuration, so the instance is named in the command's `service` field: with several
+configurations of one protocol on a host, that field is the only thing that says which of them
+the operation is for (contract §6.6). It defaults to `tedge-dot-<protocol>`, the default
+`service_name` of a connector config. When a config sets another `service_name`, the shim must
+say so: `c8y-fieldbus-import` takes it from `FIELDBUS_SERVICE`; the
+`c8y_ModbusConfiguration`/`c8y_SerialConfiguration` templates always use the default.
 
 ```text
- c8y operation ─▶ c8y-mapper ─▶ cmd/ot_<verb> ─▶ ot-command-forward ─▶ ot/<protocol>/cmd/<verb> ─▶ connector
-                                       ▲                                                                │
- operation SUCCESSFUL ◀── c8y-mapper ──┴──────────────── ot-command-result ◀───────────────────────────┘
+ c8y operation ─▶ c8y-mapper ─▶ cmd/ot_<verb>/<id> ─▶ connector (answers in place)
+                                       ▲                         │
+ operation SUCCESSFUL ◀── c8y-mapper ──┴─────────────────────────┘
 ```
 
 ## Mapping
@@ -32,7 +30,7 @@ always use the default.
 | `c8y_ModbusConfiguration` | [`c8y_ModbusConfiguration`](c8y_ModbusConfiguration) | `ot_set_config` | `set-config` | SDK runtime |
 | `c8y_SerialConfiguration` | [`c8y_SerialConfiguration`](c8y_SerialConfiguration) | `ot_set_config` | `set-config` | SDK runtime |
 | `c8y_ModbusDevice` (+ `c8y_Coils`/`c8y_Registers`) | [`c8y_ModbusDevice`](c8y_ModbusDevice) → [`c8y-fieldbus-import`](c8y-fieldbus-import) | `ot_define_device` | `define-device` | SDK runtime |
-| `c8y_ParameterUpdate` (device parameters) | *none here* — the [tedge-parameter-plugin](https://github.com/thin-edge/tedge-parameter-plugin)'s `c8y_ParameterUpdate.template` | `parameter_update` | `write-batch` (reshaped by `ot-command-forward`) | SDK runtime |
+| `c8y_ParameterUpdate` (device parameters) | *none here* — the [tedge-parameter-plugin](https://github.com/thin-edge/tedge-parameter-plugin)'s `c8y_ParameterUpdate.template` | `ot_write_batch` | `write-batch` (reshaped by the `ot-parameter-update` flow) | SDK runtime |
 
 `c8y_Coils` and `c8y_Registers` no longer have standalone shims: the legacy operations only staged
 point definitions in TOML that `c8y_ModbusDevice` later assembled. In the generic model the points
@@ -94,7 +92,8 @@ the script header and unit-tested offline by
 ```jsonc
 // c8y_ParameterUpdate — sent by the Cumulocity "Parameters" tab for one parameter set. The set
 // name (<set>) is the Digital Twin Manager identifier; the whole operation is passed to the
-// parameter_update command as `operation` and ot-command-forward turns it into one write-batch.
+// parameter_update command as `operation`, and ot-parameter-update turns it into one
+// ot_write_batch the connector answers.
 { "c8y_ParameterUpdate": {}, "c8y_ParameterUpdate_acme_meter_v2_control_parameters": {},
   "acme_meter_v2_control_parameters": { "temp_u16": 4343, "coil_rw": true } }
 ```
@@ -112,9 +111,10 @@ device the plugin's own workflow and parameter-set scripts keep working untouche
 Parameters tab only renders sets that have a Digital Twin Manager property definition, which a
 tenant admin registers once (the device never calls the DTM service — device users lack the
 roles anyway).
-`tedge-dot describe` prints exactly those definitions from the connector configs — by default
-every config in `/etc/tedge/plugins/ot`, the directory the service runs, with a set shared by
-several of them rendered once (`-c <file-or-dir>`, repeatable, narrows or widens that):
+`tedge-dot manifest --format c8y-dtm` renders exactly those definitions from the device
+manifests the connector configs produce — by default every config in `/etc/tedge/plugins/ot`,
+the directory the service runs, with a set shared by several of them rendered once
+(`-c <file-or-dir>`, repeatable, narrows or widens that):
 
 ```sh
 # One definition per line, and the DTM service takes one per request — a configuration that
@@ -122,7 +122,7 @@ several of them rendered once (`-c <file-or-dir>`, repeatable, narrows or widens
 # loop's stdin as its own input pipeline and the remaining definitions are never registered.
 defs=$(mktemp) one=$(mktemp)
 trap 'rm -f "$defs" "$one"' EXIT
-tedge-dot describe --compact > "$defs"
+tedge-dot manifest --format c8y-dtm > "$defs"
 # Read from a file, not a pipe: a `while` on the right of a pipe runs in a subshell, where
 # `exit 1` would abort only the loop and leave the script reporting success.
 while read -r definition; do
@@ -139,7 +139,7 @@ configuration declares — `<type>_<group>_parameters`, e.g. `acme_meter_v2_cont
 (contract §5.2). Give every device a `type` (on the `[[device]]`, or once in the point library
 it references): without one the sets fall back to `<protocol>_control_parameters`, which every
 other device type on that protocol also falls back to, and the definitions would overwrite each
-other in the tenant. `describe` warns when a device exposes parameters without a type.
+other in the tenant. `manifest` warns when a device exposes parameters without a type.
 
 Renaming a set leaves the old twin fragment retained under its old name (and mirrored into the
 managed object), so clear it once per device after changing a name:
@@ -172,9 +172,10 @@ sudo cp operations/c8y_ModbusDevice operations/c8y_ModbusConfiguration operation
 sudo install -m 0755 operations/c8y-fieldbus-import /usr/bin/c8y-fieldbus-import  # needs jq + curl
 # The three flows below are already in place on a packaged install; from a
 # source checkout, copy them yourself (see ../flows/README.md):
-sudo cp -Ra flows/ot-command-forward flows/ot-command-result /etc/tedge/mappers/c8y/flows/
+sudo cp -Ra flows/ot-parameter-update flows/ot-parameter-result /etc/tedge/mappers/c8y/flows/
 sudo cp -Ra flows/ot-parameter-state /etc/tedge/mappers/c8y/flows/
 ```
 
-Set each flow's `params.toml` `protocol` (forward) / `command_prefix` (result) if you are not using
-the defaults (`modbus` / `ot_`).
+Only the parameter bridge needs settings, and only when the defaults do not fit: every other
+command goes straight from the cloud mapper to the connector, which answers it in place.
+`ot-parameter-state` has no settings at all — the device manifest tells it everything.

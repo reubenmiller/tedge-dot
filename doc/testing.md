@@ -14,13 +14,13 @@ class of bug the others cannot.
 | Flow tests | `flows/test-flows.sh` (`tedge flows test`) | Sample→measurement/alarm/event mapping, offline | `just test-flows` |
 | Cloud e2e | `cloud/<proto>/tests/*.robot` | Cumulocity operation round-trips on a live tenant, both implementations | `just test-cloud <proto>` / `just test-cloud-c <proto>` |
 | Conformance | `connectors/<proto>/conformance{,-c}.toml` | Contract compliance (schema, decode vectors, behaviour), both implementations | `just conformance <proto>` / `just conformance-c <proto>` |
-| Describe parity | `impl/c/ci/describe-parity.sh` | The two binaries rendering different Cumulocity DTM definitions | `just c-describe-parity` |
+| Manifest parity | `impl/c/ci/describe-parity.sh` | The two binaries publishing different manifests, or rendering them into different Cumulocity DTM definitions | `just c-manifest-parity` |
 
 ### Parity between the two implementations
 
 `tedge-dot` ships as two implementations of one contract (see the root README). They are kept
 honest by *sharing* test assets rather than by having parallel suites: the same Robot suites,
-the same conformance manifests, the same golden decode vectors, and a `describe` output
+the same conformance manifests, the same golden decode vectors, and a `manifest` output
 comparison. `IMPL=rust|c` selects which binary the stack is built with.
 
 A capability one implementation genuinely cannot support is the only exception. The test that

@@ -149,7 +149,7 @@
               "sets"
             ],
             "additionalProperties": false,
-            "description": "Present when the point is a parameter (§5.2): the sets it belongs to, resolved by the connector.",
+            "description": "Present when the point is a parameter (§5.2): the sets it belongs to and how it should be presented as an editable setting, both resolved by the connector. A renderer — `tedge-dot manifest --format c8y-dtm`, a commissioning form — works from this and never from the configuration file.",
             "properties": {
               "sets": {
                 "type": "array",
@@ -159,6 +159,26 @@
                   "type": "string",
                   "pattern": "^[A-Za-z0-9_]+$"
                 }
+              },
+              "title": {
+                "type": "string",
+                "description": "What the point is called AS A SETTING, when that differs from its `name`."
+              },
+              "description": {
+                "type": "string",
+                "description": "What the setting means, when that differs from the point's `description`."
+              },
+              "order": {
+                "type": "integer",
+                "description": "Where the parameter sits in its set, ascending. The point's declared `parameter.order`, else its position among the device's parameters in the configuration — an object has no order of its own, so the connector writes down the one the integrator chose."
+              },
+              "enum": {
+                "type": "array",
+                "minItems": 1,
+                "description": "The values the setting accepts, when it is a closed list."
+              },
+              "default": {
+                "description": "The value a form offers before the operator picks one."
               }
             }
           }
@@ -206,7 +226,9 @@
           "parameter": {
             "sets": [
               "acme_meter_v2_control_parameters"
-            ]
+            ],
+            "order": 1,
+            "title": "Temperature setpoint"
           }
         }
       },

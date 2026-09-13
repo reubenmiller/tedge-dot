@@ -54,8 +54,10 @@ channels:
     address: 'te/device/{device}/ot/{protocol}/manifest'
     description: >
       Retained per-device manifest (contract §8.2): what the device is and what its points
-      are, with their parameter sets resolved. Published before the link status and before
-      any sample; cleared when the device is removed or switched off.
+      are, with their parameter sets and presentation resolved — everything a consumer or a
+      renderer would otherwise read out of the connector's configuration file. Published
+      before the link status and before any sample; cleared when the device is removed or
+      switched off.
     parameters:
       device: { description: thin-edge device entity id segment }
       protocol: { description: protocol module id }
