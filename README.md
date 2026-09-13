@@ -7,7 +7,9 @@ binary that moves data between industrial (OT) protocols and the thin-edge.io
 MQTT broker.
 
 > **Status: alpha.** The MQTT contract, config format and packaging may still
-> change between releases.
+> change between releases. The `develop` branch carries the contract 0.2 work of
+> [RFC 0006](doc/rfc/0006-contract-0.2.md); during it the C implementation is frozen at 0.1
+> ([why](impl/c/README.md)).
 
 ## Two implementations, one contract
 

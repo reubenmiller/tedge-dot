@@ -1,5 +1,13 @@
 # tedge-dot — C implementation
 
+> **Frozen at contract 0.1 during the 0.2 transition** ([RFC 0006 §9](../../doc/rfc/0006-contract-0.2.md),
+> option A, decided 2026-09-13). This tree is neither ported nor released while the Rust
+> implementation and the shared suites move to contract 0.2. The CI jobs `c`, `e2e-c` and
+> `packaging-parity` are gated off in [ci.yaml](../../.github/workflows/ci.yaml), and the last
+> 0.1 `tedge-dot-c` release stays available. Once 0.2 is ratified and shipped in Rust, the C
+> tree is ported in one pass against the settled contract, and the suites and parity checks
+> resume. Everything below describes the 0.1 state.
+
 A C11 implementation of the tedge-dot SDK framework plus all five connectors —
 **Modbus** (libmodbus), **OPC UA** (open62541), **CAN bus** (SocketCAN + a
 minimal DBC parser), **CANopen** (expedited SDO client directly over SocketCAN),
