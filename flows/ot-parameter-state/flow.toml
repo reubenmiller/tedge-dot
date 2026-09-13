@@ -10,8 +10,10 @@ input.mqtt.topics = [
   # manifest is simply left for the next one.
   "te/+/+/ot/+/manifest",
   "te/+/+/ot/+/sample/+",
-  "te/+/+/ot/+/cmd/write/+",
-  "te/+/+/ot/+/cmd/write-batch/+",
+  # Write results now arrive on the thin-edge command topics the connector answers on
+  # directly (contract §6.6, RFC 0006 §7) — there is no connector-side command topic left.
+  "te/+/+/+/+/cmd/ot_write/+",
+  "te/+/+/+/+/cmd/ot_write_batch/+",
 ]
 
 [config]

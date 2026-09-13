@@ -1,0 +1,14 @@
+# ot-parameter-update: a cloud `parameter_update` operation -> one connector write-batch.
+#
+# Half of the only command bridge left (RFC 0006 §7); ot-parameter-result mirrors the batch's
+# transitions back. The two halves are separate flows because the flows engine refuses to let a
+# flow publish to a topic matching one of its own input filters — and this bridge must both
+# raise an ot_write_batch and observe that batch's result.
+#
+# Every other command type is answered by the connector on the thin-edge topic directly, so
+# there is nothing to carry. `parameter_update` stays a flow's job because its request is the
+# tedge-parameter-plugin's cloud shape.
+input.mqtt.topics = ["te/+/+/+/+/cmd/parameter_update/+"]
+
+[[steps]]
+script = "main.js"

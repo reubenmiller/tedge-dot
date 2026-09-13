@@ -7,7 +7,7 @@ device_type = ""
 # `ot_write_coil` backs c8y_SetCoil (kept separate due to the one-operation-per-command-type limit);
 # `parameter_update` backs c8y_ParameterUpdate (Cumulocity device parameters): the operation
 # template comes from the tedge-parameter-plugin, the OT flows serve the command on child devices.
-command_capabilities = "ot_write,ot_write_coil,parameter_update"
+command_capabilities = "parameter_update"
 
 # Optional digital-twin fragment name. When set, the connector's device descriptor (transport and
 # address details, the device manifest's `info`) is published as a retained twin fragment, e.g.

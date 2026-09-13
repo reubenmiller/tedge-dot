@@ -372,21 +372,21 @@ check "parameter-state: opted-in read-only point is displayed" ot-parameter-stat
 check_empty "parameter-state: an opted-out writable point (no sets on the manifest) stays out" ot-parameter-state \
   "$MF"$'\n'"[te/device/plc1/ot/modbus/sample/hidden_rw] $SH"
 check "parameter-state: opted-out point stays out after a write" ot-parameter-state \
-  "$MF"$'\n'"[te/device/plc1/ot/modbus/sample/temp_u16] $ST"$'\n'"[te/device/plc1/ot/modbus/cmd/write/w1] {\"status\":\"successful\",\"point\":\"hidden_rw\",\"value\":2}" \
+  "$MF"$'\n'"[te/device/plc1/ot/modbus/sample/temp_u16] $ST"$'\n'"[te/device/plc1///cmd/ot_write/w1] {\"status\":\"successful\",\"point\":\"hidden_rw\",\"value\":2}" \
   '[te/device/plc1///twin/modbus_control_parameters] {"temp_u16":17001}'
 check "parameter-state: write-only point takes the last acknowledged batch write" ot-parameter-state \
-  "$MF"$'\n''[te/device/plc1/ot/modbus/cmd/write-batch/ot--1] {"status":"successful","results":[{"point":"valve_cmd","status":"successful","value":true}]}' \
+  "$MF"$'\n''[te/device/plc1///cmd/ot_write_batch/ot--1] {"status":"successful","results":[{"point":"valve_cmd","status":"successful","value":true}]}' \
   '[te/device/plc1///twin/modbus_control_parameters] {"valve_cmd":true}'
 check "parameter-state: single write result updates a read/write point optimistically" ot-parameter-state \
-  "$MF"$'\n'"[te/device/plc1/ot/modbus/sample/temp_u16] $ST"$'\n'"[te/device/plc1/ot/modbus/cmd/write/abc] {\"status\":\"successful\",\"point\":\"temp_u16\",\"value\":4242}" \
+  "$MF"$'\n'"[te/device/plc1/ot/modbus/sample/temp_u16] $ST"$'\n'"[te/device/plc1///cmd/ot_write/abc] {\"status\":\"successful\",\"point\":\"temp_u16\",\"value\":4242}" \
   '[te/device/plc1///twin/modbus_control_parameters] {"temp_u16":4242}'
 check "parameter-state: a written point lands in the set the manifest gives it" ot-parameter-state \
-  "$MF"$'\n'"[te/device/plc1/ot/modbus/cmd/write/abc] {\"status\":\"successful\",\"point\":\"pump_speed\",\"value\":12}" \
+  "$MF"$'\n'"[te/device/plc1///cmd/ot_write/abc] {\"status\":\"successful\",\"point\":\"pump_speed\",\"value\":12}" \
   '[te/device/plc1///twin/pump] {"pump_speed":12}'
 check_empty "parameter-state: failed write leaves the twin alone" ot-parameter-state \
-  "$MF"$'\n''[te/device/plc1/ot/modbus/cmd/write/abc] {"status":"failed","point":"temp_u16","reason":"boom"}'
+  "$MF"$'\n''[te/device/plc1///cmd/ot_write/abc] {"status":"failed","point":"temp_u16","reason":"boom"}'
 check_empty "parameter-state: a write result before the manifest is left alone" ot-parameter-state \
-  '[te/device/plc1/ot/modbus/cmd/write/abc] {"status":"successful","point":"temp_u16","value":4242}'
+  '[te/device/plc1///cmd/ot_write/abc] {"status":"successful","point":"temp_u16","value":4242}'
 check_params "parameter-state: default_set param renames every set" ot-parameter-state \
   'default_set = "plc_settings"' \
   "$MF"$'\n'"[te/device/plc1/ot/modbus/sample/pump_speed] $SP" \
@@ -418,7 +418,7 @@ check "parameter-state: a second group of the same type" ot-parameter-state \
 # A write-only point never samples: the manifest is what names its set — including a
 # non-default group, which used to need the request's origin.set.
 check "parameter-state: the manifest names the set of a write-only point" ot-parameter-state \
-  "$MFT"$'\n''[te/device/plc1/ot/modbus/cmd/write-batch/ot--1] {"status":"successful","results":[{"point":"valve_cmd","status":"successful","value":true}]}' \
+  "$MFT"$'\n''[te/device/plc1///cmd/ot_write_batch/ot--1] {"status":"successful","results":[{"point":"valve_cmd","status":"successful","value":true}]}' \
   '[te/device/plc1///twin/acme_boiler_v2_commissioning_parameters] {"valve_cmd":true}'
 # A republished manifest (a reload changed the type) moves the points to the new sets.
 check "parameter-state: a republished manifest renames the sets" ot-parameter-state \
@@ -433,7 +433,7 @@ check "parameter-state: ...and the second fragment carries it too" ot-parameter-
   "$MFT"$'\n'"[te/device/plc1/ot/modbus/sample/flow_limit] $SMULTI" \
   '[te/device/plc1///twin/acme_boiler_v2_commissioning_parameters] {"flow_limit":42}'
 check "parameter-state: a write to a multi-group point updates every fragment" ot-parameter-state \
-  "$MFT"$'\n'"[te/device/plc1/ot/modbus/sample/flow_limit] $SMULTI"$'\n'"[te/device/plc1/ot/modbus/cmd/write/w9] {\"status\":\"successful\",\"point\":\"flow_limit\",\"value\":7}" \
+  "$MFT"$'\n'"[te/device/plc1/ot/modbus/sample/flow_limit] $SMULTI"$'\n'"[te/device/plc1///cmd/ot_write/w9] {\"status\":\"successful\",\"point\":\"flow_limit\",\"value\":7}" \
   '[te/device/plc1///twin/acme_boiler_v2_commissioning_parameters] {"flow_limit":7}'
 SSHARED='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"shared","datatype":"uint16","value":5,"quality":"good"}'
 check "parameter-state: an absolute set list reaches each set" ot-parameter-state \
@@ -443,11 +443,11 @@ check "parameter-state: an absolute set list reaches each set" ot-parameter-stat
 # right set: the manifest is retained too, so it is replayed with it.
 RESONLY='{"status":"successful","results":[{"point":"valve_cmd","status":"successful","value":true}],"origin":{"command":"parameter_update","set":"acme_boiler_v2_commissioning_parameters","parameters":{"valve_cmd":true}}}'
 check "parameter-state: a replayed result alone still names the set (manifest replayed too)" ot-parameter-state \
-  "$MFT"$'\n'"[te/device/plc1/ot/modbus/cmd/write-batch/ot--9] $RESONLY" \
+  "$MFT"$'\n'"[te/device/plc1///cmd/ot_write_batch/ot--9] $RESONLY" \
   '[te/device/plc1///twin/acme_boiler_v2_commissioning_parameters] {"valve_cmd":true}'
 # An opted-out point stays out even when a request names a set for it: the manifest decides.
 check_empty "parameter-state: origin.set cannot resurrect an opted-out point" ot-parameter-state \
-  "$MFT"$'\n'"[te/device/plc1/ot/modbus/cmd/write-batch/ot--8] {\"status\":\"successful\",\"results\":[{\"point\":\"hidden_rw\",\"status\":\"successful\",\"value\":2}],\"origin\":{\"command\":\"parameter_update\",\"set\":\"acme_boiler_v2_control_parameters\"}}"
+  "$MFT"$'\n'"[te/device/plc1///cmd/ot_write_batch/ot--8] {\"status\":\"successful\",\"results\":[{\"point\":\"hidden_rw\",\"status\":\"successful\",\"value\":2}],\"origin\":{\"command\":\"parameter_update\",\"set\":\"acme_boiler_v2_control_parameters\"}}"
 # A set name becomes a twin fragment key AND a topic segment. The connector refuses to publish an
 # unusable one, and the flow checks again: `#`/`+` would be an illegal PUBLISH topic and `/`
 # would publish outside te/<device>///twin/.
@@ -458,120 +458,86 @@ check_empty "parameter-state: unusable set names on a manifest cannot reach the 
 check_empty "parameter-state: a cleared manifest stops the updates" ot-parameter-state \
   "$MF"$'\n'"[$MANIFEST_TOPIC] "$'\n'"[te/device/plc1/ot/modbus/sample/temp_u16] $ST"
 
-# --- ot-command-forward: parameter_update -> write-batch ---
+# --- ot-parameter-update: the ONLY command flow left (RFC 0006 §7) ---
+# Every other command type goes straight to the connector on its thin-edge topic, so there is
+# nothing for a flow to carry. `parameter_update` stays here because its request is the
+# tedge-parameter-plugin's cloud shape, and reshaping that is what flows are for.
 C8YOP='{"status":"init","operation":{"deviceId":"123","c8y_ParameterUpdate":{},"c8y_ParameterUpdate_acme_boiler_v2_control_parameters":{},"acme_boiler_v2_control_parameters":{"temp_u16":4242,"coil_rw":true}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}'
-check "command-forward: c8y parameter update -> one write-batch with origin + mapper metadata" ot-command-forward \
+check "parameter-update: c8y parameter update -> one write-batch with origin + mapper metadata" ot-parameter-update \
   "[te/device/plc1///cmd/parameter_update/c8y-mapper-1] $C8YOP" \
-  '[te/device/plc1/ot/modbus/cmd/write-batch/ot--c8y-mapper-1] {"status":"init","writes":[{"point":"temp_u16","value":4242},{"point":"coil_rw","value":true}],"origin":{"command":"parameter_update","set":"acme_boiler_v2_control_parameters","parameters":{"temp_u16":4242,"coil_rw":true}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}'
-check "command-forward: direct parameter update shape" ot-command-forward \
+  '[te/device/plc1///cmd/ot_write_batch/ot--c8y-mapper-1] {"status":"init","writes":[{"point":"temp_u16","value":4242},{"point":"coil_rw","value":true}],"origin":{"command":"parameter_update","set":"acme_boiler_v2_control_parameters","parameters":{"temp_u16":4242,"coil_rw":true}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}'
+check "parameter-update: direct parameter update shape" ot-parameter-update \
   '[te/device/plc1///cmd/parameter_update/x1] {"status":"init","set":"pump","parameters":{"pump_speed":12}}' \
-  '[te/device/plc1/ot/modbus/cmd/write-batch/ot--x1] {"status":"init","writes":[{"point":"pump_speed","value":12}],"origin":{"command":"parameter_update","set":"pump","parameters":{"pump_speed":12}}}'
-check_params "command-forward: protocol recorded by ot-parameter-state wins over params" ot-command-forward '' \
+  '[te/device/plc1///cmd/ot_write_batch/ot--x1] {"status":"init","writes":[{"point":"pump_speed","value":12}],"origin":{"command":"parameter_update","set":"pump","parameters":{"pump_speed":12}}}'
+# The batch goes to the device the operation was issued on: no protocol is named anywhere, and
+# nothing has to have been learned from a sample first (the 0.1 flow needed both).
+check "parameter-update: the batch stays on the device topic, whatever the protocol" ot-parameter-update \
   '[te/device/opc1///cmd/parameter_update/x1] {"status":"init","set":"opcua_control_parameters","parameters":{"setpoint":7}}' \
-  '[te/device/opc1/ot/opcua/cmd/write-batch/ot--x1]' \
-  --context '{"ot-protocol:opc1":"opcua"}'
-check "command-forward: unintelligible parameter update forwarded as an empty batch with the error noted" ot-command-forward \
+  '[te/device/opc1///cmd/ot_write_batch/ot--x1]'
+check "parameter-update: unintelligible request becomes an empty batch with the error noted" ot-parameter-update \
   '[te/device/plc1///cmd/parameter_update/x2] {"status":"init","operation":{"c8y_ParameterUpdate":{}}}' \
   '"writes":[],"origin":{"command":"parameter_update","set":null,"parameters":null,"error":"c8y_ParameterUpdate operation names no parameter set"}'
 
 # The connector echoes `origin` into its results (§6.4), so a terminal result replayed on its
 # own — a mapper restarted between the request and the result, its in-memory cache gone — still
-# completes the command type the requester asked for. Without this the result is mirrored onto
-# ot_write_batch and the Cumulocity operation waits on parameter_update forever.
-check "command-result: a replayed result alone routes by the echoed origin" ot-command-result \
-  '[te/device/plc1/ot/modbus/cmd/write-batch/ot--c8y-mapper-7] {"status":"successful","results":[{"point":"temp_u16","status":"successful","value":4242}],"origin":{"command":"parameter_update","set":"acme_boiler_v2_control_parameters"}}' \
+# completes the cloud command. Without this the Cumulocity operation waits forever.
+check "parameter-result: a replayed result alone still completes the cloud command" ot-parameter-result \
+  '[te/device/plc1///cmd/ot_write_batch/ot--c8y-mapper-7] {"status":"successful","results":[{"point":"temp_u16","status":"successful","value":4242}],"origin":{"command":"parameter_update","set":"acme_boiler_v2_control_parameters"}}' \
   '[te/device/plc1///cmd/parameter_update/c8y-mapper-7] {'
 
-# --- ot-command-result: origin.command routes reshaped commands back ---
 BINIT='{"status":"init","writes":[{"point":"temp_u16","value":4242}],"origin":{"command":"parameter_update","set":"acme_boiler_v2_control_parameters","parameters":{"temp_u16":4242}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}'
-BRESULT="[te/device/plc1/ot/modbus/cmd/write-batch/ot--c8y-mapper-1] $BINIT"$'\n'"[te/device/plc1/ot/modbus/cmd/write-batch/ot--c8y-mapper-1] {\"status\":\"successful\",\"results\":[{\"point\":\"temp_u16\",\"status\":\"successful\",\"value\":4242}]}"
-check "command-result: batch result completes the originating command type" ot-command-result "$BRESULT" \
+BRESULT="[te/device/plc1///cmd/ot_write_batch/ot--c8y-mapper-1] $BINIT"$'\n'"[te/device/plc1///cmd/ot_write_batch/ot--c8y-mapper-1] {\"status\":\"successful\",\"results\":[{\"point\":\"temp_u16\",\"status\":\"successful\",\"value\":4242}]}"
+check "parameter-result: batch result completes the cloud command" ot-parameter-result "$BRESULT" \
   '[te/device/plc1///cmd/parameter_update/c8y-mapper-1] {'
-check "command-result: batch result keeps the c8y-mapper metadata" ot-command-result "$BRESULT" \
+check "parameter-result: batch result keeps the c8y-mapper metadata" ot-parameter-result "$BRESULT" \
   '"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}'
-check "command-result: batch result carries status + per-point results" ot-command-result "$BRESULT" \
+check "parameter-result: batch result carries status + per-point results" ot-parameter-result "$BRESULT" \
   '"status":"successful","results":[{"point":"temp_u16","status":"successful","value":4242}]}'
-check_absent "command-result: batch request body (writes) is not echoed" ot-command-result "$BRESULT" \
+check_absent "parameter-result: batch request body (writes) is not echoed" ot-parameter-result "$BRESULT" \
   '"status":"successful"' '"writes"'
-check "command-result: failed batch combines the origin note and the connector reason" ot-command-result \
-  '[te/device/plc1/ot/modbus/cmd/write-batch/ot--x2] {"status":"init","writes":[],"origin":{"command":"parameter_update","error":"no parameter set"}}'$'\n''[te/device/plc1/ot/modbus/cmd/write-batch/ot--x2] {"status":"failed","reason":"write-batch request has no writes","results":[]}' \
+check "parameter-result: failed batch combines the origin note and the connector reason" ot-parameter-result \
+  '[te/device/plc1///cmd/ot_write_batch/ot--x2] {"status":"init","writes":[],"origin":{"command":"parameter_update","error":"no parameter set"}}'$'\n''[te/device/plc1///cmd/ot_write_batch/ot--x2] {"status":"failed","reason":"write-batch request has no writes","results":[]}' \
   '[te/device/plc1///cmd/parameter_update/x2] {"origin":{"command":"parameter_update","error":"no parameter set"},"status":"failed","reason":"no parameter set; write-batch request has no writes","results":[]}'
-check "command-result: batch without origin mirrors as ot_write_batch" ot-command-result \
-  '[te/device/plc1/ot/modbus/cmd/write-batch/ot--b1] {"status":"successful","results":[]}' \
+# A batch this flow did not raise is none of its business: the connector answers it on the topic
+# it arrived on, and there is no cloud command to complete.
+check_empty "parameter-result: a batch it did not raise is left alone" ot-parameter-result \
   '[te/device/plc1///cmd/ot_write_batch/b1] {"status":"successful","results":[]}'
+check_empty "parameter-result: an init is cached, not mirrored (no loop)" ot-parameter-result \
+  '[te/device/plc1///cmd/ot_write_batch/ot--b2] {"status":"init","writes":[]}'
+# An ot_write goes straight to the connector — this flow never sees a reason to act on one.
+check_empty "parameter-update: a plain ot_write is not this flow's business" ot-parameter-update \
+  '[te/device/plc1///cmd/ot_write/abc] {"status":"init","point":"coil_rw","value":true}'
+
 check "registration: advertises the parameter_update capability" ot-registration \
   '[te/device/plc1/ot/modbus/status/link] {"status":"connected"}' \
   '[te/device/plc1///cmd/parameter_update] {}'
+# ...and the command types the manifest says the connector answers, so the advertised list is
+# what the connector actually implements rather than a hard-coded guess.
+MF_CMDS='{"contract":"0.2","protocol":"modbus","service":"tedge-dot-modbus","commands":["ot_write","ot_write_batch","ot_write_coil"],"points":{}}'
+check "registration: advertises the manifest's command types" ot-registration \
+  "[te/device/plc1/ot/modbus/manifest] $MF_CMDS"$'\n''[te/device/plc1/ot/modbus/status/link] {"status":"connected"}' \
+  '[te/device/plc1///cmd/ot_write_coil] {}'
 
-# --- the parameter bridge in one mapper: state records the protocol, forward uses it, result completes, state updates the twin ---
+# --- the parameter bridge in one mapper: reshape, connector answers, twin updated ---
+# One flow fewer than 0.1, and no protocol recorded anywhere: the batch is addressed to the
+# device, and the connector that owns its points answers it (§6.5).
 CHAIN="[te/device/opc1/ot/opcua/manifest] $MF_OPC1
 [te/device/opc1/ot/opcua/sample/setpoint] {\"device\":\"opc1\",\"protocol\":\"opcua\",\"point\":\"setpoint\",\"mode\":\"typed\",\"datatype\":\"int32\",\"value\":0,\"quality\":\"good\"}
 [te/device/opc1///cmd/parameter_update/c8y-mapper-9] {\"status\":\"init\",\"operation\":{\"c8y_ParameterUpdate\":{},\"c8y_ParameterUpdate_opcua_control_parameters\":{},\"opcua_control_parameters\":{\"setpoint\":42}},\"c8y-mapper\":{\"on_fragment\":\"c8y_ParameterUpdate\",\"output\":null}}
-[te/device/opc1/ot/opcua/cmd/write-batch/ot--c8y-mapper-9] {\"status\":\"init\",\"writes\":[{\"point\":\"setpoint\",\"value\":42}],\"origin\":{\"command\":\"parameter_update\",\"set\":\"opcua_control_parameters\",\"parameters\":{\"setpoint\":42}},\"c8y-mapper\":{\"on_fragment\":\"c8y_ParameterUpdate\",\"output\":null}}
-[te/device/opc1/ot/opcua/cmd/write-batch/ot--c8y-mapper-9] {\"status\":\"successful\",\"results\":[{\"point\":\"setpoint\",\"status\":\"successful\",\"value\":42}]}"
-check_multi "parameter bridge: forward targets the protocol the state flow recorded (no params needed)" \
-  "ot-parameter-state ot-command-forward ot-command-result" "$CHAIN" \
-  '[te/device/opc1/ot/opcua/cmd/write-batch/ot--c8y-mapper-9] {"status":"init","writes":[{"point":"setpoint","value":42}]'
-check_multi "parameter bridge: result completes the cloud-bound command" \
-  "ot-parameter-state ot-command-forward ot-command-result" "$CHAIN" \
+[te/device/opc1///cmd/ot_write_batch/ot--c8y-mapper-9] {\"status\":\"init\",\"writes\":[{\"point\":\"setpoint\",\"value\":42}],\"origin\":{\"command\":\"parameter_update\",\"set\":\"opcua_control_parameters\",\"parameters\":{\"setpoint\":42}},\"c8y-mapper\":{\"on_fragment\":\"c8y_ParameterUpdate\",\"output\":null}}
+[te/device/opc1///cmd/ot_write_batch/ot--c8y-mapper-9] {\"status\":\"successful\",\"results\":[{\"point\":\"setpoint\",\"status\":\"successful\",\"value\":42}]}"
+check_multi "parameter bridge: the cloud operation becomes one batch on the device topic" \
+  "ot-parameter-state ot-parameter-update ot-parameter-result" "$CHAIN" \
+  '[te/device/opc1///cmd/ot_write_batch/ot--c8y-mapper-9] {"status":"init","writes":[{"point":"setpoint","value":42}]'
+check_multi "parameter bridge: the result completes the cloud-bound command" \
+  "ot-parameter-state ot-parameter-update ot-parameter-result" "$CHAIN" \
   '[te/device/opc1///cmd/parameter_update/c8y-mapper-9] {'
 check_multi "parameter bridge: completed command keeps the mapper metadata and result" \
-  "ot-parameter-state ot-command-forward ot-command-result" "$CHAIN" \
+  "ot-parameter-state ot-parameter-update ot-parameter-result" "$CHAIN" \
   '"status":"successful","results":[{"point":"setpoint","status":"successful","value":42}]}'
-check_multi "parameter bridge: acknowledged write updates the twin, no ot_write_batch echo" \
-  "ot-parameter-state ot-command-forward ot-command-result" "$CHAIN" \
-  '[te/device/opc1///twin/opcua_control_parameters] {"setpoint":42}' --absent 'ot_write_batch'
-
-# --- ot-command-forward (thin-edge cmd -> connector write) ---
-check "command-forward: init forwarded" ot-command-forward \
-  '[te/device/plc1///cmd/ot_write/abc] {"status":"init","point":"coil_rw","value":true}' \
-  '[te/device/plc1/ot/modbus/cmd/write/ot--abc] {"status":"init","point":"coil_rw","value":true}'
-check_empty "command-forward: non-init ignored" ot-command-forward \
-  '[te/device/plc1///cmd/ot_write/abc] {"status":"successful","point":"coil_rw"}'
-# Management verbs change one connector instance's configuration, so they go to its service topic
-# (contract §6.3) — the named `service`, else the packaged tedge-dot-<protocol> — with the entity
-# the command was issued on recorded in origin.device for ot-command-result.
-check "command-forward: set-config init forwarded to the default service" ot-command-forward \
-  '[te/device/main///cmd/ot_set_config/cfg1] {"status":"init","target":"connector","config":{"poll_interval":"5s"}}' \
-  '[te/device/main/service/tedge-dot-modbus/ot/cmd/set-config/ot--cfg1] {"status":"init","target":"connector","config":{"poll_interval":"5s"},"origin":{"device":"main"}}'
-check "command-forward: define-device init forwarded to the service it names" ot-command-forward \
-  '[te/device/main///cmd/ot_define_device/d1] {"status":"init","service":"plant-a","device":{"name":"plc-9"}}' \
-  '[te/device/main/service/plant-a/ot/cmd/define-device/ot--d1] {"status":"init","device":{"name":"plc-9"},"origin":{"device":"main"}}'
-check "command-forward: remove-device keeps the requester's origin and adds the entity" ot-command-forward \
-  '[te/device/gw1///cmd/ot_remove_device/r1] {"status":"init","device":"plc-9","origin":{"ticket":7}}' \
-  '[te/device/main/service/tedge-dot-modbus/ot/cmd/remove-device/ot--r1] {"status":"init","device":"plc-9","origin":{"ticket":7,"device":"gw1"}}'
-check_empty "command-forward: a service that is not a topic level is not forwarded" ot-command-forward \
-  '[te/device/main///cmd/ot_define_device/d2] {"status":"init","service":"+","device":{"name":"plc-9"}}'
-# The default follows the protocol the command targets: the one ot-parameter-state recorded for
-# the entity, else params.protocol.
-check_params "command-forward: management command naming no service goes to tedge-dot-<recorded protocol>" ot-command-forward '' \
-  '[te/device/gw1///cmd/ot_set_config/cfg2] {"status":"init","target":"connector","config":{"poll_interval":"5s"}}' \
-  '[te/device/main/service/tedge-dot-opcua/ot/cmd/set-config/ot--cfg2]' \
-  --context '{"ot-protocol:gw1":"opcua"}'
-check_empty "command-forward: non-ot command ignored" ot-command-forward \
-  '[te/device/plc1///cmd/restart/abc] {"status":"init"}'
-
-# --- ot-command-result (connector result -> thin-edge cmd) ---
-check "command-result: successful mirrored" ot-command-result \
-  '[te/device/plc1/ot/modbus/cmd/write/abc] {"status":"successful","point":"coil_rw","value":true}' \
-  '[te/device/plc1///cmd/ot_write/abc]'
-check "command-result: opcua result mirrored (generic)" ot-command-result \
-  '[te/device/opc1/ot/opcua/cmd/write/xyz] {"status":"successful","point":"setpoint","value":42}' \
-  '[te/device/opc1///cmd/ot_write/xyz]'
-check "command-result: set-config result on a service topic mirrored onto main" ot-command-result \
-  '[te/device/main/service/tedge-dot-modbus/ot/cmd/set-config/ot--cfg1] {"status":"successful"}' \
-  '[te/device/main///cmd/ot_set_config/cfg1]'
-check "command-result: management result completes the command on the echoed origin.device" ot-command-result \
-  '[te/device/main/service/plant-a/ot/cmd/remove-device/ot--r1] {"status":"successful","origin":{"device":"gw1"}}' \
-  '[te/device/gw1///cmd/ot_remove_device/r1]'
-check "command-result: an origin.device that is not a topic level falls back to main" ot-command-result \
-  '[te/device/main/service/plant-a/ot/cmd/remove-device/ot--r2] {"status":"successful","origin":{"device":"#"}}' \
-  '[te/device/main///cmd/ot_remove_device/r2]'
-check_empty "command-result: init not mirrored (no loop)" ot-command-result \
-  '[te/device/plc1/ot/modbus/cmd/write/ot--abc] {"status":"init","point":"coil_rw","value":true}'
-check "command-result: c8y-mapper metadata preserved in result" ot-command-result \
-  $'[te/device/plc1/ot/modbus/cmd/write/ot--abc] {"status":"init","point":"coil_rw","value":true,"c8y-mapper":{"on_fragment":"c8y_SetCoil","output":null}}\n[te/device/plc1/ot/modbus/cmd/write/ot--abc] {"status":"successful","point":"coil_rw","value":true}' \
-  '"c8y-mapper":{"on_fragment":"c8y_SetCoil","output":null}'
+check_multi "parameter bridge: the acknowledged write updates the twin" \
+  "ot-parameter-state ot-parameter-update ot-parameter-result" "$CHAIN" \
+  '[te/device/opc1///twin/opcua_control_parameters] {"setpoint":42}'
 
 echo
 echo "flows: $pass passed, $fail failed"

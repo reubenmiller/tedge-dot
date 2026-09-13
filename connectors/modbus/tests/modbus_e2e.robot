@@ -19,14 +19,14 @@ ${PROTOCOL}             modbus
 ${SERVICE}              tedge-dot
 
 ${SAMPLE_PREFIX}        te/device/${DEVICE}/ot/${PROTOCOL}/sample
-${CMD_PREFIX}           te/device/${DEVICE}/ot/${PROTOCOL}/cmd/write
+${CMD_PREFIX}           te/device/${DEVICE}///cmd/ot_write
 ${LINK_TOPIC}           te/device/${DEVICE}/ot/${PROTOCOL}/status/link
 ${MANIFEST_TOPIC}       te/device/${DEVICE}/ot/${PROTOCOL}/manifest
 ${CAPS_TOPIC}           te/device/main/service/${SERVICE}/ot/capabilities
 ${HEALTH_TOPIC}         te/device/main/service/${SERVICE}/status/health
-${BATCH_PREFIX}         te/device/${DEVICE}/ot/${PROTOCOL}/cmd/write-batch
+${BATCH_PREFIX}         te/device/${DEVICE}///cmd/ot_write_batch
 # Management verbs change this instance's configuration, so they address its service (§6.3).
-${MGMT_PREFIX}          te/device/main/service/${SERVICE}/ot/cmd
+${MGMT_PREFIX}          te/device/main/service/${SERVICE}/cmd
 ${PARAM_CMD_PREFIX}     te/device/${DEVICE}///cmd/parameter_update
 # The device type (from the point library, §3.1) qualifies the parameter set names, so this is
 # `<type>_<group>_parameters` with the type's punctuation folded to '_' (§5.2).
@@ -56,7 +56,7 @@ A Disabled Device Is Left Out Of The Connector
     ...                installed — is not even looked up, so the connector starts all the same.
     Wait For Message Containing    ${LINK_TOPIC}    "status":"connected"    timeout=${READY_TIMEOUT}
     No Messages On Topic    te/device/plc-off/#    timeout=5
-    ${write}=    Set Variable    te/device/plc-off/ot/${PROTOCOL}/cmd/write/off-1
+    ${write}=    Set Variable    te/device/plc-off///cmd/ot_write/off-1
     Publish Message    ${write}    {"status":"init","point":"temp_u16","value":1}    retain=True
     Sleep    3s
     ${payloads}=    Get Messages    ${write}
@@ -356,13 +356,16 @@ Write Batch Writes Several Points In One Command
     Should Be Equal    ${value}    ${True}
 
 Write Batch Stops At The First Failure And Reports What Was Applied
-    [Documentation]    A batch with an unknown point fails, but the result lists the write that
-    ...                succeeded before it so the requester knows the device state.
+    [Documentation]    A batch whose second entry fails at the DEVICE fails, but the result lists
+    ...                the write that succeeded before it so the requester knows the device
+    ...                state, and the entry after it was never attempted. level_f32 is read-only,
+    ...                so the module refuses it — a failure only the device can report, unlike
+    ...                the ones the runtime catches up front (unknown point, range, datatype).
     Publish Message    ${BATCH_PREFIX}/batch-2
-    ...    {"status":"init","writes":[{"point":"temp_u16","value":17001},{"point":"no_such_point","value":1},{"point":"coil_rw","value":false}]}    retain=True
+    ...    {"status":"init","writes":[{"point":"temp_u16","value":17001},{"point":"level_f32","value":1},{"point":"coil_rw","value":false}]}    retain=True
     ${result}=    Wait For Message Containing    ${BATCH_PREFIX}/batch-2    "status":"failed"    timeout=${SAMPLE_TIMEOUT}
     ${reason}=    Get Json Field    ${result}    reason
-    Should Contain    ${reason}    no_such_point
+    Should Contain    ${reason}    level_f32
     ${results}=    Get Json Field    ${result}    results
     Length Should Be    ${results}    2
     Should Be Equal    ${results}[0][status]    successful
@@ -371,6 +374,24 @@ Write Batch Stops At The First Failure And Reports What Was Applied
     ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/coil_rw    timeout=${SAMPLE_TIMEOUT}
     ${value}=    Get Json Field    ${payload}    value
     Should Be Equal    ${value}    ${True}
+
+Write Batch With An Unknown Point Applies Nothing
+    [Documentation]    A point the device does not define is caught before the first write, so
+    ...                the batch fails with NOTHING applied (§6.4) — a typo in a cloud parameter
+    ...                set must not leave half a set written. The owner still answers it: with
+    ...                the protocol gone from the command topic, ownership needs one of the
+    ...                request's points to be its own, and a request whose points are all typos
+    ...                would otherwise hang at `init` for ever.
+    Publish Message    ${BATCH_PREFIX}/batch-4
+    ...    {"status":"init","writes":[{"point":"temp_u16","value":31337},{"point":"no_such_point","value":1}]}    retain=True
+    ${result}=    Wait For Message Containing    ${BATCH_PREFIX}/batch-4    "status":"failed"    timeout=${SAMPLE_TIMEOUT}
+    ${reason}=    Get Json Field    ${result}    reason
+    Should Contain    ${reason}    no_such_point
+    ${results}=    Get Json Field    ${result}    results
+    Should Be Empty    ${results}    the batch never started
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/temp_u16    timeout=${SAMPLE_TIMEOUT}
+    ${value}=    Get Json Field    ${payload}    value
+    Should Not Be Equal As Numbers    ${value}    31337
 
 Write Batch Rejects An Empty Request
     Publish Message    ${BATCH_PREFIX}/batch-3    {"status":"init","writes":[]}    retain=True
@@ -484,13 +505,22 @@ Parameter Update Command Writes The Points And Completes
     ${value}=    Get Json Field    ${payload}    value
     Should Be Equal As Numbers    ${value}    1234
 
-Parameter Update With An Unknown Key Fails With The Connector Reason
+Parameter Update With A Stale Key Fails With The Connector Reason And Applies Nothing
+    [Documentation]    (flows) A parameter set that has drifted from the configuration — a key
+    ...                that is no longer a point — fails the whole operation, naming the key,
+    ...                with nothing written. The batch is rejected before the first write
+    ...                (§6.4), so the set is never half-applied; and the operator sees a reason
+    ...                rather than an operation that hangs.
     [Tags]    flows
     Publish Message    ${PARAM_CMD_PREFIX}/c8y-mapper-2
-    ...    {"status":"init","operation":{"c8y_ParameterUpdate":{},"c8y_ParameterUpdate_${PARAM_SET}":{},"${PARAM_SET}":{"bogus":1}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}    retain=True
+    ...    {"status":"init","operation":{"c8y_ParameterUpdate":{},"c8y_ParameterUpdate_${PARAM_SET}":{},"${PARAM_SET}":{"temp_u16":31337,"bogus":1}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}    retain=True
     ${result}=    Wait For Message Containing    ${PARAM_CMD_PREFIX}/c8y-mapper-2    "status":"failed"    timeout=${FLOWS_TIMEOUT}
     ${reason}=    Get Json Field    ${result}    reason
     Should Contain    ${reason}    bogus
+    # ...and the key that WAS valid was not written: the batch never started.
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/temp_u16    timeout=${SAMPLE_TIMEOUT}
+    ${value}=    Get Json Field    ${payload}    value
+    Should Not Be Equal As Numbers    ${value}    31337
 
 Generic Write Command Is Bridged By The Flows
     [Documentation]    (flows) The pre-existing ot_write bridge (c8y_SetRegister path) still works
@@ -507,10 +537,10 @@ Refuses A Point Library Path From A Management Command
     ...                connector open an arbitrary path and report what it found there — the
     ...                loader's error would otherwise carry file detail into this retained
     ...                result. Refused before the path is opened, in both implementations.
-    Publish Message    ${MGMT_PREFIX}/define-device/lib-2
+    Publish Message    ${MGMT_PREFIX}/ot_define_device/lib-2
     ...    {"status":"init","device":{"name":"plc3","protocol_address":{"transport":"tcp","host":"simulator","port":502,"unit_id":1},"points_from":["../../etc/hostname"]}}
     ...    retain=True
-    ${result}=    Wait For Message Containing    ${MGMT_PREFIX}/define-device/lib-2
+    ${result}=    Wait For Message Containing    ${MGMT_PREFIX}/ot_define_device/lib-2
     ...    "status":"failed"    timeout=${SAMPLE_TIMEOUT}
     ${reason}=    Get Json Field    ${result}    reason
     Should Contain    ${reason}    is a path
@@ -564,10 +594,10 @@ Defines A Device From A Point Library Alone
     ...
     ...                Last in the suite: it rewrites /etc/connector.toml and reconnects every
     ...                device.
-    Publish Message    ${MGMT_PREFIX}/define-device/lib-1
+    Publish Message    ${MGMT_PREFIX}/ot_define_device/lib-1
     ...    {"status":"init","device":{"name":"plc2","protocol_address":{"transport":"tcp","host":"simulator","port":502,"unit_id":1},"points_from":["plc-sim"]}}
     ...    retain=True
-    Wait For Message Containing    ${MGMT_PREFIX}/define-device/lib-1
+    Wait For Message Containing    ${MGMT_PREFIX}/ot_define_device/lib-1
     ...    "status":"successful"    timeout=${SAMPLE_TIMEOUT}
     ${payload}=    Wait For Sample    te/device/plc2/ot/${PROTOCOL}/sample/count_u32    timeout=${SAMPLE_TIMEOUT}
     Sample Should Be Good    ${payload}

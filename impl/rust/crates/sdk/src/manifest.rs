@@ -28,6 +28,7 @@ pub fn device_manifest(
     config: &ConnectorConfig,
     device: &DeviceConfig,
     info: Option<&Value>,
+    commands: &[String],
 ) -> Value {
     let protocol = config.connector.protocol.as_str();
     let naming = SetNaming::of(device, protocol, None);
@@ -119,6 +120,14 @@ pub fn device_manifest(
         manifest.insert("info".into(), info.clone());
     }
     manifest.insert("points".into(), Value::Object(points));
+    // The thin-edge command types this device answers (§6.6): what a mapper routes an
+    // operation to, and what the registration flow advertises instead of a hard-coded list.
+    if !commands.is_empty() {
+        manifest.insert(
+            "commands".into(),
+            Value::Array(commands.iter().map(|c| Value::String(c.clone())).collect()),
+        );
+    }
     Value::Object(manifest)
 }
 
@@ -181,7 +190,7 @@ protocol_address = { host = "127.0.0.1" }
     #[test]
     fn manifest_describes_the_device_and_resolves_the_parameter_sets() {
         let cfg = config();
-        let manifest = device_manifest(&cfg, &cfg.devices[0], None);
+        let manifest = device_manifest(&cfg, &cfg.devices[0], None, &["ot_write".to_string()]);
         assert_eq!(manifest["contract"], json!("0.2"));
         assert_eq!(manifest["protocol"], json!("modbus"));
         assert_eq!(manifest["service"], json!("tedge-dot-modbus"));
@@ -236,7 +245,7 @@ protocol_address = { host = "127.0.0.1" }
         let mut cfg = config();
         cfg.devices[0].device_type = None;
         let info = json!({ "transport": "tcp", "host": "10.0.0.9", "port": 502 });
-        let manifest = device_manifest(&cfg, &cfg.devices[0], Some(&info));
+        let manifest = device_manifest(&cfg, &cfg.devices[0], Some(&info), &[]);
         assert_eq!(manifest["info"], info);
         assert!(manifest.get("type").is_none());
         assert_eq!(

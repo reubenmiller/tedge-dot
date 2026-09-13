@@ -1,5 +1,0 @@
-# Protocol segment on the connector command topic: te/device/<device>/ot/<protocol>/cmd/<verb>/<id>.
-# Set this to the connector you are routing commands to (modbus, opcua, ...). When
-# ot-parameter-state runs in the same mapper it records each device's protocol from its samples,
-# and that takes precedence.
-protocol = "modbus"

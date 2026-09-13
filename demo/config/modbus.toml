@@ -25,6 +25,10 @@ protocol      = "modbus"
 service_name  = "tedge-dot-modbus"
 poll_interval = "2s"
 log_level     = "info"
+# `c8y_SetCoil` needs a Cumulocity operation of its own — two templates cannot share one
+# `workflow.operation` — so it gets a command type of its own, aliased onto the write verb the
+# connector already implements (contract §6.6). Delete this when c8y_SetCoil goes.
+command_aliases = { ot_write_coil = "ot_write" }
 
 [mqtt]
 host = "127.0.0.1"

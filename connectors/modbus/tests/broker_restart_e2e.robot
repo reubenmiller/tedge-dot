@@ -24,7 +24,7 @@ ${PROTOCOL}                 modbus
 ${SERVICE}                  tedge-dot
 
 ${SAMPLE_PREFIX}            te/device/${DEVICE}/ot/${PROTOCOL}/sample
-${BATCH_PREFIX}             te/device/${DEVICE}/ot/${PROTOCOL}/cmd/write-batch
+${BATCH_PREFIX}             te/device/${DEVICE}///cmd/ot_write_batch
 ${LINK_TOPIC}               te/device/${DEVICE}/ot/${PROTOCOL}/status/link
 ${CAPS_TOPIC}               te/device/main/service/${SERVICE}/ot/capabilities
 ${HEALTH_TOPIC}             te/device/main/service/${SERVICE}/status/health

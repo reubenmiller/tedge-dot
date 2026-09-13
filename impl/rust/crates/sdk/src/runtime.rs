@@ -105,6 +105,9 @@ async fn bounded<T>(
 /// failed stays `disconnected` — failing reads add no information there.
 struct LinkTracker {
     protocol: String,
+    /// The thin-edge command types every device of this connector answers (§6.6): the
+    /// manifest advertises them and the retained capability markers are published for them.
+    commands: Vec<String>,
     states: HashMap<String, LinkStatus>,
     /// Last device descriptor seen per device, re-attached to transition reports so the
     /// retained link message keeps carrying it.
@@ -112,9 +115,10 @@ struct LinkTracker {
 }
 
 impl LinkTracker {
-    fn new(protocol: &str) -> Self {
+    fn new(protocol: &str, commands: Vec<String>) -> Self {
         LinkTracker {
             protocol: protocol.to_string(),
+            commands,
             states: HashMap::new(),
             infos: HashMap::new(),
         }
@@ -141,7 +145,8 @@ impl LinkTracker {
                     // The descriptor lives on the manifest (§8.2), which is republished — before
                     // the link status — the first time a device's `connect` reports it.
                     if let Some(device) = config.devices.iter().find(|d| d.name == report.device) {
-                        let payload = crate::manifest::device_manifest(config, device, Some(info));
+                        let payload =
+                            crate::manifest::device_manifest(config, device, Some(info), &self.commands);
                         let topic = crate::manifest::topic(&device.name, &self.protocol);
                         publish_retained(client, &topic, payload.to_string()).await?;
                     }
@@ -159,10 +164,20 @@ impl LinkTracker {
         config: &ConnectorConfig,
     ) -> Result<(), BoxError> {
         for device in &config.devices {
-            let payload =
-                crate::manifest::device_manifest(config, device, self.infos.get(&device.name));
+            let payload = crate::manifest::device_manifest(
+                config,
+                device,
+                self.infos.get(&device.name),
+                &self.commands,
+            );
             let topic = crate::manifest::topic(&device.name, &self.protocol);
             publish_retained(client, &topic, payload.to_string()).await?;
+            // The retained capability markers thin-edge expects for a command type (§6.6).
+            // Published with the manifest so a device is announced and answerable in one step.
+            for command in &self.commands {
+                let marker = crate::commands::capability_topic(&device.name, command);
+                publish_retained(client, &marker, "{}".to_string()).await?;
+            }
         }
         Ok(())
     }
@@ -174,6 +189,12 @@ impl LinkTracker {
         for device in devices {
             self.states.remove(device);
             self.infos.remove(device);
+            // The capability markers go with the manifest: a marker for a device that is gone
+            // would leave a mapper routing operations nothing will ever answer.
+            for command in &self.commands {
+                let marker = crate::commands::capability_topic(device, command);
+                publish_retained(client, &marker, String::new()).await?;
+            }
             publish_retained(client, &crate::manifest::topic(device, &self.protocol), String::new())
                 .await?;
             let link = format!("te/device/{device}/ot/{}/status/link", self.protocol);
@@ -517,8 +538,11 @@ pub async fn run_until_reloadable(
     // Every instance of the protocol on the broker receives every device command, so the one
     // it acts on is decided per message (`route_command`) against the live configuration —
     // which define-device/remove-device change, so a subscription per device would go stale.
-    let device_cmd_sub = format!("te/device/+/ot/{protocol}/cmd/+/+");
-    let service_cmd_sub = format!("te/device/main/service/{service}/ot/cmd/+/+");
+    // The thin-edge command topics (§6, RFC 0006 §7). `+` matches one level including an
+    // empty one, but the empty levels are written out so the filter cannot also match a
+    // connector-ish topic that happens to have the same segment count.
+    let device_cmd_sub = "te/device/+///cmd/+/+".to_string();
+    let service_cmd_sub = format!("te/device/main/service/{service}/cmd/+/+");
 
     let mut opts = MqttOptions::new(
         format!("{service}-{protocol}"),
@@ -629,7 +653,10 @@ pub async fn run_until_reloadable(
 
     // 4. Publish every device's manifest (§8.2) — before its link status and before any sample,
     // on this same connection — then connect to the devices and publish their link status.
-    let mut links = LinkTracker::new(&protocol);
+    let mut links = LinkTracker::new(
+        &protocol,
+        crate::commands::device_command_types(&caps.command_verbs, &config.connector.command_aliases),
+    );
     links.publish_manifests(&client, &config).await?;
     match bounded(limits, "connect", connector.connect()).await {
         Ok(reports) => links.publish_reports(&client, &reports, &config).await?,
@@ -792,7 +819,7 @@ pub async fn run_until_reloadable(
             }
             Some(p) = incoming_rx.recv() => {
                 match handle_command(
-                    &mut connector, &client, &protocol, &service, &mut links,
+                    &mut connector, &client, &service, &mut links,
                     &mut config, &mut config_doc, &config_path,
                     &p.topic, &p.payload, limits,
                 ).await {
@@ -1373,47 +1400,89 @@ pub fn point_ref(point: &crate::config::PointConfig) -> PointRef {
 /// Who a message on the connector's command subscriptions is for (contract §6).
 #[derive(Debug, PartialEq)]
 enum CommandRoute<'a> {
-    /// `te/device/<device>/ot/<protocol>/cmd/<verb>/<id>` for a device this instance's
-    /// configuration defines.
-    Device { device: &'a str, verb: &'a str },
-    /// `te/device/main/service/<service>/ot/cmd/<verb>/<id>` for this instance's service.
-    Service { verb: &'a str },
-    /// Anything else — above all a command for a device this instance does not own. Left
-    /// unanswered: every instance of the protocol on the broker receives it, and an "unknown
-    /// device" failure from one that does not own it would race (and usually beat) the owner's
-    /// real result.
+    /// `te/device/<device>///cmd/<type>/<id>` for a device this instance's configuration
+    /// defines. `verb` is the contract verb the command type resolved to.
+    Device { device: &'a str, verb: &'static str },
+    /// `te/device/main/service/<service>/cmd/<type>/<id>` for this instance's service.
+    Service { verb: &'static str },
+    /// Anything else — above all a command for a device this instance does not own, or a
+    /// command type it does not answer. Left unanswered: every instance of the protocol on the
+    /// broker receives it, and an "unknown device" failure from one that does not own it would
+    /// race (and usually beat) the owner's real result.
     Elsewhere,
 }
 
-/// Route a command topic against the live configuration, so the devices an instance answers
-/// for follow define-device/remove-device.
-fn route_command<'a>(
-    topic: &'a str,
-    protocol: &str,
-    service: &str,
-    config: &ConnectorConfig,
-) -> CommandRoute<'a> {
+/// Route a thin-edge command topic against the live configuration, so the devices an instance
+/// answers for follow define-device/remove-device, and an unknown command type is ignored
+/// rather than answered.
+fn route_command<'a>(topic: &'a str, service: &str, config: &ConnectorConfig) -> CommandRoute<'a> {
+    let aliases = &config.connector.command_aliases;
     let parts: Vec<&'a str> = topic.split('/').collect();
     match parts[..] {
-        ["te", "device", device, "ot", p, "cmd", verb, _id] if p == protocol => {
-            if config.devices.iter().any(|d| d.name == device) {
+        ["te", "device", device, "", "", "cmd", command_type, _id] => {
+            let Some(verb) = crate::commands::verb_of_type(command_type, aliases) else {
+                return CommandRoute::Elsewhere;
+            };
+            // A management verb here is a Cloud Fieldbus operation on the GATEWAY, which is
+            // nobody's configured device — so the device segment decides nothing and the
+            // payload's `service` is the whole claim (§6.6). Point I/O still needs the device.
+            if crate::commands::MANAGEMENT_VERBS.contains(&verb)
+                || config.devices.iter().any(|d| d.name == device)
+            {
                 CommandRoute::Device { device, verb }
             } else {
                 CommandRoute::Elsewhere
             }
         }
-        ["te", "device", "main", "service", s, "ot", "cmd", verb, _id] if s == service => {
-            CommandRoute::Service { verb }
+        ["te", "device", "main", "service", s, "cmd", command_type, _id] if s == service => {
+            match crate::commands::verb_of_type(command_type, aliases) {
+                Some(verb) => CommandRoute::Service { verb },
+                None => CommandRoute::Elsewhere,
+            }
         }
         _ => CommandRoute::Elsewhere,
     }
+}
+
+/// Whether this instance owns a device-topic command: it must define the device, and the
+/// request must name at least one point it has (§6.5).
+///
+/// The point check is what keeps two connectors that share a device apart — with the protocol
+/// still in the sample topics but gone from the command topic, "the device" is no longer enough
+/// to say whose command it is.
+///
+/// *At least one*, not all: a request naming a point nobody has — a typo, a stale cloud
+/// definition — would otherwise be answered by nobody and hang at `init` for ever, which is a
+/// worse failure than the ambiguity this check guards against. The owner takes it and fails it
+/// with a reason instead; for a batch, `handle_write_batch` rejects an unknown point before the
+/// first write, so nothing is applied.
+///
+/// A request naming no point at all (a management verb, or a malformed batch) is left to the
+/// device check alone — and, for a management verb, to the `service` claim.
+fn owns_request(config: &ConnectorConfig, device: &str, json: &serde_json::Value) -> bool {
+    let Some(device_config) = config.devices.iter().find(|d| d.name == device) else {
+        return false;
+    };
+    let has = |point: &str| device_config.points.iter().any(|p| p.id == point);
+    if let Some(point) = json.get("point").and_then(|p| p.as_str()) {
+        return has(point);
+    }
+    if let Some(writes) = json.get("writes").and_then(|w| w.as_array()) {
+        if writes.is_empty() {
+            // A malformed batch touches nothing; the device's owner says so.
+            return true;
+        }
+        return writes
+            .iter()
+            .any(|w| w.get("point").and_then(|p| p.as_str()).map(has).unwrap_or(false));
+    }
+    true
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_command(
     connector: &mut Box<dyn Connector>,
     client: &Mqtt,
-    protocol: &str,
     service: &str,
     links: &mut LinkTracker,
     config: &mut ConnectorConfig,
@@ -1423,7 +1492,7 @@ async fn handle_command(
     payload: &[u8],
     limits: Limits,
 ) -> Result<bool, BoxError> {
-    let route = route_command(topic, protocol, service, config);
+    let route = route_command(topic, service, config);
     let (device, verb) = match route {
         CommandRoute::Device { device, verb } => (device.to_string(), verb),
         CommandRoute::Service { verb } => (String::new(), verb),
@@ -1439,36 +1508,54 @@ async fn handle_command(
         return Ok(false); // only act on new requests; ignore our own transitions
     }
 
-    // Management verbs (§6.3) are handled generically by the runtime; they mutate and persist
-    // the connector configuration, then live-reload the protocol module. That configuration
-    // belongs to this instance alone, so they are accepted on its service topic only.
+    // Management verbs (§6.3) mutate and persist THIS instance's configuration, so exactly one
+    // instance may answer one. Two topics carry them:
+    //
+    //   * the service topic, which names the instance outright;
+    //   * a device topic — where a Cloud Fieldbus operation on the gateway arrives, because the
+    //     c8y mapper publishes an operation on the entity it belongs to and that is the gateway,
+    //     never a connector's service. There the payload's `service` field is the claim: an
+    //     instance acts only when it names this one, and a request naming no service is
+    //     nobody's and stays at `init`, like a command for an unowned device (§6.5).
     let service_cmd = matches!(route, CommandRoute::Service { .. });
-    if service_cmd && is_management_verb(verb) {
+    if is_management_verb(verb) {
+        if !service_cmd {
+            let claimed = json.get("service").and_then(|s| s.as_str());
+            if claimed != Some(service) {
+                debug!(
+                    %verb,
+                    claimed = claimed.unwrap_or("<none>"),
+                    "management command on a device topic is not addressed to this service"
+                );
+                return Ok(false);
+            }
+        }
         return handle_management(
             connector, client, links, config, config_doc, config_path, topic, verb,
             &json, limits,
         )
         .await;
     }
-    // A verb on the wrong kind of topic is refused rather than ignored: the topic already names
+    // A write verb on the service topic is refused rather than ignored: the topic already names
     // this instance as the only addressee, so the refusal cannot race another instance's answer.
-    if service_cmd || is_management_verb(verb) {
-        let reason = if service_cmd {
-            format!(
-                "'{verb}' is not a service command: only set-config, define-device and \
-                 remove-device are; device commands go to \
-                 te/device/<device>/ot/{protocol}/cmd/{verb}/<id>"
-            )
-        } else {
-            format!(
-                "management verb '{verb}' is addressed to the connector service: \
-                 te/device/main/service/{service}/ot/cmd/{verb}/<id>"
-            )
-        };
+    if service_cmd {
+        let reason = format!(
+            "'{verb}' is not a service command: only set-config, define-device and \
+             remove-device are; a write goes to te/device/<device>///cmd/ot_write/<id>"
+        );
         warn!(%verb, "command refused: {reason}");
         let failed = serde_json::json!({ "status": "failed", "reason": reason });
         publish_retained(client, topic, with_origin(failed, json.get("origin")).to_string())
             .await?;
+        return Ok(false);
+    }
+
+    // Ownership is by device AND point (§6.5). With the protocol gone from the command topic,
+    // the device alone no longer says whose command it is: two connectors may serve one device,
+    // and the one that has the point is the one that answers. Anything else is left at `init`
+    // for the owner, never failed — a failure from a non-owner would overwrite its result.
+    if !owns_request(config, &device, &json) {
+        debug!(%device, %verb, "command names a point this instance does not have");
         return Ok(false);
     }
 
@@ -1655,6 +1742,22 @@ async fn handle_write_batch(
     // left the device untouched, which is what lets an operator retry it safely.
     let mut wire_values: Vec<Option<serde_json::Value>> = Vec::with_capacity(writes.len());
     for w in &writes {
+        // A point this device does not define fails the batch here, not on the wire: the
+        // all-or-nothing guarantee has to cover a typo as much as an out-of-range value.
+        if configured_point(config, device, &w.point).is_none() {
+            let reason = format!("write to {} rejected: unknown point", w.point);
+            publish_retained(
+                client,
+                topic,
+                with_origin(
+                    serde_json::json!({ "status": "failed", "reason": reason, "results": [] }),
+                    origin,
+                )
+                .to_string(),
+            )
+            .await?;
+            return Ok(());
+        }
         match (&w.value, configured_point(config, device, &w.point)) {
             (Some(value), Some(configured)) => match wire_value(configured, value) {
                 Ok(wire) => wire_values.push(Some(wire)),
@@ -2569,46 +2672,111 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id 
     }
 
     fn route<'a>(topic: &'a str, config: &ConnectorConfig) -> CommandRoute<'a> {
-        route_command(topic, "modbus", "tedge-dot", config)
+        route_command(topic, "tedge-dot", config)
     }
 
-    /// Every instance of a protocol receives every device command, and each must act only on
-    /// the devices its own configuration defines — plus the management commands addressed to
-    /// its own service. Everything else is another instance's to answer.
+    /// Every instance receives every device command on the thin-edge topics, and each must act
+    /// only on the devices its own configuration defines — plus the management commands
+    /// addressed to its own service. Everything else is another instance's to answer.
     #[test]
     fn commands_route_to_the_owning_instance_only() {
         let config: ConnectorConfig = toml::from_str(BASE).unwrap();
         assert_eq!(
-            route("te/device/plc-1/ot/modbus/cmd/write/1", &config),
+            route("te/device/plc-1///cmd/ot_write/1", &config),
             CommandRoute::Device { device: "plc-1", verb: "write" }
         );
         assert_eq!(
-            route("te/device/main/service/tedge-dot/ot/cmd/define-device/1", &config),
+            route("te/device/plc-1///cmd/ot_write_batch/1", &config),
+            CommandRoute::Device { device: "plc-1", verb: "write-batch" }
+        );
+        assert_eq!(
+            route("te/device/main/service/tedge-dot/cmd/ot_define_device/1", &config),
             CommandRoute::Service { verb: "define-device" }
+        );
+        // A management verb also arrives on a DEVICE topic — that is where the c8y mapper puts
+        // a Cloud Fieldbus operation, because it belongs to the gateway. Whose it is comes from
+        // the payload's `service`, not the topic, so routing alone accepts it.
+        assert_eq!(
+            route("te/device/main///cmd/ot_set_config/1", &config),
+            CommandRoute::Device { device: "main", verb: "set-config" },
+            "the gateway is nobody's configured device: payload.service is the claim"
         );
         for elsewhere in [
             // a device another instance owns
-            "te/device/plc-2/ot/modbus/cmd/write/1",
-            // the same device name under another protocol
-            "te/device/plc-1/ot/opcua/cmd/write/1",
+            "te/device/plc-2///cmd/ot_write/1",
             // another instance's service
-            "te/device/main/service/tedge-dot-2/ot/cmd/define-device/1",
+            "te/device/main/service/tedge-dot-2/cmd/ot_define_device/1",
+            // a command type this connector does not answer (no alias declares it)
+            "te/device/plc-1///cmd/ot_write_coil/1",
+            "te/device/plc-1///cmd/firmware_update/1",
+            // the 0.1 connector-side topics are gone
+            "te/device/plc-1/ot/modbus/cmd/write/1",
             // not a command topic, or not exactly one
-            "te/device/plc-1/ot/modbus/cmd/write",
-            "te/device/plc-1/ot/modbus/cmd/write/1/2",
+            "te/device/plc-1///cmd/ot_write",
+            "te/device/plc-1///cmd/ot_write/1/2",
             "te/device/plc-1/ot/modbus/sample/temp",
             "te/device/main/service/tedge-dot/ot/capabilities",
-            "te/device/main/service/tedge-dot/ot/cmd/define-device",
         ] {
             assert_eq!(route(elsewhere, &config), CommandRoute::Elsewhere, "{elsewhere}");
         }
+    }
+
+    /// An alias (§6.6) is another name for a verb the connector already answers — it exists
+    /// because the c8y mapper needs one command type per operation, which is a cloud
+    /// constraint, not a protocol one.
+    #[test]
+    fn a_command_alias_routes_to_the_verb_it_stands_for() {
+        let mut config: ConnectorConfig = toml::from_str(BASE).unwrap();
+        config
+            .connector
+            .command_aliases
+            .insert("ot_write_coil".into(), "ot_write".into());
+        assert_eq!(
+            route("te/device/plc-1///cmd/ot_write_coil/1", &config),
+            CommandRoute::Device { device: "plc-1", verb: "write" }
+        );
+    }
+
+    /// Ownership is by device AND point (§6.5): with the protocol gone from the command topic,
+    /// the device alone no longer says whose command it is.
+    #[test]
+    fn ownership_needs_every_point_of_the_request() {
+        let config: ConnectorConfig = toml::from_str(BASE).unwrap();
+        let point = &config.devices[0].points[0].id.clone();
+        assert!(owns_request(&config, "plc-1", &serde_json::json!({ "point": point })));
+        assert!(!owns_request(&config, "plc-1", &serde_json::json!({ "point": "nope" })));
+        assert!(!owns_request(&config, "plc-2", &serde_json::json!({ "point": point })));
+        // A batch is answered only when EVERY point is this instance's: a partial answer would
+        // apply some writes and fail the rest.
+        assert!(owns_request(
+            &config,
+            "plc-1",
+            &serde_json::json!({ "writes": [{ "point": point }] })
+        ));
+        // At least one, not all: a batch mixing a known point with a typo is still this
+        // instance's to answer — and `handle_write_batch` fails it before the first write, so
+        // the operator gets a reason instead of a command that hangs at `init` for ever.
+        assert!(owns_request(
+            &config,
+            "plc-1",
+            &serde_json::json!({ "writes": [{ "point": point }, { "point": "nope" }] })
+        ));
+        assert!(!owns_request(
+            &config,
+            "plc-1",
+            &serde_json::json!({ "writes": [{ "point": "nope" }] })
+        ));
+        // A malformed batch touches nothing; the device's owner says so rather than nobody.
+        assert!(owns_request(&config, "plc-1", &serde_json::json!({ "writes": [] })));
+        // A request naming no point (a management verb) is claimed by `service` instead.
+        assert!(owns_request(&config, "plc-1", &serde_json::json!({ "target": "connector" })));
     }
 
     /// Ownership is the live configuration: a device added by define-device routes to this
     /// instance from then on, and a removed one no longer does.
     #[test]
     fn command_routing_follows_the_configuration() {
-        let topic = "te/device/plc-9/ot/modbus/cmd/write/1";
+        let topic = "te/device/plc-9///cmd/ot_write/1";
         let config: ConnectorConfig = toml::from_str(BASE).unwrap();
         assert_eq!(route(topic, &config), CommandRoute::Elsewhere);
 

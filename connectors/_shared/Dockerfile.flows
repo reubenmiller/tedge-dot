@@ -9,7 +9,7 @@ ARG BASE_REGISTRY=public.ecr.aws/docker/library
 FROM ${BASE_REGISTRY}/debian:bookworm-slim
 
 ARG TEDGE_CHANNEL=main
-# Protocol the command bridge targets (ot-command-forward fallback): modbus, opcua, ...
+# Protocol this stack runs; kept for the image tag and the entrypoint, not for any flow.
 ARG PROTOCOL=modbus
 
 RUN apt-get update \
@@ -22,13 +22,13 @@ COPY flows/ot-measurement       /etc/tedge/mappers/ot/flows/ot-measurement
 COPY flows/ot-registration      /etc/tedge/mappers/ot/flows/ot-registration
 COPY flows/ot-alarm             /etc/tedge/mappers/ot/flows/ot-alarm
 COPY flows/ot-event             /etc/tedge/mappers/ot/flows/ot-event
-COPY flows/ot-command-forward   /etc/tedge/mappers/ot/flows/ot-command-forward
-COPY flows/ot-command-result    /etc/tedge/mappers/ot/flows/ot-command-result
+COPY flows/ot-parameter-update  /etc/tedge/mappers/ot/flows/ot-parameter-update
+COPY flows/ot-parameter-result  /etc/tedge/mappers/ot/flows/ot-parameter-result
 COPY flows/ot-parameter-state   /etc/tedge/mappers/ot/flows/ot-parameter-state
 
-# Point the command bridge at the stack's protocol.
-RUN printf 'protocol = "%s"\n' "${PROTOCOL}" > /etc/tedge/mappers/ot/flows/ot-command-forward/params.toml \
-    && tedge config set mqtt.client.host broker \
+# Nothing to point at a protocol any more: the connector answers the thin-edge command topics
+# itself (RFC 0006 §7), so a flow no longer has to know which protocol reaches a device.
+RUN tedge config set mqtt.client.host broker \
     && tedge config set mqtt.client.port 1883 \
     && chown -R tedge:tedge /etc/tedge
 

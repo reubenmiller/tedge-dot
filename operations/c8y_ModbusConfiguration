@@ -10,5 +10,9 @@
 
 [exec.workflow]
 operation = "ot_set_config"
+# The operation belongs to the GATEWAY, so the c8y mapper publishes it on the gateway's command
+# topic — never on a connector's service topic. `service` is therefore the claim: the instance
+# it names is the one that acts, and a request naming none is nobody's (contract §6.6).
+input.service = "tedge-dot-modbus"
 input.target = "connector"
 input.config.poll_interval = "${.payload.c8y_ModbusConfiguration.pollingRate}"

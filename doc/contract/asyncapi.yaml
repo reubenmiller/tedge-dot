@@ -74,30 +74,44 @@ channels:
         $ref: '#/components/messages/Link'
 
   command:
-    address: 'te/device/{device}/ot/{protocol}/cmd/{verb}/{id}'
+    address: 'te/device/{device}///cmd/{commandType}/{id}'
     description: >
-      Retained command request/result topic. The requester publishes the 'init' message;
-      the connector advances the state machine (executing -> successful|failed) on the
-      same topic. Only the connector instance whose configuration defines the device acts
-      on it; every other instance leaves it unanswered (contract §6.5).
+      Retained command request/result topic — a thin-edge command topic the connector
+      subscribes to and drives itself (contract §6). The requester publishes the 'init'
+      message; the connector advances the state machine (executing -> successful|failed) on
+      the same topic. Only the instance whose configuration defines the device AND has the
+      request's point acts on it; every other instance leaves it unanswered (§6.5). A
+      management command type here is claimed by the payload's 'service' field instead (§6.6).
     parameters:
       device: { description: thin-edge device entity id segment }
-      protocol: { description: protocol module id }
-      verb: { description: command verb, e.g. write, write-batch }
+      commandType: { description: 'thin-edge command type, e.g. ot_write, ot_write_batch' }
       id: { description: unique command instance id }
     messages:
       Command:
         $ref: '#/components/messages/Command'
 
+  commandCapability:
+    address: 'te/device/{device}///cmd/{commandType}'
+    description: >
+      Retained empty object marking that the device answers this command type (contract
+      §6.6). Published with the device manifest and cleared with it, so nothing advertises a
+      command for a device that is gone.
+    parameters:
+      device: { description: thin-edge device entity id segment }
+      commandType: { description: 'thin-edge command type, e.g. ot_write' }
+    messages:
+      CommandCapability:
+        $ref: '#/components/messages/CommandCapability'
+
   serviceCommand:
-    address: 'te/device/main/service/{service}/ot/cmd/{verb}/{id}'
+    address: 'te/device/main/service/{service}/cmd/{commandType}/{id}'
     description: >
       Retained request/result topic of the management verbs, addressed to one connector
       instance by its service name (contract §6.3). Same state machine as 'command';
       every transition echoes the request's 'origin'.
     parameters:
       service: { description: connector service name }
-      verb: { description: 'management verb: set-config, define-device or remove-device' }
+      commandType: { description: 'ot_set_config, ot_define_device or ot_remove_device' }
       id: { description: unique command instance id }
     messages:
       Command:
@@ -128,6 +142,11 @@ operations:
     action: send
     channel: { $ref: '#/channels/manifest' }
     summary: The connector publishes a device's retained manifest.
+
+  publishCommandCapability:
+    action: send
+    channel: { $ref: '#/channels/commandCapability' }
+    summary: The connector marks a command type the device answers.
 
   publishLink:
     action: send
@@ -186,6 +205,13 @@ components:
       contentType: application/json
       payload:
         $ref: './schemas/status.schema.json#/$defs/link'
+    CommandCapability:
+      name: CommandCapability
+      title: Command capability marker
+      contentType: application/json
+      payload:
+        type: object
+        description: Always the empty object; the topic carries the meaning.
     Command:
       name: Command
       title: Command request/result

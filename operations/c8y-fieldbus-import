@@ -178,12 +178,12 @@ translate() {
 # thin-edge command topic and the connector command topic (best effort).
 publish_and_wait() {
     local device_json="$1"
-    local cmd_id cmd_topic connector_topic status_file sub_pid waited result reason
+    local cmd_id cmd_topic status_file sub_pid waited result reason
     cmd_id="fieldbus-$(date +%s)-$$"
     cmd_topic="te/device/main///cmd/ot_define_device/${cmd_id}"
-    # Management commands are addressed to the connector service (contract §6.3), which
-    # ot-command-forward takes from the request's `service`.
-    connector_topic="te/device/main/service/${FIELDBUS_SERVICE}/ot/cmd/define-device/ot--${cmd_id}"
+    # The connector answers this very topic: a management command on a device topic is claimed
+    # by the instance the payload's `service` names (contract §6.6), so there is no second hop
+    # and no flow in between any more (RFC 0006 §7).
     status_file="$(mktemp)"
 
     tedge mqtt sub --no-topic "$cmd_topic" >"$status_file" 2>/dev/null &
@@ -211,9 +211,9 @@ publish_and_wait() {
     done
     kill "$sub_pid" 2>/dev/null
 
-    # Clear the retained request/result messages on both sides of the bridge.
+    # Clear the retained request/result message. One topic now: the connector answered on the
+    # one the request arrived on.
     tedge mqtt pub -r -q 1 "$cmd_topic" '' 2>/dev/null
-    tedge mqtt pub -r -q 1 "$connector_topic" '' 2>/dev/null
 
     case "$result" in
     successful)
