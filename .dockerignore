@@ -1,5 +1,12 @@
 # Build artifacts and local-only files that must not go into the Docker build context.
-target/
+#
+# A .dockerignore pattern without `**` is anchored at the context root, so a bare `target/`
+# missed `impl/rust/target` and `impl/rust/target-worktrees` — tens of gigabytes of host build
+# output shipped into every image build, which is slow and fills the builder's disk (a build
+# then fails with "no space left on device", or exports an image the daemon cannot find).
+**/target/
+**/target-*/
+**/build/
 # dist/
 connectors/*/.venv/
 connectors/*/output/

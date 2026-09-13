@@ -83,13 +83,20 @@ B2 Reads Brake Active As Bool
     ${value}=    Get Json Field    ${payload}    value
     Should Be Equal    ${value}    ${True}
 
-B3 Typed Mode Yields Value And Value Repr
-    [Documentation]    Typed-mode samples carry both 'value' and 'value_repr'.
+B3 Typed Mode Yields Value And Datatype
+    [Documentation]    Typed-mode samples carry 'value' and the point's 'datatype'. Together
+    ...                with the JSON type of 'value' these say everything the removed
+    ...                'value_repr' did (§5), and nothing static per point is echoed.
     ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/rpm    timeout=${SAMPLE_TIMEOUT}
     ${mode}=    Get Json Field    ${payload}    mode
     Should Be Equal    ${mode}    typed
-    ${repr}=    Get Json Field    ${payload}    value_repr
-    Should Not Be Empty    ${repr}
+    ${datatype}=    Get Json Field    ${payload}    datatype
+    Should Not Be Empty    ${datatype}
+    ${sample}=    Evaluate    json.loads($payload)    modules=json
+    Should Be True    isinstance($sample["value"], (int, float, bool, str))
+    FOR    ${gone}    IN    value_repr    ts_ms    unit    access    type    meta    raw    addr
+        Dictionary Should Not Contain Key    ${sample}    ${gone}
+    END
 
 B6 Write Command Succeeds
     [Documentation]    A write command for brake_active transitions executing -> successful.

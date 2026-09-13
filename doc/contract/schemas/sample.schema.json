@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://thin-edge.io/ot-connector/sample.schema.json",
   "title": "OT Connector Sample Envelope",
-  "description": "A single read result published to te/device/<device>/ot/<protocol>/sample/<point>.",
+  "description": "A single read result published to te/device/<device>/ot/<protocol>/sample/<point>. A sample is a time series row: identity, value, quality. Everything static per point — the unit, the labels, the access, the free-form meta table and the device's type — is published once on the device manifest (§8.2) instead of on every read.",
   "type": "object",
   "required": [
     "ts",
@@ -10,20 +10,14 @@
     "protocol",
     "point",
     "mode",
-    "raw",
-    "quality",
-    "addr"
+    "quality"
   ],
   "additionalProperties": false,
   "properties": {
     "ts": {
       "type": "string",
       "format": "date-time",
-      "description": "Read completion time, RFC 3339, millisecond precision, UTC (Z)."
-    },
-    "ts_ms": {
-      "type": "number",
-      "description": "Read completion time as Unix epoch milliseconds (float; the numeric companion to 'ts' for consumers doing time arithmetic)."
+      "description": "Read completion time, RFC 3339, millisecond precision, UTC (Z). A consumer needing epoch milliseconds parses it (there is no second timestamp field)."
     },
     "device": {
       "type": "string",
@@ -31,7 +25,8 @@
     },
     "protocol": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "description": "The protocol module that produced the sample — a fact about its origin, and what ot-measurement groups by."
     },
     "point": {
       "type": "string",
@@ -58,7 +53,8 @@
         "float64",
         "string",
         "bytes"
-      ]
+      ],
+      "description": "The point's datatype. With the JSON type of 'value' it carries everything the removed 'value_repr' said, and it tells a consumer that a string-typed 'value' is an int64 outside the JSON safe range (§4.1)."
     },
     "value": {
       "type": [
@@ -68,44 +64,12 @@
       ],
       "description": "Decoded value in typed mode. Absent in raw mode and when quality=bad."
     },
-    "value_repr": {
-      "enum": [
-        "number",
-        "boolean",
-        "string"
-      ],
-      "description": "How a consumer should interpret 'value'. Required when 'value' is present."
-    },
-    "raw": {
-      "type": "string",
-      "description": "Hex of the bytes read, words space-separated in protocol-natural width."
-    },
     "quality": {
       "enum": [
         "good",
         "bad",
         "stale"
       ]
-    },
-    "unit": {
-      "type": "string"
-    },
-    "type": {
-      "type": "string",
-      "minLength": 1,
-      "description": "The device's declared type (§3.1), when it has one. Lets consumers name the point's parameter set (§5.2) without the configuration file. Per device, not per point, and short — unlike the point's name/description, which are static per point and published once in the capability descriptor instead."
-    },
-    "access": {
-      "enum": [
-        "read",
-        "write",
-        "read_write"
-      ],
-      "description": "The point's declared access (default read). Lets consumers tell writable points (parameters) apart without the configuration file."
-    },
-    "addr": {
-      "type": "object",
-      "description": "Protocol-specific address echo. Shape defined by each connector spec."
     },
     "seq": {
       "type": "integer",
@@ -115,9 +79,13 @@
       "type": "string",
       "description": "Human-readable failure reason. Required when quality=bad."
     },
-    "meta": {
+    "raw": {
+      "type": "string",
+      "description": "Hex of the bytes read, words space-separated in protocol-natural width. Present only under [connector] sample_debug (§3.3): a debugging aid, not part of the default envelope."
+    },
+    "addr": {
       "type": "object",
-      "description": "The point's free-form 'meta' table from the connector configuration, echoed verbatim by the runtime. Flows use it for per-signal behaviour (e.g. on_change, deadband, min_interval, debounce); absent when the point declares no meta."
+      "description": "Protocol-specific address echo; shape defined by each connector spec. Present only under [connector] sample_debug (§3.3): the address is static per point and the manifest's job."
     }
   },
   "allOf": [
@@ -148,8 +116,7 @@
       },
       "then": {
         "required": [
-          "value",
-          "value_repr"
+          "value"
         ]
       }
     },
@@ -166,44 +133,19 @@
           "error"
         ]
       }
-    },
-    {
-      "if": {
-        "required": [
-          "value"
-        ]
-      },
-      "then": {
-        "required": [
-          "value_repr"
-        ]
-      }
     }
   ],
   "examples": [
     {
       "ts": "2026-05-30T10:00:00.000Z",
-      "ts_ms": 1780221600000.0,
       "device": "plc-1",
       "protocol": "modbus",
-      "point": "boiler_temp_raw",
+      "point": "boiler_temp",
       "mode": "typed",
       "datatype": "float32",
       "value": 42.5,
-      "value_repr": "number",
-      "raw": "422a 0000",
       "quality": "good",
-      "unit": "raw",
-      "addr": {
-        "table": "holding",
-        "address": 7,
-        "unit_id": 1
-      },
-      "seq": 12407,
-      "meta": {
-        "on_change": true,
-        "deadband": 0.5
-      }
+      "seq": 12407
     },
     {
       "ts": "2026-05-30T10:00:01.000Z",
@@ -211,24 +153,30 @@
       "protocol": "modbus",
       "point": "run_command",
       "mode": "raw",
-      "raw": "0001",
       "quality": "good",
-      "addr": {
-        "table": "coil",
-        "address": 0,
-        "unit_id": 1
-      }
+      "seq": 12408
     },
     {
       "ts": "2026-05-30T10:00:02.000Z",
       "device": "plc-1",
       "protocol": "modbus",
-      "point": "boiler_temp_raw",
+      "point": "boiler_temp",
       "mode": "typed",
       "datatype": "float32",
-      "raw": "",
       "quality": "bad",
-      "error": "modbus exception: gateway target device failed to respond",
+      "error": "modbus exception: gateway target device failed to respond"
+    },
+    {
+      "ts": "2026-05-30T10:00:03.000Z",
+      "device": "plc-1",
+      "protocol": "modbus",
+      "point": "boiler_temp",
+      "mode": "typed",
+      "datatype": "float32",
+      "value": 42.5,
+      "quality": "good",
+      "seq": 12409,
+      "raw": "422a 0000",
       "addr": {
         "table": "holding",
         "address": 7,

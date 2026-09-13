@@ -120,11 +120,11 @@ check_multi() {
   fi
 }
 
-S='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"level_f32","mode":"typed","datatype":"float32","value":404.17,"value_repr":"number","raw":"43ca 15c3","quality":"good","addr":{}}'
-SBAD='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"level_f32","mode":"typed","datatype":"float32","quality":"bad","error":"timeout","addr":{}}'
-SBOOL='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"coil_rw","mode":"typed","datatype":"bool","value":true,"value_repr":"boolean","raw":"01","quality":"good","addr":{}}'
+S='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"level_f32","mode":"typed","datatype":"float32","value":404.17,"quality":"good"}'
+SBAD='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"level_f32","mode":"typed","datatype":"float32","quality":"bad","error":"timeout"}'
+SBOOL='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"coil_rw","mode":"typed","datatype":"bool","value":true,"quality":"good"}'
 # Same contract envelope from a different protocol: the group is derived from sample.protocol.
-SOPCUA='{"ts":"2026-05-30T10:00:00.000Z","device":"opc1","protocol":"opcua","point":"temperature","mode":"typed","datatype":"float32","value":21.5,"value_repr":"number","raw":"41ac0000","quality":"good","addr":{"node_id":"ns=2;s=Temperature"}}'
+SOPCUA='{"ts":"2026-05-30T10:00:00.000Z","device":"opc1","protocol":"opcua","point":"temperature","mode":"typed","datatype":"float32","value":21.5,"quality":"good"}'
 
 # --- ot-measurement (OT sample -> thin-edge measurement) ---
 check "measurement: modbus float -> m/modbus" ot-measurement \
@@ -155,6 +155,11 @@ MF_PLC1='{"contract":"0.2","protocol":"modbus","service":"tedge-dot-modbus","poi
  "valve_cmd":{"datatype":"bool","access":"write","parameter":{"sets":["modbus_control_parameters"]}},
  "setpoint":{"datatype":"uint16","access":"read_write","meta":{"measurement":false},"parameter":{"sets":["modbus_control_parameters"]}},
  "m1":{"datatype":"uint16","access":"read","meta":{"on_change":true}},
+ "d1":{"datatype":"float32","access":"read","meta":{"deadband":0.5}},
+ "r1":{"datatype":"uint16","access":"read","meta":{"min_interval":"10s"}},
+ "b1":{"datatype":"uint16","access":"read","meta":{"debounce":"2s"}},
+ "Foo.Bar":{"datatype":"uint16","access":"read","meta":{"measurement":{"group":"Environment","series":"Temperature"}}},
+ "no_optout":{"datatype":"uint16","access":"read_write","meta":{"measurement":"false"},"parameter":{"sets":["modbus_control_parameters"]}},
  "temperature":{"datatype":"uint16","access":"read","meta":{"measurement":{"group":"Environment","series":"Temperature"}}}
 }}'
 # The same device declaring a type: the sets are qualified by it (RFC 0005), and two of the
@@ -186,9 +191,10 @@ STEMP='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","poi
 check "measurement: manifest meta.measurement names group/series" ot-measurement \
   "$MF"$'\n'"[te/device/plc1/ot/modbus/sample/temperature] $STEMP" \
   '[te/device/plc1///m/Environment] {"Environment":{"Temperature":17.001},"time":"2026-05-30T10:00:00.000Z"}'
-# The manifest wins over a sample that still echoes meta (a 0.1 envelope): one source of truth.
+# A 0.1 sample that still echoes `meta` is ignored: the manifest is the only source of truth,
+# so the naming comes from it and the stale echo cannot override it.
 SMOLD='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"temperature","datatype":"uint16","value":1,"quality":"good","meta":{"measurement":{"group":"Old","series":"Way"}}}'
-check "measurement: the manifest wins over meta echoed in a sample" ot-measurement \
+check "measurement: meta echoed in a 0.1 sample is ignored; the manifest names the series" ot-measurement \
   "$MF"$'\n'"[te/device/plc1/ot/modbus/sample/temperature] $SMOLD" \
   '[te/device/plc1///m/Environment] {"Environment":{"Temperature":1}'
 # A cleared manifest (the device was removed) falls back to the flow-wide defaults.
@@ -201,7 +207,7 @@ check_empty "measurement: a manifest alone publishes nothing" ot-measurement "$M
 # --- ot-measurement extended config (on_change / point_separator / combine) ---
 # Scaling is applied by the connector (per-point transform), so the sample already carries the
 # final value; the flow passes it through unchanged.
-SINT='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"temp_u16","mode":"typed","datatype":"uint16","value":17001,"value_repr":"number","raw":"4269","quality":"good","addr":{}}'
+SINT='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"temp_u16","mode":"typed","datatype":"uint16","value":17001,"quality":"good"}'
 
 check_params "measurement: passes connector-scaled value through" ot-measurement \
   'include_boolean = "true"' \
@@ -209,7 +215,7 @@ check_params "measurement: passes connector-scaled value through" ot-measurement
   '[te/device/plc1///m/modbus] {"modbus":{"temp_u16":17001},"time":"2026-05-30T10:00:00.000Z"}'
 
 # point_separator: a dotted point id remaps the signal to group/series without per-point config.
-SDOTTED='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"Environment.Temperature","mode":"typed","datatype":"uint16","value":17001,"value_repr":"number","raw":"4269","quality":"good","addr":{}}'
+SDOTTED='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"Environment.Temperature","mode":"typed","datatype":"uint16","value":17001,"quality":"good"}'
 check_params "measurement: point_separator remaps signal to group.series" ot-measurement \
   'point_separator = "."' \
   "[te/device/plc1/ot/modbus/sample/Environment.Temperature] $SDOTTED" \
@@ -221,53 +227,41 @@ check_params "measurement: on_change suppresses unchanged" ot-measurement \
   "$(printf '[te/device/plc1/ot/modbus/sample/temp_u16] %s\n[te/device/plc1/ot/modbus/sample/temp_u16] %s' "$SINT" "$SINT")" \
   '"temp_u16":17001'
 
-# --- ot-measurement per-signal meta (sample.meta overrides the flow params per point) ---
-# The connector runtime echoes the point's `meta` table in every sample envelope; the flow
-# applies it without any per-signal flow configuration.
-
-# meta.on_change: identical value twice -> second suppressed (flow-wide on_change stays off).
-MC1='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"m1","mode":"typed","datatype":"uint16","value":42,"value_repr":"number","raw":"002a","quality":"good","addr":{},"meta":{"on_change":true}}'
-MC2='{"ts":"2026-05-30T10:00:07.000Z","device":"plc1","protocol":"modbus","point":"m1","mode":"typed","datatype":"uint16","value":42,"value_repr":"number","raw":"002a","quality":"good","addr":{},"meta":{"on_change":true}}'
-check_absent "measurement: meta.on_change suppresses repeat" ot-measurement \
-  "$(printf '[te/device/plc1/ot/modbus/sample/m1] %s\n[te/device/plc1/ot/modbus/sample/m1] %s' "$MC1" "$MC2")" \
-  '"time":"2026-05-30T10:00:00.000Z"' '"time":"2026-05-30T10:00:07.000Z"'
+# --- ot-measurement per-signal meta (the manifest's meta overrides the flow params per point) ---
+# The point's `meta` table is on the device manifest (contract §8.2), published once; a sample
+# carries none of it (§5). Each case therefore feeds the manifest first, exactly as the broker
+# replays the retained message, and the flow applies the per-signal settings with no per-signal
+# flow configuration. (`$MF` declares m1/d1/r1/b1/Foo.Bar with the meta each case needs.)
 
 # meta.deadband: change below the deadband suppressed, change above it emitted.
-DB1='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"d1","mode":"typed","datatype":"float32","value":100.0,"value_repr":"number","raw":"42c80000","quality":"good","addr":{},"meta":{"deadband":0.5}}'
-DB2='{"ts":"2026-05-30T10:00:01.000Z","device":"plc1","protocol":"modbus","point":"d1","mode":"typed","datatype":"float32","value":100.4,"value_repr":"number","raw":"42c8cccd","quality":"good","addr":{},"meta":{"deadband":0.5}}'
-DB3='{"ts":"2026-05-30T10:00:02.000Z","device":"plc1","protocol":"modbus","point":"d1","mode":"typed","datatype":"float32","value":100.6,"value_repr":"number","raw":"42c93333","quality":"good","addr":{},"meta":{"deadband":0.5}}'
+DB1='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"d1","mode":"typed","datatype":"float32","value":100.0,"quality":"good"}'
+DB2='{"ts":"2026-05-30T10:00:01.000Z","device":"plc1","protocol":"modbus","point":"d1","mode":"typed","datatype":"float32","value":100.4,"quality":"good"}'
+DB3='{"ts":"2026-05-30T10:00:02.000Z","device":"plc1","protocol":"modbus","point":"d1","mode":"typed","datatype":"float32","value":100.6,"quality":"good"}'
 check_absent "measurement: meta.deadband suppresses sub-threshold change" ot-measurement \
-  "$(printf '[te/device/plc1/ot/modbus/sample/d1] %s\n[te/device/plc1/ot/modbus/sample/d1] %s\n[te/device/plc1/ot/modbus/sample/d1] %s' "$DB1" "$DB2" "$DB3")" \
+  "$(printf '%s\n[te/device/plc1/ot/modbus/sample/d1] %s\n[te/device/plc1/ot/modbus/sample/d1] %s\n[te/device/plc1/ot/modbus/sample/d1] %s' "$MF" "$DB1" "$DB2" "$DB3")" \
   '"time":"2026-05-30T10:00:02.000Z"' '"time":"2026-05-30T10:00:01.000Z"'
 
 # meta.min_interval: reading 5s after the last emit dropped, reading 15s after emitted.
-RL1='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"r1","mode":"typed","datatype":"uint16","value":1,"value_repr":"number","raw":"0001","quality":"good","addr":{},"meta":{"min_interval":"10s"}}'
-RL2='{"ts":"2026-05-30T10:00:05.000Z","device":"plc1","protocol":"modbus","point":"r1","mode":"typed","datatype":"uint16","value":2,"value_repr":"number","raw":"0002","quality":"good","addr":{},"meta":{"min_interval":"10s"}}'
-RL3='{"ts":"2026-05-30T10:00:15.000Z","device":"plc1","protocol":"modbus","point":"r1","mode":"typed","datatype":"uint16","value":3,"value_repr":"number","raw":"0003","quality":"good","addr":{},"meta":{"min_interval":"10s"}}'
+RL1='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"r1","mode":"typed","datatype":"uint16","value":1,"quality":"good"}'
+RL2='{"ts":"2026-05-30T10:00:05.000Z","device":"plc1","protocol":"modbus","point":"r1","mode":"typed","datatype":"uint16","value":2,"quality":"good"}'
+RL3='{"ts":"2026-05-30T10:00:15.000Z","device":"plc1","protocol":"modbus","point":"r1","mode":"typed","datatype":"uint16","value":3,"quality":"good"}'
 check_absent "measurement: meta.min_interval rate-limits" ot-measurement \
-  "$(printf '[te/device/plc1/ot/modbus/sample/r1] %s\n[te/device/plc1/ot/modbus/sample/r1] %s\n[te/device/plc1/ot/modbus/sample/r1] %s' "$RL1" "$RL2" "$RL3")" \
+  "$(printf '%s\n[te/device/plc1/ot/modbus/sample/r1] %s\n[te/device/plc1/ot/modbus/sample/r1] %s\n[te/device/plc1/ot/modbus/sample/r1] %s' "$MF" "$RL1" "$RL2" "$RL3")" \
   '"time":"2026-05-30T10:00:15.000Z"' '"time":"2026-05-30T10:00:05.000Z"'
 
 # meta.debounce: a new value only passes once it has stayed stable for the period; the first
 # observation is the candidate (no emit), the confirmation 3s later is emitted.
-DE1='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"b1","mode":"typed","datatype":"uint16","value":7,"value_repr":"number","raw":"0007","quality":"good","addr":{},"meta":{"debounce":"2s"}}'
-DE2='{"ts":"2026-05-30T10:00:03.000Z","device":"plc1","protocol":"modbus","point":"b1","mode":"typed","datatype":"uint16","value":7,"value_repr":"number","raw":"0007","quality":"good","addr":{},"meta":{"debounce":"2s"}}'
-DE3='{"ts":"2026-05-30T10:00:04.000Z","device":"plc1","protocol":"modbus","point":"b1","mode":"typed","datatype":"uint16","value":9,"value_repr":"number","raw":"0009","quality":"good","addr":{},"meta":{"debounce":"2s"}}'
+DE1='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"b1","mode":"typed","datatype":"uint16","value":7,"quality":"good"}'
+DE2='{"ts":"2026-05-30T10:00:03.000Z","device":"plc1","protocol":"modbus","point":"b1","mode":"typed","datatype":"uint16","value":7,"quality":"good"}'
+DE3='{"ts":"2026-05-30T10:00:04.000Z","device":"plc1","protocol":"modbus","point":"b1","mode":"typed","datatype":"uint16","value":9,"quality":"good"}'
 check_absent "measurement: meta.debounce waits for stability" ot-measurement \
-  "$(printf '[te/device/plc1/ot/modbus/sample/b1] %s\n[te/device/plc1/ot/modbus/sample/b1] %s\n[te/device/plc1/ot/modbus/sample/b1] %s' "$DE1" "$DE2" "$DE3")" \
+  "$(printf '%s\n[te/device/plc1/ot/modbus/sample/b1] %s\n[te/device/plc1/ot/modbus/sample/b1] %s\n[te/device/plc1/ot/modbus/sample/b1] %s' "$MF" "$DE1" "$DE2" "$DE3")" \
   '"time":"2026-05-30T10:00:03.000Z"' '"time":"2026-05-30T10:00:04.000Z"'
 
-# meta.measurement: per-signal group/series naming echoed from the connector point config
-# (e.g. written by the Cloud Fieldbus import shim from a device type's measurementMapping).
-MMEAS='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"temperature","mode":"typed","datatype":"uint16","value":17.001,"value_repr":"number","raw":"4269","quality":"good","addr":{},"meta":{"measurement":{"group":"Environment","series":"Temperature"}}}'
-check "measurement: meta.measurement names group/series" ot-measurement \
-  "[te/device/plc1/ot/modbus/sample/temperature] $MMEAS" \
-  '[te/device/plc1///m/Environment] {"Environment":{"Temperature":17.001},"time":"2026-05-30T10:00:00.000Z"}'
-
 # meta.measurement wins over the point_separator convention (per-signal beats flow-wide).
-MMDOT='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"Foo.Bar","mode":"typed","datatype":"uint16","value":1,"value_repr":"number","raw":"0001","quality":"good","addr":{},"meta":{"measurement":{"group":"Environment","series":"Temperature"}}}'
+MMDOT='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"Foo.Bar","mode":"typed","datatype":"uint16","value":1,"quality":"good"}'
 mmtmp="$(flow_with_params ot-measurement 'point_separator = "."')"
-mmout="$(printf '%s\n' "[te/device/plc1/ot/modbus/sample/Foo.Bar] $MMDOT" | tedge flows test --flows-dir "$mmtmp" 2>/dev/null)"
+mmout="$(printf '%s\n%s\n' "$MF" "[te/device/plc1/ot/modbus/sample/Foo.Bar] $MMDOT" | tedge flows test --flows-dir "$mmtmp" 2>/dev/null)"
 rm -rf "$mmtmp"
 if [[ "$mmout" == *'{"Environment":{"Temperature":1}'* && "$mmout" != *'"Foo"'* ]]; then
   echo "ok   - measurement: meta.measurement wins over point_separator"
@@ -281,18 +275,20 @@ fi
 # meta.measurement = false: the signal stays off the measurements entirely — a parameter whose
 # value belongs on its twin fragment only. Without it (the default), a parameter is published both
 # ways, and a naming table (above) still publishes.
-MOFF='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"setpoint","mode":"typed","datatype":"uint16","value":55,"value_repr":"number","raw":"0037","quality":"good","access":"read_write","addr":{},"meta":{"measurement":false}}'
-MOFFSTR='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"setpoint","mode":"typed","datatype":"uint16","value":55,"value_repr":"number","raw":"0037","quality":"good","access":"read_write","addr":{},"meta":{"measurement":"false"}}'
-MPARAM='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"setpoint","mode":"typed","datatype":"uint16","value":55,"value_repr":"number","raw":"0037","quality":"good","access":"read_write","addr":{}}'
+# The three points differ only in the manifest: `setpoint` carries meta.measurement = false,
+# `no_optout` the string "false", and `temp_u16` no measurement meta at all.
+MOFF='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"setpoint","mode":"typed","datatype":"uint16","value":55,"quality":"good"}'
+MOFFSTR='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"no_optout","mode":"typed","datatype":"uint16","value":55,"quality":"good"}'
+MPARAM='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"temp_u16","mode":"typed","datatype":"uint16","value":55,"quality":"good"}'
 check_empty "measurement: meta.measurement = false keeps the signal off the measurements" ot-measurement \
-  "[te/device/plc1/ot/modbus/sample/setpoint] $MOFF"
+  "$MF"$'\n'"[te/device/plc1/ot/modbus/sample/setpoint] $MOFF"
 # Only the boolean opts out, as for meta.parameter = false: a string is not a switch.
 check "measurement: meta.measurement = \"false\" (a string) does not opt out" ot-measurement \
-  "[te/device/plc1/ot/modbus/sample/setpoint] $MOFFSTR" \
-  '[te/device/plc1///m/modbus] {"modbus":{"setpoint":55}'
+  "$MF"$'\n'"[te/device/plc1/ot/modbus/sample/no_optout] $MOFFSTR" \
+  '[te/device/plc1///m/modbus] {"modbus":{"no_optout":55}'
 check "measurement: a parameter is still a measurement by default" ot-measurement \
-  "[te/device/plc1/ot/modbus/sample/setpoint] $MPARAM" \
-  '[te/device/plc1///m/modbus] {"modbus":{"setpoint":55},"time":"2026-05-30T10:00:00.000Z"}'
+  "$MF"$'\n'"[te/device/plc1/ot/modbus/sample/temp_u16] $MPARAM" \
+  '[te/device/plc1///m/modbus] {"modbus":{"temp_u16":55},"time":"2026-05-30T10:00:00.000Z"}'
 # The opt-out is for measurements only: ot-parameter-state still puts the value on the twin.
 check_multi "measurement: an opted-out parameter still reaches its twin fragment" \
   "ot-measurement ot-parameter-state" \
@@ -301,7 +297,7 @@ check_multi "measurement: an opted-out parameter still reaches its twin fragment
   --absent '///m/'
 
 # combine: two series of one device merged into a single measurement, flushed on interval.
-SLVL='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"level_f32","mode":"typed","datatype":"float32","value":404.17,"value_repr":"number","raw":"43ca15c3","quality":"good","addr":{}}'
+SLVL='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"level_f32","mode":"typed","datatype":"float32","value":404.17,"quality":"good"}'
 check_params "measurement: combine merges series on interval" ot-measurement \
   "$(printf 'combine = "true"\ncombine_interval = "1s"')" \
   "$(printf '[te/device/plc1/ot/modbus/sample/temp_u16] %s\n[te/device/plc1/ot/modbus/sample/level_f32] %s' "$SINT" "$SLVL")" \
@@ -310,7 +306,7 @@ check_params "measurement: combine merges series on interval" ot-measurement \
 # ...and an opted-out signal never reaches the combine buffer, so the flush leaves it out.
 check_params "measurement: combine leaves an opted-out signal out" ot-measurement \
   "$(printf 'combine = "true"\ncombine_interval = "1s"')" \
-  "$(printf '[te/device/plc1/ot/modbus/sample/temp_u16] %s\n[te/device/plc1/ot/modbus/sample/setpoint] %s' "$SINT" "$MOFF")" \
+  "$(printf '%s\n[te/device/plc1/ot/modbus/sample/temp_u16] %s\n[te/device/plc1/ot/modbus/sample/setpoint] %s' "$MF" "$SINT" "$MOFF")" \
   '[te/device/plc1///m/modbus] {"modbus":{"temp_u16":17001},"time"' \
   --final-on-interval
 
@@ -526,7 +522,7 @@ check "registration: advertises the parameter_update capability" ot-registration
 
 # --- the parameter bridge in one mapper: state records the protocol, forward uses it, result completes, state updates the twin ---
 CHAIN="[te/device/opc1/ot/opcua/manifest] $MF_OPC1
-[te/device/opc1/ot/opcua/sample/setpoint] {\"device\":\"opc1\",\"protocol\":\"opcua\",\"point\":\"setpoint\",\"mode\":\"typed\",\"datatype\":\"int32\",\"value\":0,\"value_repr\":\"number\",\"raw\":\"0000 0000\",\"quality\":\"good\",\"addr\":{},\"access\":\"read_write\"}
+[te/device/opc1/ot/opcua/sample/setpoint] {\"device\":\"opc1\",\"protocol\":\"opcua\",\"point\":\"setpoint\",\"mode\":\"typed\",\"datatype\":\"int32\",\"value\":0,\"quality\":\"good\"}
 [te/device/opc1///cmd/parameter_update/c8y-mapper-9] {\"status\":\"init\",\"operation\":{\"c8y_ParameterUpdate\":{},\"c8y_ParameterUpdate_opcua_control_parameters\":{},\"opcua_control_parameters\":{\"setpoint\":42}},\"c8y-mapper\":{\"on_fragment\":\"c8y_ParameterUpdate\",\"output\":null}}
 [te/device/opc1/ot/opcua/cmd/write-batch/ot--c8y-mapper-9] {\"status\":\"init\",\"writes\":[{\"point\":\"setpoint\",\"value\":42}],\"origin\":{\"command\":\"parameter_update\",\"set\":\"opcua_control_parameters\",\"parameters\":{\"setpoint\":42}},\"c8y-mapper\":{\"on_fragment\":\"c8y_ParameterUpdate\",\"output\":null}}
 [te/device/opc1/ot/opcua/cmd/write-batch/ot--c8y-mapper-9] {\"status\":\"successful\",\"results\":[{\"point\":\"setpoint\",\"status\":\"successful\",\"value\":42}]}"

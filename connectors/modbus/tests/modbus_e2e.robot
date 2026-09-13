@@ -151,12 +151,14 @@ Library Point Keeps Its Definition Under An Inline Override
     ...                and address -- the whole point of referencing a list you do not own.
     ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/level_f32    timeout=${SAMPLE_TIMEOUT}
     Sample Should Be Good    ${payload}
-    ${unit}=    Get Json Field    ${payload}    unit
-    Should Be Equal    ${unit}    m
     ${datatype}=    Get Json Field    ${payload}    datatype
     Should Be Equal    ${datatype}    float32
     ${value}=    Get Json Field    ${payload}    value
     Should Be True    abs(${value} - 404.17) < 0.05
+    # The unit is static per point, so it is on the manifest (§8.2), not in every sample (§5).
+    ${manifest}=    Wait For Retained    ${MANIFEST_TOPIC}    timeout=${READY_TIMEOUT}
+    ${points}=    Get Json Field    ${manifest}    points
+    Should Be Equal    ${points}[level_f32][unit]    m
 
 Reads A Point From A Path-Referenced Library
     [Documentation]    connector.toml references its second library by absolute path rather
@@ -165,8 +167,10 @@ Reads A Point From A Path-Referenced Library
     ...                a pre-existing path reference must not stop the management verbs working.
     ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/temp_u16_alias    timeout=${SAMPLE_TIMEOUT}
     Sample Should Be Good    ${payload}
-    ${unit}=    Get Json Field    ${payload}    unit
-    Should Be Equal    ${unit}    alias
+    # The library's `unit` proves which list the point came from; it is on the manifest (§8.2).
+    ${manifest}=    Wait For Retained    ${MANIFEST_TOPIC}    timeout=${READY_TIMEOUT}
+    ${points}=    Get Json Field    ${manifest}    points
+    Should Be Equal    ${points}[temp_u16_alias][unit]    alias
 
 Invalid Register Reports Bad Quality
     [Documentation]    Reading a flagged-invalid address yields a bad-quality sample with an error.
@@ -198,18 +202,30 @@ Writes A Holding Register And Reads It Back
     Should Be Equal As Numbers    ${value}    4242
 
 
-Samples Carry The Point Access And The Device Type
-    [Documentation]    Every sample echoes the point's declared access and the device's type, so
-    ...                flows can tell writable points (parameters) apart and name their parameter
-    ...                set without reading the config file.
+Samples Carry Only What Changes Per Read
+    [Documentation]    A sample is a time series row (§5): identity, value, quality. The point's
+    ...                access, unit, labels and free-form meta — and the device's type — are on
+    ...                the retained manifest (§8.2), published once, so a reading of a point
+    ...                sampled every second no longer repeats them thousands of times a day.
+    ...                `raw` and `addr` are opt-in behind [connector] sample_debug, which the
+    ...                packaged configuration leaves off.
     ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/temp_u16    timeout=${SAMPLE_TIMEOUT}
-    ${type}=    Get Json Field    ${payload}    type
+    ${sample}=    Evaluate    json.loads($payload)    modules=json
+    FOR    ${gone}    IN    type    access    unit    meta    value_repr    ts_ms    raw    addr
+        Dictionary Should Not Contain Key    ${sample}    ${gone}
+    END
+    Should Be Equal    ${sample}[device]    ${DEVICE}
+    Should Be Equal    ${sample}[protocol]    ${PROTOCOL}
+    Should Be Equal    ${sample}[point]    temp_u16
+    Should Be Equal    ${sample}[datatype]    uint16
+    Should Be Equal    ${sample}[quality]    good
+    # ...and the facts that left the envelope are on the manifest, where a flow looks them up.
+    ${manifest}=    Wait For Retained    ${MANIFEST_TOPIC}    timeout=${READY_TIMEOUT}
+    ${points}=    Get Json Field    ${manifest}    points
+    Should Be Equal    ${points}[temp_u16][access]    read_write
+    Should Be Equal    ${points}[level_f32][access]    read
+    ${type}=    Get Json Field    ${manifest}    type
     Should Be Equal    ${type}    ${DEVICE_TYPE}
-    ${access}=    Get Json Field    ${payload}    access
-    Should Be Equal    ${access}    read_write
-    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/level_f32    timeout=${SAMPLE_TIMEOUT}
-    ${access}=    Get Json Field    ${payload}    access
-    Should Be Equal    ${access}    read
 
 Capability Descriptor Advertises Write Batch
     [Documentation]    The runtime adds the write-batch verb for every module that implements write.

@@ -41,6 +41,12 @@ pub struct ConnectorSection {
     /// down so the cloud sees the outage). `"0"` disables the watchdog.
     #[serde(default = "default_stall_timeout")]
     pub stall_timeout: String,
+    /// Put the wire back on every sample envelope: `raw` (the bytes read, hex) and `addr` (the
+    /// protocol-specific address). Off by default — both are static or debugging detail on a
+    /// message a point publishes thousands of times a day (§5) — and switched on by the tooling
+    /// that inspects the wire, above all the conformance suite.
+    #[serde(default)]
+    pub sample_debug: bool,
     /// Directories searched for the point libraries devices name in `points_from`
     /// ([`crate::library`]). Unset means the built-in path: the site directory
     /// `/etc/tedge/plugins/ot/points.d` first, then the packaged

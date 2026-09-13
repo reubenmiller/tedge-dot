@@ -22,8 +22,8 @@
 // signal's measurement per point (e.g. written by the Cloud Fieldbus import from a device type's
 // measurementMapping), and meta.measurement = false keeps the signal out of the measurements
 // altogether (e.g. a parameter whose value should reach the cloud only through its twin
-// fragment). A sample that still echoes `meta` itself (contract 0.1) is honoured when the
-// manifest has not been seen yet.
+// fragment). A sample carries none of this: it is a time series row (contract §5), and a
+// signal whose manifest has not been seen yet falls back to the flow-wide params.
 
 const decoder = new TextDecoder();
 
@@ -86,13 +86,13 @@ function rememberManifest(context, device, payloadBytes) {
   context.mapper.set(`ot-manifest:${device}`, manifest);
 }
 
-// The point's `meta` table: from the device manifest when it has been seen, else what the
-// sample itself carries (contract 0.1 envelopes echo it), else nothing.
-function metaOf(context, device, sample) {
+// The point's `meta` table, from the device manifest. Empty when the manifest has not been
+// seen yet (or does not list the point), which makes the flow-wide params apply — the same
+// fallback as a point that declares no meta at all.
+function metaOf(context, device, point) {
   const manifest = context.mapper.get(`ot-manifest:${device}`);
-  const point = manifest?.points?.[sample.point];
-  if (point && typeof point === "object") return point.meta && typeof point.meta === "object" ? point.meta : {};
-  return sample.meta && typeof sample.meta === "object" ? sample.meta : {};
+  const entry = manifest?.points?.[point];
+  return entry && typeof entry.meta === "object" && entry.meta !== null ? entry.meta : {};
 }
 
 // Shape the measurement body (without the time field) from a scaled value:
@@ -158,7 +158,7 @@ export function onMessage(message, context) {
   }
   const sample = JSON.parse(decoder.decode(message.payload));
   const cfg = context.config || {};
-  const meta = metaOf(context, device, sample);
+  const meta = metaOf(context, device, sample.point);
 
   // Optionally restrict this flow instance to a single point id.
   const point = cfg.point || "";
@@ -178,11 +178,12 @@ export function onMessage(message, context) {
   // The connector has already applied the point's engineering transform, so the sample value
   // is the final scaled reading.
   let value = sample.value;
-  if (sample.value_repr === "boolean" || typeof value === "boolean") {
+  // A 0.2 sample says what its value is by the JSON type alone (contract §5): `value_repr`
+  // is gone, because `datatype` plus the JSON type carried the same information.
+  if (typeof value === "boolean") {
     if (String(cfg.include_boolean ?? "true") !== "true") return [];
     value = value ? 1 : 0;
-  } else if (typeof value !== "number" || (sample.value_repr !== undefined && sample.value_repr !== "number")) {
-    // `value_repr` is a 0.1 field: a 0.2 sample says what it is by the JSON type alone.
+  } else if (typeof value !== "number") {
     return [];
   }
   const scaled = value;

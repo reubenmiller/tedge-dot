@@ -55,7 +55,8 @@ fuzz_target!(|input: Input| {
         seq: input.seq,
         error: input.error,
     };
-    let envelope = sample.to_envelope();
-    // The envelope must always be serializable JSON.
-    let _ = envelope.to_string();
+    // Both envelope shapes must always be serializable JSON: the default (§5) and the
+    // `sample_debug` one, which adds `raw` and `addr`.
+    let _ = sample.to_envelope(false).to_string();
+    let _ = sample.to_envelope(true).to_string();
 });

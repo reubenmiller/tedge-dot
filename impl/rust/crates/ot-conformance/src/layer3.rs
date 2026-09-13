@@ -376,7 +376,9 @@ async fn check_b1_startup(ctx: &Ctx<'_>, layer: &mut Layer, from: usize) -> Opti
 }
 
 /// B1 (manifest) — every configured device gets a retained manifest (contract §8.2) that names
-/// the contract version and lists each of its points, keyed by id, with the point's `access`.
+/// the contract version and lists each of its points, keyed by id, with the point's `access`,
+/// its `unit` and its free-form `meta` table: the facts a 0.1 sample used to echo on every
+/// read and a 0.2 sample no longer carries (§5).
 async fn check_b1_manifest(ctx: &Ctx<'_>, layer: &mut Layer, from: usize) {
     let devices: BTreeSet<String> = ctx.points.iter().map(|p| p.device.clone()).collect();
     for device in devices {
@@ -421,6 +423,26 @@ async fn check_b1_manifest(ctx: &Ctx<'_>, layer: &mut Layer, from: usize) {
                                     point.access.as_str(),
                                     access
                                 ));
+                            }
+                            // The unit and the free-form `meta` table left the sample
+                            // envelope (§5) for the manifest, so this is where they must be.
+                            if let Some(unit) = &point.unit {
+                                let got = entry.get("unit").and_then(|u| u.as_str());
+                                if got != Some(unit.as_str()) {
+                                    errors.push(format!(
+                                        "points.{}.unit: expected {unit:?}, got {got:?}",
+                                        point.id
+                                    ));
+                                }
+                            }
+                            if let Some(meta) = &point.meta {
+                                if entry.get("meta") != Some(meta) {
+                                    errors.push(format!(
+                                        "points.{}.meta: expected {meta}, got {:?}",
+                                        point.id,
+                                        entry.get("meta")
+                                    ));
+                                }
                             }
                         }
                     }
@@ -620,7 +642,7 @@ async fn check_b2_b3_b4_samples(ctx: &Ctx<'_>, layer: &mut Layer, from: usize) {
 
     // B3 — both modes exercised with the right envelope shape.
     if ctx.manifest_has_mode("typed") {
-        report_mode_probe(layer, "B3-typed", "a typed point yields value + value_repr", saw_typed_value);
+        report_mode_probe(layer, "B3-typed", "a typed point yields value + datatype", saw_typed_value);
     }
     if ctx.manifest_has_mode("raw") {
         report_mode_probe(layer, "B3-raw", "a raw point yields raw only (no value)", saw_raw_only);
@@ -731,17 +753,37 @@ fn assert_sample(
                                 field("value")
                             ));
                         }
-                        if field("value_repr") != serde_json::json!(expected.repr()) {
+                        // `value_repr` is gone (§5): the JSON type of `value` and the
+                        // envelope's `datatype` carry the same information, so that is what
+                        // is checked instead.
+                        let repr = match &field("value") {
+                            serde_json::Value::Bool(_) => "boolean",
+                            serde_json::Value::Number(_) => "number",
+                            serde_json::Value::String(_) => "string",
+                            other => {
+                                errors.push(format!("value has no usable JSON type: {other}"));
+                                ""
+                            }
+                        };
+                        if !repr.is_empty() && repr != expected.repr() {
                             errors.push(format!(
-                                "value_repr: expected '{}', got {:?}",
-                                expected.repr(),
-                                field("value_repr")
+                                "value JSON type: expected '{}', got '{repr}'",
+                                expected.repr()
                             ));
+                        }
+                        if let Some(datatype) = point.datatype {
+                            let expected_dt = serde_json::to_value(datatype).unwrap();
+                            if field("datatype") != expected_dt {
+                                errors.push(format!(
+                                    "datatype: expected {expected_dt}, got {:?}",
+                                    field("datatype")
+                                ));
+                            }
                         }
                     }
                     Ok(None) => {
-                        if !field("value").is_null() || !field("value_repr").is_null() {
-                            errors.push("raw mode must not carry value/value_repr".into());
+                        if !field("value").is_null() {
+                            errors.push("raw mode must not carry a value".into());
                         }
                     }
                     Err(e) => errors.push(e),
@@ -749,16 +791,13 @@ fn assert_sample(
             }
             Err(e) => errors.push(format!("simulator has no data for the point: {e}")),
         }
-        if let Some(unit) = &point.unit {
-            if field("unit") != serde_json::json!(unit) {
-                errors.push(format!("unit echo: expected '{unit}', got {:?}", field("unit")));
-            }
-        }
-        if let Some(meta) = &point.meta {
-            if &field("meta") != meta {
+        // The static facts are on the device manifest (§8.2), never echoed per sample (§5):
+        // no `unit`, no `meta`, no `access`, no device `type`, and no `value_repr`/`ts_ms`.
+        for echoed in ["unit", "meta", "access", "type", "value_repr", "ts_ms"] {
+            if !field(echoed).is_null() {
                 errors.push(format!(
-                    "meta echo: expected {meta}, got {}",
-                    field("meta")
+                    "a 0.2 sample must not echo '{echoed}' (it belongs on the manifest): got {}",
+                    field(echoed)
                 ));
             }
         }

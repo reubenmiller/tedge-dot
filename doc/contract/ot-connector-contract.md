@@ -94,6 +94,7 @@ poll_interval = "2s"            # default poll interval (duration string); per-p
 log_level     = "info"
 operation_timeout = "30s"       # optional: upper bound on one protocol-module call (§8.1)
 stall_timeout     = "120s"      # optional: restart the connector if its loop stops moving (§8.1)
+sample_debug      = false       # optional: add `raw` + `addr` back to every sample (§5)
 # optional: where bare point-library names are looked up (§3.4); shown with its default
 point_library_path = ["/etc/tedge/plugins/ot/points.d", "/usr/share/tedge-dot/points.d"]
 
@@ -397,9 +398,9 @@ Decoding semantics:
 ### 4.1 64-bit integers
 
 `int64`/`uint64` values that exceed JavaScript's safe integer range (`2^53 - 1`) MUST be
-emitted as a JSON **string** in `value`, and the connector MUST set `value_repr: "string"`
-in the sample (see §5). Flows can then parse with `BigInt`. Values within the safe range
-MAY be emitted as numbers with `value_repr: "number"`.
+emitted as a JSON **string** in `value` (see §5). Flows can then parse with `BigInt`; the
+sample's `datatype` is what tells a consumer that such a string is an integer rather than
+text. Values within the safe range MAY be emitted as numbers.
 
 ### 4.2 Per-point linear transform
 
@@ -421,8 +422,8 @@ Rules:
 
 - The transform applies **only** to `number` values. `bool`, `string`, and `bytes` values pass
   through unchanged, and it is a no-op in `raw` mode.
-- The scaled value is what the sample's `value`/`value_repr` carry; `raw` always remains the
-  unmodified wire bytes.
+- The scaled value is what the sample's `value` carries; `raw` (under `sample_debug`) always
+  remains the unmodified wire bytes.
 - The math is owned by the SDK so every connector scales identically. Connectors invoke the SDK
   helper rather than re-implementing it.
 
@@ -432,49 +433,53 @@ Every successful or failed read produces exactly one **sample** message on
 `te/device/<device>/ot/<protocol>/sample/<point>`. JSON Schema:
 [schemas/sample.schema.json](schemas/sample.schema.json).
 
-The envelope is protocol-neutral; only the `addr` object is protocol-specific (it echoes the
-native address so flows can route or debug). The example below uses Modbus to make it concrete:
+A sample is a **time series row**: identity, value, quality, and nothing that is static per
+point. Everything a consumer needs in order to *interpret* the point — its unit, its labels,
+its `access`, its free-form `meta` table, and the device's `type` — is published once on the
+device's retained manifest (§8.2) instead of on every one of the thousands of reads a point
+produces in a day. The envelope is protocol-neutral. The example below uses Modbus:
 
 ```json
 {
   "ts": "2026-05-30T10:00:00.000Z",
-  "ts_ms": 1780221600000.0,
   "device": "plc-1",
-  "type": "acme-meter-v2",
   "protocol": "modbus",
   "point": "boiler_temp",
   "mode": "typed",
   "datatype": "float32",
   "value": 42.5,
-  "value_repr": "number",
-  "raw": "422a 0000",
   "quality": "good",
-  "unit": "raw",
-  "addr": { "table": "holding", "address": 7, "unit_id": 1 },
   "seq": 12407
 }
 ```
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `ts` | string (RFC 3339, ms, UTC `Z`) | yes | Read completion time. |
-| `ts_ms` | number | no | The same instant as Unix epoch milliseconds (float); the numeric companion to `ts` for consumers doing time arithmetic. |
+| `ts` | string (RFC 3339, ms, UTC `Z`) | yes | Read completion time. A consumer needing epoch milliseconds parses it; there is no second timestamp field. |
 | `device` | string | yes | thin-edge device entity id segment. |
-| `type` | string | no | Echo of the device's declared `type` (§3.1), when it has one. Lets consumers name the point's parameter set (§5.2) without the configuration file. |
-| `protocol` | string | yes | Protocol module id. |
+| `protocol` | string | yes | Protocol module id — a fact about the sample's origin, and what `ot-measurement` groups by. |
 | `point` | string | yes | Point `id`. |
 | `mode` | `"raw"` \| `"typed"` | yes | Echoes the point mode. |
-| `datatype` | string | when `typed` | The primitive type decoded. |
+| `datatype` | string | when `typed` | The primitive type decoded. With the JSON type of `value` this says everything a separate `value_repr` did — including that a `string`-typed `value` is an `int64` outside the JSON safe range (§4.1). |
 | `value` | number \| boolean \| string | when `quality = good` | Decoded value (`typed`) — absent for `raw`. |
-| `value_repr` | `"number"` \| `"boolean"` \| `"string"` | when `value` present | Tells flows how to interpret `value`. |
-| `raw` | string (hex, space-grouped per word) | yes | The bytes read; always present in both modes. |
 | `quality` | `"good"` \| `"bad"` \| `"stale"` | yes | See §5.1. |
-| `unit` | string | no | Echo of the point's `unit` hint. |
-| `access` | `"read"` \| `"write"` \| `"read_write"` | no | Echo of the point's declared `access` (SDK runtimes always set it). Lets consumers tell writable points apart without the configuration file (§5.2). |
-| `addr` | object | yes | Protocol-specific address echo (for flow routing/debug). |
 | `seq` | integer | no | Monotonic per-point counter; helps detect drops. |
 | `error` | string | when `quality = bad` | Human-readable failure reason. |
-| `meta` | object | no | The point's `meta` table echoed verbatim by the runtime (§3.1); carries per-signal hints for flows. |
+| `raw` | string (hex, space-grouped per word) | only with `sample_debug` | The bytes read. |
+| `addr` | object | only with `sample_debug` | Protocol-specific address echo. |
+
+`raw` and `addr` are a debugging aid, not part of the envelope: a connector adds both only
+when its configuration sets `[connector] sample_debug = true` (§3.3). The conformance suite
+runs with it on, because it compares the bytes a read returned against the golden vectors.
+
+What a 0.1 sample also carried, and where to find it now:
+
+| Was in the sample | Now |
+| --- | --- |
+| `type`, `unit`, `access`, `meta` | the device manifest (§8.2), published once, retained |
+| `value_repr` | `datatype` plus the JSON type of `value` |
+| `ts_ms` | parse `ts` |
+| `raw`, `addr` | opt-in, behind `[connector] sample_debug` |
 
 ### 5.1 Quality semantics
 
@@ -493,7 +498,7 @@ native address so flows can route or debug). The example below uses Modbus to ma
 
 A point whose `access` permits writes is, to an operator, a *parameter*: a setting with a
 current value and a control to change it. The contract deliberately adds no mechanism for
-this beyond echoing `access`, `meta` and the device `type` in samples: a flow
+this beyond the manifest's `access`, `meta`, `parameter.sets` and device `type` (§8.2): a flow
 (`ot-parameter-state`) derives one
 retained twin fragment per *parameter set* from the samples and acknowledged writes, and
 cloud-specific tooling (`tedge-dot describe`) renders the same sets as cloud-side definitions.

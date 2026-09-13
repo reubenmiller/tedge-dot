@@ -23,6 +23,7 @@ ${SERVICE}              tedge-dot
 ${SAMPLE_PREFIX}        te/device/${DEVICE}/ot/${PROTOCOL}/sample
 ${CMD_PREFIX}           te/device/${DEVICE}/ot/${PROTOCOL}/cmd/write
 ${LINK_TOPIC}           te/device/${DEVICE}/ot/${PROTOCOL}/status/link
+${MANIFEST_TOPIC}       te/device/${DEVICE}/ot/${PROTOCOL}/manifest
 ${CAPS_TOPIC}           te/device/main/service/${SERVICE}/ot/capabilities
 ${HEALTH_TOPIC}         te/device/main/service/${SERVICE}/status/health
 ${BATCH_PREFIX}         te/device/${DEVICE}/ot/${PROTOCOL}/cmd/write-batch
@@ -84,11 +85,15 @@ Reads Float64 Node
     ${value}=    Get Json Field    ${payload}    value
     Should Be True    abs(${value} - 21.5) < 0.05
 
-Sample Echoes The Node Id
-    [Documentation]    The sample's addr field echoes the OPC-UA NodeId it was read from.
+Sample Carries No Address Unless Debugging Is On
+    [Documentation]    The NodeId a point is read from is static, so it is not echoed in every
+    ...                sample (§5); `addr` returns only under [connector] sample_debug, which
+    ...                the packaged configuration leaves off. (The conformance harness turns it
+    ...                on, which is where the address echo is asserted against the wire.)
     ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/temperature    timeout=${SAMPLE_TIMEOUT}
-    ${node}=    Get Json Field    ${payload}    addr.node_id
-    Should Contain    ${node}    Temperature
+    ${sample}=    Evaluate    json.loads($payload)    modules=json
+    Dictionary Should Not Contain Key    ${sample}    addr
+    Dictionary Should Not Contain Key    ${sample}    raw
 
 Reads Uint32 Node
     [Documentation]    Reads the Count node (UInt32 617001).
@@ -201,17 +206,22 @@ Push Delivery Recovers From A Silent Server
     Sample Should Be Good    ${payload}
     [Teardown]    Run Keyword And Ignore Error    Thaw Stack Service    simulator
 
-Pushed Sample Echoes Point Meta
-    [Documentation]    The point's free-form meta table (connector config) is echoed verbatim
-    ...                in the sample envelope, so flows can apply per-signal behaviour. This
-    ...                covers the PUSH envelope specifically; the polled one is covered by
-    ...                "Samples Carry The Point Access".
+Pushed Sample Carries No Point Meta Either
+    [Documentation]    The push path produces the same slim envelope as the polled one (§5):
+    ...                the point's free-form meta table is on the device manifest, not on every
+    ...                sample. This covers the PUSH envelope specifically; the polled one is
+    ...                covered by "Samples Carry Only What Changes Per Read".
     [Tags]    requires:subscribe
     ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/ticks    timeout=${SAMPLE_TIMEOUT}
-    ${on_change}=    Get Json Field    ${payload}    meta.on_change
-    Should Be Equal    ${on_change}    ${True}
-    ${source}=    Get Json Field    ${payload}    meta.source
-    Should Be Equal    ${source}    sim
+    ${sample}=    Evaluate    json.loads($payload)    modules=json
+    FOR    ${gone}    IN    meta    unit    access    type    value_repr    ts_ms    raw    addr
+        Dictionary Should Not Contain Key    ${sample}    ${gone}
+    END
+    # The meta a flow needs is on the manifest, for the subscribed point as for any other.
+    ${manifest}=    Wait For Retained    ${MANIFEST_TOPIC}    timeout=${READY_TIMEOUT}
+    ${points}=    Get Json Field    ${manifest}    points
+    Should Be Equal    ${points}[ticks][meta][on_change]    ${True}
+    Should Be Equal    ${points}[ticks][meta][source]    sim
 
 Polled Sample Carries The Device Name
     [Documentation]    Regression: the runtime stamps the configured device name on polled
@@ -221,18 +231,22 @@ Polled Sample Carries The Device Name
     Should Be Equal    ${device}    ${DEVICE}
 
 
-Samples Carry The Point Access And The Device Type
-    [Documentation]    Every sample echoes the point's declared access and the device's type, so
-    ...                flows can tell writable points (parameters) apart and name their parameter
-    ...                set without reading the config file.
+Samples Carry Only What Changes Per Read
+    [Documentation]    A sample is a time series row (§5). The point's access and the device's
+    ...                type — what a flow needs to tell parameters apart and name their set —
+    ...                are on the retained manifest (§8.2), published once per device instead
+    ...                of on every read.
     ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/setpoint    timeout=${SAMPLE_TIMEOUT}
-    ${type}=    Get Json Field    ${payload}    type
+    ${sample}=    Evaluate    json.loads($payload)    modules=json
+    FOR    ${gone}    IN    type    access    unit    meta    value_repr    ts_ms    raw    addr
+        Dictionary Should Not Contain Key    ${sample}    ${gone}
+    END
+    ${manifest}=    Wait For Retained    ${MANIFEST_TOPIC}    timeout=${READY_TIMEOUT}
+    ${type}=    Get Json Field    ${manifest}    type
     Should Be Equal    ${type}    ${DEVICE_TYPE}
-    ${access}=    Get Json Field    ${payload}    access
-    Should Be Equal    ${access}    read_write
-    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/temperature    timeout=${SAMPLE_TIMEOUT}
-    ${access}=    Get Json Field    ${payload}    access
-    Should Be Equal    ${access}    read
+    ${points}=    Get Json Field    ${manifest}    points
+    Should Be Equal    ${points}[setpoint][access]    read_write
+    Should Be Equal    ${points}[temperature][access]    read
 
 Capability Descriptor Advertises Write Batch
     [Documentation]    The runtime adds the write-batch verb for every module that implements write.

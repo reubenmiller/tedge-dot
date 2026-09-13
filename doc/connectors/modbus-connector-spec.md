@@ -152,11 +152,12 @@ For `bool`, the connector reads from `coil` or `discrete_input` and maps `1→tr
 
 ### 4.3 64-bit and string representation
 
-- `int64`/`uint64` outside the JS safe-integer range MUST be emitted as a string `value` with
-  `value_repr: "string"` (per contract §4.1).
+- `int64`/`uint64` outside the JS safe-integer range MUST be emitted as a string `value`
+  (per contract §4.1); the sample's `datatype` is what says it is an integer, not text.
 - `string` is decoded using the connector's declared text encoding (default ASCII/UTF-8,
-  null-trimmed); emitted as `value` with `value_repr: "string"`.
-- `bytes` always emits no `value`; the data is the `raw` hex.
+  null-trimmed); emitted as a string `value`.
+- `bytes` always emits no `value`; the data is the `raw` hex (contract §5: visible in the
+  envelope only under `sample_debug`).
 
 ### 4.4 Bit-fields (optional `bitfield` feature)
 
@@ -171,12 +172,14 @@ bit extraction in JavaScript is error-prone.
    minimize Modbus transactions (mirrors today's `_build_query_model` batching).
 2. Issue the batched `tokio-modbus` reads for each range.
 3. For each point:
-   - `raw` mode → build `raw` hex from the bytes; `quality = good`; no `value`.
+   - `raw` mode → keep the bytes read; `quality = good`; no `value`.
    - `typed` mode → assemble bytes per `endianness`/`word_order`, call `decode_primitive`,
-     set `value` + `value_repr` + `datatype`; `quality = good`.
+     set `value` + `datatype`; `quality = good`.
    - On a Modbus exception/timeout/CRC error for a range → emit `bad` samples for the
      affected points with `error` set and no `value`.
-4. Echo the address into `addr`: `{ "table": ..., "address": ..., "unit_id": ... }`.
+4. Record the address in `addr`: `{ "table": ..., "address": ..., "unit_id": ... }`. The
+   runtime serializes `addr` (and the `raw` hex) into the envelope only under
+   `[connector] sample_debug` — contract §5; the module always fills both in.
 5. Return one `Sample` per requested point.
 
 The connector MUST NOT drop failed reads silently; it emits `bad` samples so flows/operators
