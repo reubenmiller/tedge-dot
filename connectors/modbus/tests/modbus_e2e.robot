@@ -255,6 +255,26 @@ Parameter Twin Follows The Device
     Dictionary Should Contain Key    ${twin}    coil_rw
     Dictionary Should Not Contain Key    ${twin}    level_f32
 
+A Parameter Opted Out Of Measurements Reaches Only Its Twin
+    [Documentation]    (flows) `meta.measurement = false` keeps a parameter off the measurement
+    ...                path: twin_only_u16 is sampled and lands on the parameter twin fragment, but
+    ...                ot-measurement never publishes it as a series. temp_u16 — a parameter on the
+    ...                same register without the opt-out — is published both ways, the default.
+    [Tags]    flows
+    Wait For Message Containing    ${PARAM_TWIN}    "twin_only_u16":    timeout=${FLOWS_TIMEOUT}
+    Wait For Message Containing    te/device/${DEVICE}///m/${PROTOCOL}    "temp_u16":
+    ...    timeout=${FLOWS_TIMEOUT}
+    # A sample of both points passes through the flows every second, so give the opted-out one
+    # several chances to show up as a measurement before judging.
+    Sleep    5s
+    Wait For Message Containing    ${SAMPLE_PREFIX}/twin_only_u16    "quality":"good"
+    ...    timeout=${SAMPLE_TIMEOUT}
+    ${measurements}=    Get Messages    te/device/${DEVICE}///m/${PROTOCOL}
+    Should Not Be Empty    ${measurements}
+    FOR    ${measurement}    IN    @{measurements}
+        Should Not Contain    ${measurement}    twin_only_u16
+    END
+
 Parameter Update Command Writes The Points And Completes
     [Documentation]    (flows) A Cumulocity-shaped parameter_update command (as the c8y mapper
     ...                would publish for a c8y_ParameterUpdate operation) is bridged to ONE

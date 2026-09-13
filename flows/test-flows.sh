@@ -219,12 +219,40 @@ else
   fail=$((fail + 1))
 fi
 
+# meta.measurement = false: the signal stays off the measurements entirely — a parameter whose
+# value belongs on its twin fragment only. Without it (the default), a parameter is published both
+# ways, and a naming table (above) still publishes.
+MOFF='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"setpoint","mode":"typed","datatype":"uint16","value":55,"value_repr":"number","raw":"0037","quality":"good","access":"read_write","addr":{},"meta":{"measurement":false}}'
+MOFFSTR='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"setpoint","mode":"typed","datatype":"uint16","value":55,"value_repr":"number","raw":"0037","quality":"good","access":"read_write","addr":{},"meta":{"measurement":"false"}}'
+MPARAM='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"setpoint","mode":"typed","datatype":"uint16","value":55,"value_repr":"number","raw":"0037","quality":"good","access":"read_write","addr":{}}'
+check_empty "measurement: meta.measurement = false keeps the signal off the measurements" ot-measurement \
+  "[te/device/plc1/ot/modbus/sample/setpoint] $MOFF"
+# Only the boolean opts out, as for meta.parameter = false: a string is not a switch.
+check "measurement: meta.measurement = \"false\" (a string) does not opt out" ot-measurement \
+  "[te/device/plc1/ot/modbus/sample/setpoint] $MOFFSTR" \
+  '[te/device/plc1///m/modbus] {"modbus":{"setpoint":55}'
+check "measurement: a parameter is still a measurement by default" ot-measurement \
+  "[te/device/plc1/ot/modbus/sample/setpoint] $MPARAM" \
+  '[te/device/plc1///m/modbus] {"modbus":{"setpoint":55},"time":"2026-05-30T10:00:00.000Z"}'
+# The opt-out is for measurements only: ot-parameter-state still puts the value on the twin.
+check_multi "measurement: an opted-out parameter still reaches its twin fragment" \
+  "ot-measurement ot-parameter-state" \
+  "[te/device/plc1/ot/modbus/sample/setpoint] $MOFF" \
+  '[te/device/plc1///twin/modbus_control_parameters] {"setpoint":55}' \
+  --absent '///m/'
+
 # combine: two series of one device merged into a single measurement, flushed on interval.
 SLVL='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"level_f32","mode":"typed","datatype":"float32","value":404.17,"value_repr":"number","raw":"43ca15c3","quality":"good","addr":{}}'
 check_params "measurement: combine merges series on interval" ot-measurement \
   "$(printf 'combine = "true"\ncombine_interval = "1s"')" \
   "$(printf '[te/device/plc1/ot/modbus/sample/temp_u16] %s\n[te/device/plc1/ot/modbus/sample/level_f32] %s' "$SINT" "$SLVL")" \
   '[te/device/plc1///m/modbus] {"modbus":{"level_f32":404.17,"temp_u16":17001}' \
+  --final-on-interval
+# ...and an opted-out signal never reaches the combine buffer, so the flush leaves it out.
+check_params "measurement: combine leaves an opted-out signal out" ot-measurement \
+  "$(printf 'combine = "true"\ncombine_interval = "1s"')" \
+  "$(printf '[te/device/plc1/ot/modbus/sample/temp_u16] %s\n[te/device/plc1/ot/modbus/sample/setpoint] %s' "$SINT" "$MOFF")" \
+  '[te/device/plc1///m/modbus] {"modbus":{"temp_u16":17001},"time"' \
   --final-on-interval
 
 # --- ot-event (measurement -> event on value change) ---

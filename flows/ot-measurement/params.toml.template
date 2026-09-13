@@ -40,6 +40,9 @@ combine_interval = "10s"
 # A signal can also name its own measurement through the point's meta table (wins over the
 # flow-wide group/series, like the other meta overrides):
 #   meta = { measurement = { group = "Environment", series = "Temperature" } }
+# ...or keep it out of the measurements altogether, e.g. a parameter whose value should reach
+# only its twin fragment (ot-parameter-state) instead of also being stored as a time series:
+#   meta = { measurement = false }
 # The engineering unit is a per-signal property declared on the connector point (point.unit) and
 # echoed in the sample, so it is applied automatically (series value becomes { value, unit }).
 target_topic = ""

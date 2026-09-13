@@ -65,3 +65,13 @@ points_from      = ["plc-sim", "./points.d/modbus/plc-sim-extra.toml"]
   datatype = "bool"
   access   = "read_write"
   address  = { table = "coil", address = 48, count = 1 }
+
+  # A parameter kept off the measurements (`meta.measurement = false`): sampled, and on the
+  # parameter twin fragment like temp_u16 (it reads the same register), but never published as a
+  # measurement series by ot-measurement.
+  [[device.point]]
+  id       = "twin_only_u16"
+  datatype = "uint16"
+  access   = "read_write"
+  address  = { table = "holding", address = 3, count = 1 }
+  meta     = { measurement = false }
