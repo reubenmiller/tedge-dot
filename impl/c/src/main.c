@@ -463,53 +463,51 @@ static int collect_configs(const char *const *args, size_t nargs,
     return 0;
 }
 
-/* Run every *.toml in a directory, one connector per file, in one process
- * (the packaged systemd unit points ExecStart at /etc/tedge/plugins/ot). */
-static int run_dir(const char *dir, const tdot_run_opts_t *opts) {
-    char **paths = NULL;
-    size_t n = 0;
-    if (collect_configs(&dir, 1, &paths, &n) != 0)
-        return 1;
-    if (n == 0) {
-        fprintf(stderr, "error: no *.toml configs in %s\n", dir);
-        free_paths(paths, n);
-        return 1;
-    }
-    int rc = tdot_runtime_run_configs((const char *const *)paths, n, opts);
-    free_paths(paths, n);
-    return rc == 0 ? 0 : 1;
+/* Lists the configs a `run` argument names again, for a reload (SIGHUP), by
+ * the rules it was listed by at startup. `ctx` is the argument. A path that is
+ * gone is an error, which keeps the running connectors, as in the Rust build. */
+static int rediscover_configs(void *ctx, char ***paths, size_t *npaths) {
+    const char *arg = ctx;
+    return collect_configs(&arg, 1, paths, npaths);
 }
 
+/* Run every config the argument names -- a directory's *.toml files, or the
+ * one file -- each connector in its own thread of this one process (the
+ * packaged systemd unit points ExecStart at /etc/tedge/plugins/ot). On SIGHUP
+ * the runtime lists the argument again through `discover`, so connectors start
+ * and stop as files come and go, and every running one re-reads its file. */
 static int cmd_run(const args_t *a) {
     tdot_run_opts_t opts = {
         .output = strcmp(a->output, "stdout") == 0 ? TDOT_OUTPUT_STDOUT
                                                    : TDOT_OUTPUT_MQTT,
         .duration_s = a->duration_s,
+        .discover = rediscover_configs,
+        .discover_ctx = (void *)a->config, /* only ever read */
     };
-
-    /* A directory argument runs every connector config it contains. */
-    struct stat st;
-    if (a->config && stat(a->config, &st) == 0 && S_ISDIR(st.st_mode))
-        return run_dir(a->config, &opts);
-    /* Otherwise a file, as in the Rust build: a connector can need its config
-     * again (the Rust build re-reads it to restart one), which a pipe such as
+    /* Files and directories only, as in the Rust build: a connector re-reads its
+     * config -- on a reload, and to restart one -- which a pipe such as
      * `-c <(generate-config)` cannot provide twice. `describe` reads once, so it
      * takes pipes too. */
-    if (a->config && stat(a->config, &st) == 0 && !S_ISREG(st.st_mode)) {
+    struct stat st;
+    if (a->config && stat(a->config, &st) == 0 && !S_ISDIR(st.st_mode) &&
+        !S_ISREG(st.st_mode)) {
         fprintf(stderr,
                 "error: config path '%s' is not a regular file; `run` re-reads its "
                 "configs, so it needs files or directories\n",
                 a->config);
         return 1;
     }
-
-    tdot_config_t *cfg;
-    tdot_connector_t *conn;
-    if (setup(a, &cfg, &conn) != 0)
+    char **paths = NULL;
+    size_t n = 0;
+    if (collect_configs(&a->config, 1, &paths, &n) != 0)
         return 1;
-    int rc = tdot_runtime_run(conn, cfg, &opts);
-    conn->destroy(conn);
-    tdot_config_free(cfg);
+    if (n == 0) {
+        fprintf(stderr, "error: no *.toml configs in %s\n", a->config);
+        free_paths(paths, n);
+        return 1;
+    }
+    int rc = tdot_runtime_run_configs((const char *const *)paths, n, &opts);
+    free_paths(paths, n);
     return rc == 0 ? 0 : 1;
 }
 

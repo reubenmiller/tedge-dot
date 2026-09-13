@@ -42,6 +42,9 @@ services:
         PROTOCOL: modbus
     environment:
       MULTI_DEVICE_COUNT: "10"
+      # Far longer than any wait in the suites, so a connector that could not start comes back
+      # only on a reload: reload_e2e.robot checks the reload, not the restart backoff, did it.
+      TEDGE_DOT_RESTART_DELAY: "600"
     labels:
       device-test-core.role: main
     depends_on:

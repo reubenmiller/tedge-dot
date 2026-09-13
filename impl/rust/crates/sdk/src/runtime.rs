@@ -129,7 +129,7 @@ impl LinkTracker {
     /// `define-device` just added would carry no type at all.
     async fn publish_reports(
         &mut self,
-        client: &AsyncClient,
+        client: &Mqtt,
         reports: &[LinkReport],
         config: &ConnectorConfig,
     ) -> Result<(), BoxError> {
@@ -154,7 +154,7 @@ impl LinkTracker {
     /// repeat on a backoff schedule and must not re-publish the same retained status.
     async fn publish_if_changed(
         &mut self,
-        client: &AsyncClient,
+        client: &Mqtt,
         report: &LinkReport,
         config: &ConnectorConfig,
     ) {
@@ -173,7 +173,7 @@ impl LinkTracker {
     /// readable) and publish a retained link transition when the status changed.
     async fn note_poll(
         &mut self,
-        client: &AsyncClient,
+        client: &Mqtt,
         device: &str,
         healthy: bool,
         reason: Option<String>,
@@ -203,7 +203,7 @@ impl LinkTracker {
     /// is not recorded, so a republished status carries none.
     async fn republish(
         &self,
-        client: &AsyncClient,
+        client: &Mqtt,
         config: &ConnectorConfig,
     ) -> Result<(), BoxError> {
         let mut reports: Vec<LinkReport> = self
@@ -265,7 +265,7 @@ impl ReconnectEntry {
 /// the old one (push subscriptions).
 async fn attempt_reconnect(
     connector: &mut Box<dyn Connector>,
-    client: &AsyncClient,
+    client: &Mqtt,
     links: &mut LinkTracker,
     device: &str,
     limits: Limits,
@@ -381,13 +381,77 @@ pub async fn run_until(
 /// Same as [`run_until`], but stamping `progress` on every loop iteration so a supervisor can
 /// tell a wedged connector from a quiet one and restart it (see [`Progress`]).
 pub async fn run_until_watched(
+    connector: Box<dyn Connector>,
+    config: ConnectorConfig,
+    config_path: PathBuf,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+    progress: Progress,
+) -> Result<(), BoxError> {
+    let never = Arc::new(tokio::sync::Notify::new());
+    run_until_reloadable(connector, config, config_path, shutdown, progress, never)
+        .await
+        .map(|_| ())
+}
+
+/// How long a connector attempt waits for the broker to accept its session before it fails.
+const BROKER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long one publish may wait for the MQTT client to take it: long enough for a busy but
+/// connected client, short enough that a connection gone before the event loop noticed (a
+/// half-open socket) does not hold up the main loop for long.
+const PUBLISH_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a stopping connector gives its final health and DISCONNECT to reach the broker.
+const MQTT_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// A spawned task that is cancelled when its handle is dropped. A plain `JoinHandle` detaches the
+/// task instead, so whoever gives up on it — a cancelled supervisor, a connector attempt that
+/// ended — would leave it running.
+pub struct AbortOnDrop<T>(pub tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl<T> Future for AbortOnDrop<T> {
+    type Output = Result<T, tokio::task::JoinError>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.0).poll(cx)
+    }
+}
+
+/// How [`run_until_reloadable`] ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunExit {
+    /// `shutdown` resolved.
+    Stopped,
+    /// A reload found a change the running connector cannot adopt in place — another service
+    /// name, protocol, broker or stall timeout: the caller restarts it from the file.
+    Restart,
+}
+
+/// Same as [`run_until_watched`], and re-reading `config_path` each time `reload` is notified.
+/// The host binary notifies it on SIGHUP, so an edited configuration takes effect without
+/// restarting the service.
+///
+/// A reload is applied in place, the way a management command's change is (§6.3): the protocol
+/// module is reconfigured, every device reconnected, and the retained capability descriptor and
+/// link status republished, while the MQTT session — and with it the service health — stays up.
+/// A file that no longer loads, or that the protocol module rejects, is reported and the running
+/// configuration kept; a file that resolves to the configuration already running changes nothing.
+pub async fn run_until_reloadable(
     mut connector: Box<dyn Connector>,
     mut config: ConnectorConfig,
     config_path: PathBuf,
     shutdown: impl std::future::Future<Output = ()> + Send,
     progress: Progress,
-) -> Result<(), BoxError> {
-    let limits = Limits::from_config(&config);
+    reload: Arc<tokio::sync::Notify>,
+) -> Result<RunExit, BoxError> {
+    let mut limits = Limits::from_config(&config);
     let protocol = config.connector.protocol.clone();
     let service = config.connector.service_name();
 
@@ -449,7 +513,19 @@ pub async fn run_until_watched(
     // what must be restored — the live config and link states — so this task only signals it.
     let reconnected = Arc::new(tokio::sync::Notify::new());
     let reconnected_tx = reconnected.clone();
-    tokio::spawn(async move {
+    // Whether the broker is connected right now. While it is not, the event loop only retries the
+    // connection and never reads the client's request queue, so whatever is published fills it
+    // and the next `publish().await` blocks — and the main loop with it: no reload, no stop, until
+    // the broker is back. The main loop checks this before publishing samples.
+    let (online_tx, mut online) = tokio::sync::watch::channel(false);
+    let client = Mqtt {
+        client,
+        online: online.clone(),
+    };
+    // Ends with this function, however it returns: the process may host other connectors and
+    // restart this one, and a leaked event loop would keep its session connected (or keep
+    // reconnecting) behind it.
+    let mut mqtt_task = AbortOnDrop(tokio::spawn(async move {
         let mut sessions = 0u64;
         loop {
             match eventloop.poll().await {
@@ -459,25 +535,50 @@ pub async fn run_until_watched(
                     }
                 }
                 Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                    online_tx.send_replace(true);
                     sessions += 1;
                     if sessions > 1 {
                         info!("reconnected to MQTT broker");
                         reconnected_tx.notify_one();
                     }
                 }
+                // The clean shutdown's DISCONNECT is written, after everything queued before it
+                // (the final health "down"): this session is over.
+                Ok(Event::Outgoing(rumqttc::Outgoing::Disconnect)) => break,
                 Ok(_) => {}
-                // The client half was dropped and every queued request (including the final
-                // health "down") has been flushed: this runtime instance is gone, so the
-                // task must exit rather than retry — the process may host other connectors
-                // and restart this one, and leaked event loops would pile up.
                 Err(rumqttc::ConnectionError::RequestsDone) => break,
                 Err(e) => {
+                    online_tx.send_replace(false);
                     warn!("mqtt event loop error: {e}; retrying");
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
         }
-    });
+    }));
+
+    // The broker must accept the session before the connector starts: nothing it publishes could
+    // be delivered otherwise, and a wrong host or port would pass for a running connector. As in
+    // the C runtime, not connecting fails this attempt, which the host retries on its backoff — or
+    // at once on a reload, since the fix is usually in the file. A stop or a reload is honoured
+    // while waiting.
+    tokio::pin!(shutdown);
+    let broker = format!("{}:{}", config.mqtt.host, config.mqtt.port);
+    tokio::select! {
+        _ = &mut shutdown => return Ok(RunExit::Stopped),
+        _ = reload.notified() => {
+            info!("reload requested while connecting to the MQTT broker {broker}; restarting");
+            return Ok(RunExit::Restart);
+        }
+        connected = tokio::time::timeout(BROKER_CONNECT_TIMEOUT, online.wait_for(|up| *up)) => {
+            if !matches!(connected, Ok(Ok(_))) {
+                return Err(format!(
+                    "cannot connect to the MQTT broker {broker} within {}s",
+                    BROKER_CONNECT_TIMEOUT.as_secs()
+                )
+                .into());
+            }
+        }
+    }
 
     // 3. Publish capability descriptor + service health (retained).
     publish_retained(&client, &cap_topic, capability_payload(&caps, &config)).await?;
@@ -507,7 +608,9 @@ pub async fn run_until_watched(
     // 6. Main loop: poll due points on a tick, route commands from the MQTT event-loop task.
     let mut tick = tokio::time::interval(Duration::from_millis(200));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    tokio::pin!(shutdown);
+    // Set inside the loop: acted on after the iteration (`rearm`), or once the loop ends (`exit`).
+    let mut rearm = false;
+    let mut exit = RunExit::Stopped;
 
     loop {
         tokio::select! {
@@ -623,37 +726,63 @@ pub async fn run_until_watched(
                 }
                 progress.mark();
             }
+            _ = reload.notified() => {
+                match reload_from_file(
+                    &mut connector, &client, &mut links, &mut config, &mut config_doc,
+                    &config_path, &cap_topic, limits,
+                ).await {
+                    Reloaded::Applied => rearm = true,
+                    Reloaded::Unchanged | Reloaded::Kept => {}
+                    Reloaded::Restart => {
+                        exit = RunExit::Restart;
+                        break;
+                    }
+                }
+                progress.mark();
+            }
             Some(p) = incoming_rx.recv() => {
                 match handle_command(
                     &mut connector, &client, &protocol, &service, &mut links,
                     &mut config, &mut config_doc, &config_path, &cap_topic,
                     &p.topic, &p.payload, limits,
                 ).await {
-                    // A management command changed the config: re-establish push
-                    // delivery (the reload disconnected the old subscriptions) and
-                    // rebuild the polling schedule.
-                    Ok(true) => {
-                        subscribed = setup_subscriptions(
-                            &mut connector, &config, caps.subscribe, &sample_tx, limits,
-                        ).await;
-                        schedule = build_schedule(&config, &subscribed);
-                        meta_index = build_meta_index(&config);
-                        seq_counters.clear();
-                        // the management path already reconnected every device
-                        reconnects.clear();
-                    }
+                    // A management command changed the config (see below).
+                    Ok(true) => rearm = true,
                     Ok(false) => {}
                     Err(e) => warn!("command handling error: {e}"),
                 }
                 progress.mark();
             }
         }
+        // A new configuration was applied — by a management command or a reload: re-establish
+        // push delivery (reconnecting dropped the old subscriptions), and rebuild the polling
+        // schedule and everything else derived from the configuration.
+        if std::mem::take(&mut rearm) {
+            limits = Limits::from_config(&config);
+            subscribed = setup_subscriptions(
+                &mut connector, &config, caps.subscribe, &sample_tx, limits,
+            ).await;
+            schedule = build_schedule(&config, &subscribed);
+            meta_index = build_meta_index(&config);
+            seq_counters.clear();
+            // applying the configuration already reconnected every device
+            reconnects.clear();
+        }
     }
 
-    // 7. Clean shutdown.
+    // 7. Clean shutdown: the final health "down", then a DISCONNECT, given a moment to reach the
+    // broker (the event loop ends once the DISCONNECT is written). With the broker unreachable
+    // there is nothing to send them over, and the broker publishes the last will instead.
     let _ = bounded(limits, "disconnect", connector.disconnect()).await;
-    publish_health(&client, &health_topic, "down").await.ok();
-    Ok(())
+    if client.is_online() {
+        let flush = async {
+            publish_health(&client, &health_topic, "down").await.ok();
+            client.disconnect().await.ok();
+            let _ = (&mut mqtt_task).await;
+        };
+        let _ = tokio::time::timeout(MQTT_FLUSH_TIMEOUT, flush).await;
+    }
+    Ok(exit)
 }
 
 /// Run the connector without a broker until `shutdown` resolves: every sample is printed to
@@ -988,7 +1117,7 @@ fn envelope_with_meta(sample: &Sample, meta_index: &MetaIndex) -> serde_json::Va
 /// Stamp the per-point sequence number and publish one sample. Shared by the polling loop and
 /// the subscription channel so both paths get identical seq/meta/topic handling.
 async fn publish_sample(
-    client: &AsyncClient,
+    client: &Mqtt,
     protocol: &str,
     sample: &mut Sample,
     seq_counters: &mut HashMap<(String, String), u64>,
@@ -999,13 +1128,26 @@ async fn publish_sample(
         .or_insert(0);
     *counter += 1;
     sample.seq = Some(*counter);
+    if !client.is_online() {
+        // With the broker unreachable a queued sample cannot be sent, and it would take the room
+        // the state messages need in the client's request queue (see `publish_retained`). A
+        // sample is a reading of the moment: it is dropped, and the gap shows in `seq`.
+        return;
+    }
     let topic = format!(
         "te/device/{}/ot/{}/sample/{}",
         sample.device, protocol, sample.point
     );
     let payload = envelope_with_meta(sample, meta_index).to_string();
-    if let Err(e) = client.publish(&topic, QoS::AtMostOnce, false, payload).await {
-        error!("failed to publish sample: {e}");
+    let publish = client.publish(&topic, QoS::AtMostOnce, false, payload);
+    match tokio::time::timeout(PUBLISH_TIMEOUT, publish).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => error!("failed to publish sample: {e}"),
+        // The connection is gone but the event loop has not noticed yet (a half-open socket).
+        Err(_) => warn!(
+            "dropping a sample on {topic}: the MQTT client did not take it within {}s",
+            PUBLISH_TIMEOUT.as_secs()
+        ),
     }
 }
 
@@ -1067,7 +1209,7 @@ fn route_command<'a>(
 #[allow(clippy::too_many_arguments)]
 async fn handle_command(
     connector: &mut Box<dyn Connector>,
-    client: &AsyncClient,
+    client: &Mqtt,
     protocol: &str,
     service: &str,
     links: &mut LinkTracker,
@@ -1252,7 +1394,7 @@ pub fn parse_batch_writes(json: &serde_json::Value) -> Result<Vec<BatchWrite>, S
 /// applied before a failure.
 async fn handle_write_batch(
     connector: &mut Box<dyn Connector>,
-    client: &AsyncClient,
+    client: &Mqtt,
     topic: &str,
     device: &str,
     json: &serde_json::Value,
@@ -1400,7 +1542,7 @@ fn capability_payload(caps: &Capabilities, config: &ConnectorConfig) -> String {
 #[allow(clippy::too_many_arguments)]
 async fn handle_management(
     connector: &mut Box<dyn Connector>,
-    client: &AsyncClient,
+    client: &Mqtt,
     links: &mut LinkTracker,
     config: &mut ConnectorConfig,
     config_doc: &mut DocumentMut,
@@ -1476,24 +1618,7 @@ async fn handle_management(
         warn!("failed to persist config to {}: {e}", config_path.display());
     }
     *config_doc = candidate;
-    *config = new_config;
-
-    // Republish the capability descriptor: its `point_labels` (§7) are derived from the
-    // configuration, which this verb just changed, and the retained message would otherwise
-    // describe the configuration as it was at startup — labels for points that are gone, none
-    // for a device just defined. Everything else in it is a property of the build and
-    // unchanged, so this is cheap and idempotent.
-    let mut caps = connector.capabilities();
-    augment_management_caps(&mut caps);
-    augment_batch_caps(&mut caps);
-    publish_retained(client, cap_topic, capability_payload(&caps, config)).await?;
-
-    // Reconnect with the new configuration and republish link status.
-    let _ = bounded(limits, "disconnect", connector.disconnect()).await;
-    match bounded(limits, "connect", connector.connect()).await {
-        Ok(reports) => links.publish_reports(client, &reports, config).await?,
-        Err(e) => warn!("reconnect after reconfigure failed: {e}"),
-    }
+    commit_config(connector, client, links, config, new_config, cap_topic, limits).await?;
 
     publish_retained(
         client,
@@ -1505,8 +1630,130 @@ async fn handle_management(
     Ok(true)
 }
 
+/// Install a configuration the protocol module has already accepted (`configure` succeeded):
+/// replace the running one, republish the capability descriptor, and reconnect every device with
+/// it, republishing their link status. Shared by management commands and reloads.
+async fn commit_config(
+    connector: &mut Box<dyn Connector>,
+    client: &Mqtt,
+    links: &mut LinkTracker,
+    config: &mut ConnectorConfig,
+    new_config: ConnectorConfig,
+    cap_topic: &str,
+    limits: Limits,
+) -> Result<(), BoxError> {
+    *config = new_config;
+
+    // Republish the capability descriptor: its `point_labels` (§7) are derived from the
+    // configuration, which just changed, and the retained message would otherwise describe the
+    // configuration as it was at startup — labels for points that are gone, none for a device
+    // just defined. Everything else in it is a property of the build and unchanged, so this is
+    // cheap and idempotent.
+    let mut caps = connector.capabilities();
+    augment_management_caps(&mut caps);
+    augment_batch_caps(&mut caps);
+    publish_retained(client, cap_topic, capability_payload(&caps, config)).await?;
+
+    // Reconnect with the new configuration and republish link status.
+    let _ = bounded(limits, "disconnect", connector.disconnect()).await;
+    match bounded(limits, "connect", connector.connect()).await {
+        Ok(reports) => links.publish_reports(client, &reports, config).await?,
+        Err(e) => warn!("reconnect after reconfigure failed: {e}"),
+    }
+    Ok(())
+}
+
+/// What a reload ([`run_until_reloadable`]) did.
+#[derive(Debug, PartialEq, Eq)]
+enum Reloaded {
+    /// The file resolves to the configuration already running: nothing was touched.
+    Unchanged,
+    /// The file could not be used; the running configuration was kept.
+    Kept,
+    /// The new configuration was applied in place.
+    Applied,
+    /// The change needs the connector restarted with it (see [`needs_restart`]).
+    Restart,
+}
+
+/// A change the running connector cannot adopt in place: its MQTT client id, last will and
+/// command subscriptions are named after the service and the protocol, the protocol selects the
+/// module, the client is connected to one broker, and the host's stall watchdog takes its limit
+/// when the connector starts — the effective one ([`ConnectorConfig::stall_limit`]), so a new
+/// `operation_timeout` that raises it counts and a respelt `stall_timeout` does not. The C
+/// runtime draws the same line (`needs_restart` in runtime.c).
+fn needs_restart(running: &ConnectorConfig, new: &ConnectorConfig) -> bool {
+    running.connector.protocol != new.connector.protocol
+        || running.connector.service_name() != new.connector.service_name()
+        || running.mqtt != new.mqtt
+        || running.stall_limit() != new.stall_limit()
+}
+
+/// Re-read the connector's config file and apply what changed, keeping the running configuration
+/// when the file cannot be used. A file that resolves to the running configuration — point
+/// libraries included — leaves everything untouched, so a reload meant for another connector's
+/// file does not reconnect this one's devices.
+#[allow(clippy::too_many_arguments)]
+async fn reload_from_file(
+    connector: &mut Box<dyn Connector>,
+    client: &Mqtt,
+    links: &mut LinkTracker,
+    config: &mut ConnectorConfig,
+    config_doc: &mut DocumentMut,
+    config_path: &Path,
+    cap_topic: &str,
+    limits: Limits,
+) -> Reloaded {
+    let path = config_path.display();
+    let loaded = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("cannot read {path}: {e}"))
+        .and_then(|text| {
+            let doc = text
+                .parse::<DocumentMut>()
+                .map_err(|e| format!("{path}: {e}"))?;
+            let base_dir = crate::library::config_base_dir(config_path);
+            let new_config =
+                crate::library::resolve(&text, base_dir).map_err(|e| format!("{path}: {e}"))?;
+            Ok((doc, new_config))
+        });
+    let (doc, new_config) = match loaded {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            error!("reload: {e}; keeping the running configuration");
+            return Reloaded::Kept;
+        }
+    };
+    if needs_restart(config, &new_config) {
+        info!(
+            "reload: {path} changes the service name, protocol, broker or stall timeout; \
+             restarting the connector"
+        );
+        return Reloaded::Restart;
+    }
+    if new_config == *config {
+        // The document is still taken: a later management command patches and persists it, and
+        // must start from the file as it is now (its comments, say), not as it was loaded.
+        *config_doc = doc;
+        info!("reload: {path} is unchanged");
+        return Reloaded::Unchanged;
+    }
+    if let Err(e) = connector.configure(&new_config) {
+        let _ = connector.configure(config); // restore the running configuration
+        error!("reload: {path}: configure failed: {e}; keeping the running configuration");
+        return Reloaded::Kept;
+    }
+    *config_doc = doc;
+    if let Err(e) =
+        commit_config(connector, client, links, config, new_config, cap_topic, limits).await
+    {
+        warn!("reload: {path}: {e}");
+    }
+    info!("reload: applied {path}");
+    Reloaded::Applied
+}
+
 async fn publish_failed(
-    client: &AsyncClient,
+    client: &Mqtt,
     topic: &str,
     reason: &str,
     origin: Option<&serde_json::Value>,
@@ -1743,7 +1990,7 @@ fn persist_config(path: &Path, doc: &DocumentMut) -> Result<(), String> {
 }
 
 async fn publish_links(
-    client: &AsyncClient,
+    client: &Mqtt,
     protocol: &str,
     reports: &[LinkReport],
     config: &ConnectorConfig,
@@ -1792,7 +2039,7 @@ fn link_payload(
 /// Restore what a clean MQTT session loses when the broker drops the connection: the command
 /// subscriptions, and the retained service health, capability descriptor and link statuses.
 async fn restore_mqtt_session(
-    client: &AsyncClient,
+    client: &Mqtt,
     subscriptions: &[&str],
     health_topic: &str,
     cap_topic: &str,
@@ -1808,7 +2055,7 @@ async fn restore_mqtt_session(
     links.republish(client, config).await
 }
 
-async fn publish_health(client: &AsyncClient, topic: &str, status: &str) -> Result<(), BoxError> {
+async fn publish_health(client: &Mqtt, topic: &str, status: &str) -> Result<(), BoxError> {
     let payload = serde_json::json!({
         "status": status,
         "time": format_rfc3339_ms(OffsetDateTime::now_utc())
@@ -1817,15 +2064,55 @@ async fn publish_health(client: &AsyncClient, topic: &str, status: &str) -> Resu
     publish_retained(client, topic, payload).await
 }
 
-async fn publish_retained(
-    client: &AsyncClient,
-    topic: &str,
-    payload: String,
-) -> Result<(), BoxError> {
-    client
-        .publish(topic, QoS::AtLeastOnce, true, payload)
-        .await
-        .map_err(|e| Box::new(e) as BoxError)
+/// The MQTT client, and whether its broker is connected right now (kept up to date by the event
+/// loop task in [`run_until_reloadable`]). It dereferences to the client, so publishing and
+/// subscribing read as usual; what it adds is the connection state that decides how a publish
+/// may wait.
+struct Mqtt {
+    client: AsyncClient,
+    online: tokio::sync::watch::Receiver<bool>,
+}
+
+impl Mqtt {
+    fn is_online(&self) -> bool {
+        *self.online.borrow()
+    }
+}
+
+impl std::ops::Deref for Mqtt {
+    type Target = AsyncClient;
+
+    fn deref(&self) -> &AsyncClient {
+        &self.client
+    }
+}
+
+/// Publish a retained state message: health, capability descriptor, link status, command status.
+///
+/// Every one of them goes through here, so none can hold up the main loop. While the broker is
+/// unreachable rumqttc does not read its request queue, and an awaited publish would wait for the
+/// broker once the queue is full — which one reload of a connector with more devices than the
+/// queue has slots is enough for. So, offline, the message is queued if there is room and dropped
+/// if not: reconnecting republishes the health, the capability descriptor and every link status
+/// (`restore_mqtt_session`). Online, the wait is bounded (see [`PUBLISH_TIMEOUT`]).
+async fn publish_retained(client: &Mqtt, topic: &str, payload: String) -> Result<(), BoxError> {
+    if !client.is_online() {
+        if let Err(e) = client.try_publish(topic, QoS::AtLeastOnce, true, payload) {
+            debug!("not publishing {topic} while the MQTT broker is unreachable: {e}");
+        }
+        return Ok(());
+    }
+    let publish = client.publish(topic, QoS::AtLeastOnce, true, payload);
+    match tokio::time::timeout(PUBLISH_TIMEOUT, publish).await {
+        Ok(result) => result.map_err(|e| Box::new(e) as BoxError),
+        Err(_) => {
+            warn!(
+                "publishing {topic} took longer than {}s; the MQTT connection looks lost",
+                PUBLISH_TIMEOUT.as_secs()
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Resolve the effective output mode of a point ignoring device default; small helper used by
@@ -1980,6 +2267,43 @@ default_mode = "typed"
             assert!(err.contains(key), "{err}");
             assert_eq!(d.to_string(), BASE, "the document must be left untouched");
         }
+    }
+
+    /// A reload applies in place what the running connector can adopt, and restarts it only for
+    /// what it cannot: its MQTT identity (service name, protocol, broker) and the stall timeout
+    /// the host's watchdog took when it started.
+    #[test]
+    fn reload_restarts_only_for_what_cannot_change_in_place() {
+        let running: ConnectorConfig = toml::from_str(BASE).unwrap();
+        let edited = |from: &str, to: &str| -> ConnectorConfig {
+            assert!(BASE.contains(from), "fixture lacks {from}");
+            toml::from_str(&BASE.replace(from, to)).unwrap()
+        };
+        assert!(!needs_restart(&running, &running.clone()));
+        assert!(!needs_restart(&running, &edited("poll_interval = \"2s\"", "poll_interval = \"9s\"")));
+        assert!(!needs_restart(&running, &edited("address = 7", "address = 8")));
+        assert!(!needs_restart(&running, &edited("log_level = \"info\"", "log_level = \"debug\"")));
+
+        let service = edited("protocol = \"modbus\"", "protocol = \"modbus\"\nservice_name = \"plant\"");
+        assert!(needs_restart(&running, &service));
+        assert!(needs_restart(&running, &edited("protocol = \"modbus\"", "protocol = \"opcua\"")));
+        assert!(needs_restart(&running, &edited("port = 1883", "port = 1884")));
+        let stall = edited("log_level = \"info\"", "log_level = \"info\"\nstall_timeout = \"5m\"");
+        assert!(needs_restart(&running, &stall));
+    }
+
+    /// "Unchanged" is judged on the resolved configuration, so reloading after an edit that does
+    /// not change what the connector does — a comment, say — touches nothing, while any real
+    /// change does not compare equal.
+    #[test]
+    fn a_reload_sees_through_edits_that_change_nothing() {
+        let running: ConnectorConfig = toml::from_str(BASE).unwrap();
+        let commented: ConnectorConfig =
+            toml::from_str(&format!("# edited by the operator\n{BASE}")).unwrap();
+        assert_eq!(running, commented);
+        let moved: ConnectorConfig =
+            toml::from_str(&BASE.replace("address = 7", "address = 8")).unwrap();
+        assert_ne!(running, moved);
     }
 
     #[test]

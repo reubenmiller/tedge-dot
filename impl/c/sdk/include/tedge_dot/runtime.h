@@ -19,6 +19,12 @@ typedef enum {
 typedef struct {
     tdot_output_t output;
     double duration_s; /* 0 = run forever */
+    /* Lists the config paths again on a reload (SIGHUP), so configs added to or
+     * removed from a directory start and stop their connectors. Returns 0 with
+     * a heap array of heap strings (possibly empty), which the runtime frees,
+     * or -1 to keep the running set unchanged. NULL: the paths never change. */
+    int (*discover)(void *ctx, char ***paths, size_t *npaths);
+    void *discover_ctx;
 } tdot_run_opts_t;
 
 /* Build the sample envelope JSON for one read result. Caller frees. */
@@ -34,6 +40,10 @@ double tdot_now_ms(void);
 /* Run one connector until the duration elapses or SIGINT/SIGTERM.
  * configure() must not have been called yet; the runtime drives the full
  * lifecycle (configure -> connect -> poll/commands -> disconnect).
+ * SIGHUP re-reads the config file and applies it in place; a change that
+ * needs the connector restarted (another service name, protocol, broker or
+ * stall timeout) is reported and not applied, since this function cannot
+ * rebuild the connector it was given -- tdot_runtime_run_configs can.
  * Returns 0 on clean stop, -1 on fatal error. */
 int tdot_runtime_run(tdot_connector_t *conn, tdot_config_t *cfg,
                      const tdot_run_opts_t *opts);
@@ -41,8 +51,17 @@ int tdot_runtime_run(tdot_connector_t *conn, tdot_config_t *cfg,
 /* Run several connector configs concurrently in one process (one thread per
  * config), mirroring the single-service model of the packaged systemd unit.
  * Each config is loaded and its connector built here; invalid configs are
- * logged and skipped. Returns 0 if all workers stopped cleanly, -1 otherwise
- * (including when no config was valid). */
+ * logged and skipped.
+ *
+ * SIGHUP reloads, as the Rust build does: every running connector re-reads
+ * its file and applies what changed in place (an unchanged file is left
+ * alone, an unusable one reported and the running configuration kept), a
+ * connector whose change needs a restart is restarted, `opts->discover` (when
+ * set) lists the paths again so new files start a connector and removed ones
+ * stop theirs, and a config that failed to start is tried again.
+ *
+ * Returns once every connector has stopped: 0 if all stopped cleanly, -1
+ * otherwise (including when no config was valid). */
 int tdot_runtime_run_configs(const char *const *paths, size_t npaths,
                              const tdot_run_opts_t *opts);
 

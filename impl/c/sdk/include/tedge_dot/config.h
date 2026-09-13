@@ -181,6 +181,13 @@ tdot_point_t *tdot_device_point(tdot_device_t *dev, const char *id);
  * document and write it back as TOML. Caller frees. */
 char *tdot_config_root_json(const tdot_config_t *cfg);
 
+/* What a configuration was loaded from, as one JSON string: its document and
+ * every point library it resolved, in load order. Two configurations with the
+ * same fingerprint resolve to the same devices and points, which is how a
+ * reload (SIGHUP) tells an unchanged file -- a comment edit, say -- from one
+ * that has to be applied. Caller frees. */
+char *tdot_config_fingerprint(const tdot_config_t *cfg);
+
 /* Free the connector-owned per-device/per-point state (dev->proto, pt->proto)
  * so the connector can be re-configured against the same config. Transports
  * must have been released with disconnect_device() first. */
