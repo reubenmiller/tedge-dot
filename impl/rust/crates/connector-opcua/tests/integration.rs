@@ -426,6 +426,34 @@ async fn check_subscription_reports_an_outage_and_reconnect_restores_push() {
     handle.cancel();
 }
 
+/// A server that comes straight back, well inside the client's own session retries. async-opcua
+/// reconnects by itself, but push delivery does not resume: against this server no data change
+/// and no publish response arrives again (and against the e2e python-asyncua simulator, whose
+/// log shows the client re-creating the subscription, no data change arrived either). Nothing
+/// fails, so without the check a push-only device stays silent behind a `connected` link even
+/// though its session reconnected. The check must still report it -- here as missing publish
+/// responses -- which is what makes the runtime replace the session.
+#[tokio::test]
+async fn check_subscription_reports_push_the_client_did_not_restore() {
+    let (handle, _nm, ns, port) = start_server().await;
+    let mut connector = OpcuaConnector::default();
+    connector.configure(&recovery_config(port, ns)).unwrap();
+    let (tx, mut rx) = mpsc::channel::<Sample>(64);
+    connect_and_subscribe(&mut connector, &tx, &mut rx).await;
+    let device = "plc-1".to_string();
+
+    handle.cancel();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (handle, _nm, _, _) = start_server_on(port).await;
+
+    // No reconnect() here: only what the client does on its own.
+    wait_for_check_failure(&mut connector, &device, "no publish response", Duration::from_secs(40))
+        .await;
+
+    connector.disconnect().await.unwrap();
+    handle.cancel();
+}
+
 /// Forward bytes between two sockets, holding them while `stalled` is set.
 async fn forward(mut from: OwnedReadHalf, mut to: OwnedWriteHalf, stalled: Arc<AtomicBool>) {
     let mut buf = vec![0u8; 16 * 1024];
