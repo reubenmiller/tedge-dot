@@ -652,6 +652,7 @@ static char *augmented_capabilities(const char *json, const tdot_config_t *cfg) 
         features = cJSON_AddArrayToObject(caps, "features");
     add_unique(features, "management");
     add_point_labels(caps, cfg);
+    add_parameter_keys(caps, cfg);
     char *out = cJSON_PrintUnformatted(caps);
     cJSON_Delete(caps);
     return out;
