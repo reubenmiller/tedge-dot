@@ -91,6 +91,24 @@ the session. The connector therefore also watches the subscription's
 delete/status-change/inactivity callbacks and the session state, and treats any
 of them as a dead link so the ordinary reconnect-and-re-subscribe path runs.
 
+The Rust module covers the same failure through the runtime's
+`check_subscription` hook, asked on every tick for each device with pushed
+points: async-opcua re-establishes a dropped session only a few times before
+its event loop ends silently, and never notices a server that stops answering,
+so the module records what the event loop reports (connection lost, gave up,
+last publish response) and fails the check when the session is down, the
+subscription or its monitored items went missing, or no publish response
+arrived within the keep-alive window. The e2e suite's push-only device (`opc2`)
+exercises this for both builds.
+
+The polling path has a related trap. A synchronous read on a client that is not
+fully connected reconnects inside the call and returns the failed attempt's
+status, which a fixed list of "connection lost" codes cannot anticipate; the
+point then looked merely bad, the link stayed `degraded`, and every point
+repeated the blocking reconnect on every tick. `read_point()` therefore also
+checks the session state after a failed read: a node-level Bad status arrives
+over an activated session, a transport failure does not.
+
 **None of those checks is currently proven by a test**, and it is worth being
 precise about why. The OPC UA suite does cover push *recovery* end to end
 (`Push Delivery Recovers After The Server Restarts` and `... From A Silent
