@@ -5,6 +5,7 @@
 //        te/device/<device>/ot/<protocol>/cmd/write/<id>         (single write results)
 //        te/device/<device>/ot/<protocol>/cmd/write-batch/<id>   (batch write results)
 //        te/device/<device>/ot/<protocol>/status/link            (retained: type and point list)
+//        te/device/main/service/<service>/ot/capabilities        (retained: parameter_keys)
 //   out: te/device/<device>///twin/<set>                         (retained: { <key>: value })
 //
 // A *parameter* is a point whose `access` (echoed in every sample) permits writes, or that opts
@@ -24,12 +25,13 @@
 //
 // Inside a set, a point's value is published under its *key*: the point id, or
 // meta.parameter.key when the point names one — so a point can keep an id that is unique on the
-// device (`firmwareVersion`) and still be `version` in its `firmware` fragment. The key is
-// learned from the point's samples (a write-only point never samples, so its key is its id, and
-// `tedge-dot describe` refuses a key on one). This flow records which point each key of a set
+// device (`firmwareVersion`) and still be `version` in its `firmware` fragment. The key comes from
+// the connector's retained capability descriptor (parameter_keys, contract §7), so it is known
+// before the point samples — right after a mapper restart, and for a write-only point, which
+// never samples — and from the point's samples. This flow records which point each key of a set
 // belongs to, and ot-command-forward uses that to turn an edit of the fragment back into point
 // writes. Two points of a device sharing a key in a set is a configuration `describe` refuses;
-// here the first to claim the key keeps it.
+// here the first to claim the key keeps it, until that point leaves the set or is removed.
 //
 // Where values come from:
 //   * readable parameters: every good sample (so the twin follows the device, including
@@ -37,7 +39,8 @@
 //   * write-only parameters (access = "write"): the last acknowledged write — the device cannot
 //     be read back, so this is the *commanded* state, not a measured one. It is unknown (absent
 //     from the twin) until the first successful write after the mapper started, and it lands in
-//     the default set (no sample ever tells us its meta);
+//     the sets its declared key names, else in the default set (no sample ever tells us its
+//     meta);
 //   * read/write parameters are also updated optimistically from a successful write, then
 //     confirmed/corrected by the next sample.
 //
@@ -46,13 +49,15 @@
 // fails every parameter update of that set:
 //   * a point removed from the configuration: the link status lists the device's configured
 //     points (contract §8) and is republished whenever the configuration changes, so every
-//     point missing from it is dropped from each set, and a retained write result replayed for
-//     it afterwards is ignored. The lists are kept per protocol and a point stays while any of
-//     them has it; while one protocol serving the device has not listed its points (a
-//     connector that predates the list), nothing is dropped for that device at all;
+//     point missing from it is dropped from each set — and releases every key it claimed, with or
+//     without a value — and a retained write result replayed for it afterwards is ignored. The
+//     lists are kept per protocol and a point stays while any of them has it; while one protocol
+//     serving the device has not listed its points (a connector that predates the list), nothing
+//     is dropped for that device at all;
 //   * a point that left a set (its group, its type or its access changed): its next sample names
 //     the sets it is in now, and it is dropped from the others;
-//   * a point whose key changed: its next sample drops the old key from every set;
+//   * a point whose key changed: its next description (sample or descriptor) drops the old key
+//     from every set;
 //   * a set left with no points is cleared (an empty retained message) rather than published
 //     as `{}`, which removes the fragment instead of keeping an empty one.
 //
@@ -63,11 +68,15 @@
 //   "ot-parameter-values:<device>:<set>"  -> { <key>: value }
 //   "ot-parameter-sets:<device>"          -> [set names] this flow has put values in
 //   "ot-parameter-set:<device>:<point>"   -> [set names], or false for opted-out points
-//                                            (from the point's samples, else from the
-//                                            parameter_update request that wrote it)
-//   "ot-parameter-key:<device>:<point>"   -> the point's key, from its samples (absent: its id)
+//                                            (from the point's samples or declared key, else from
+//                                            the parameter_update request that wrote it)
+//   "ot-parameter-key:<device>:<point>"   -> the point's key (absent: its id)
 //   "ot-parameter-point:<device>:<set>:<key>" -> the point that key of the set belongs to
 //                                            (read by ot-command-forward)
+//   "ot-parameter-claims:<device>:<point>" -> [[set, key]] the point holds
+//   "ot-parameter-claimants:<device>"     -> [points] that have claimed a key
+//   "ot-parameter-declared:<device>:<protocol>" -> [{point, key, set, group}] from the descriptor
+//   "ot-parameter-declaring:<service>"    -> [devices] that service's descriptor declared keys for
 //   "ot-parameter-protocols:<device>"     -> [protocols] whose connector sampled or reported the
 //                                            device (a device name is only unique per connector)
 //   "ot-parameter-points:<device>:<protocol>" -> [point ids] that protocol's connector has
@@ -179,7 +188,7 @@ function keyFromSample(sample, point) {
   return typeof key === "string" && isValidSet(key) ? key : point;
 }
 
-// The key a point was last seen under: its id until a sample names another.
+// The key a point was last seen under: its id until a sample or its declaration names another.
 function keyOf(context, device, point) {
   const key = context.mapper.get(`ot-parameter-key:${device}:${point}`);
   return typeof key === "string" && key ? key : point;
@@ -191,11 +200,26 @@ function ownerOf(context, device, set, key) {
   return typeof owner === "string" && owner ? owner : null;
 }
 
-// Claim `key` of `set` for `point`, unless another point holds it (the first keeps it).
+// The [set, key] pairs a point holds.
+function claimsOf(context, device, point) {
+  const claims = context.mapper.get(`ot-parameter-claims:${device}:${point}`);
+  return Array.isArray(claims) ? claims : [];
+}
+
+// Claim `key` of `set` for `point`, unless another point holds it (the first keeps it). The claim
+// is also recorded against the point, because it is made before the point's first good reading:
+// pruning the point must release it even when the point never put a value in the set.
 function claim(context, device, set, key, point) {
   const owner = ownerOf(context, device, set, key);
   if (owner && owner !== point) return false;
-  if (!owner) context.mapper.set(`ot-parameter-point:${device}:${set}:${key}`, point);
+  if (owner) return true;
+  context.mapper.set(`ot-parameter-point:${device}:${set}:${key}`, point);
+  const claims = claimsOf(context, device, point);
+  context.mapper.set(`ot-parameter-claims:${device}:${point}`, [...claims, [set, key]]);
+  const claimants = context.mapper.get(`ot-parameter-claimants:${device}`) || [];
+  if (!claimants.includes(point)) {
+    context.mapper.set(`ot-parameter-claimants:${device}`, [...claimants, point]);
+  }
   return true;
 }
 
@@ -239,18 +263,52 @@ function applyValues(context, device, updates, resolveSets, changed) {
   }
 }
 
-// Remove `point`'s `key` from each of `sets` where it holds that key, adding every set it changed
-// to `changed`. A key with no recorded owner is taken to be its point's id.
+// Remove `point`'s `key` from each of `sets` where it holds that key — its value and its claim —
+// adding every set it changed to `changed`. A key with no recorded owner is taken to be its
+// point's id.
 function dropValue(context, device, point, key, sets, changed) {
   for (const set of sets) {
     if ((ownerOf(context, device, set, key) ?? key) !== point) continue;
     context.mapper.set(`ot-parameter-point:${device}:${set}:${key}`, null);
+    const claims = claimsOf(context, device, point);
+    const remaining = claims.filter(([s, k]) => s !== set || k !== key);
+    if (remaining.length !== claims.length) {
+      context.mapper.set(`ot-parameter-claims:${device}:${point}`, remaining);
+    }
     const valuesKey = `ot-parameter-values:${device}:${set}`;
     const values = context.mapper.get(valuesKey);
     if (!values || !Object.prototype.hasOwnProperty.call(values, key)) continue;
     delete values[key];
     context.mapper.set(valuesKey, values);
     changed.add(set);
+  }
+}
+
+// Put `point` where its latest description (a sample, or its declared key) says it belongs: it
+// leaves every set it was in and is not in any more, and when its key changed it leaves the old
+// key of every set; then it claims its key in each of its sets — before any value arrives, so an
+// edit of the fragment can already reach it. `sets` is false for a point that is not a parameter.
+function placePoint(context, device, point, sets, key, changed) {
+  const setsKey = `ot-parameter-set:${device}:${point}`;
+  const previous = recordedSets(context.mapper.get(setsKey));
+  context.mapper.set(setsKey, sets);
+  const current = sets || [];
+  const previousKey = keyOf(context, device, point);
+  const leaving = previousKey === key ? previous.filter((s) => !current.includes(s)) : previous;
+  dropValue(context, device, point, previousKey, leaving, changed);
+  context.mapper.set(`ot-parameter-key:${device}:${point}`, key);
+  for (const set of current) claim(context, device, set, key, point);
+}
+
+// Place the points a connector's descriptor declares keys for on `device` (parameter_keys,
+// contract §7). Re-applied when the link status reports the device type, which names the sets.
+function applyDeclarations(context, device, protocol, changed) {
+  const names = naming(context, device, protocol);
+  for (const entry of context.mapper.get(`ot-parameter-declared:${device}:${protocol}`) || []) {
+    const point = entry?.point;
+    const key = entry?.key;
+    if (typeof point !== "string" || !point || typeof key !== "string" || !isValidSet(key)) continue;
+    placePoint(context, device, point, setsOf({ set: entry.set, group: entry.group }, names), key, changed);
   }
 }
 
@@ -280,31 +338,73 @@ function configuredPoints(context, device) {
   return configured;
 }
 
-// Drop every point the device no longer has from every set, and forget the sets and key recorded
-// for it, so a point later added back under the same id starts from its own samples again.
-function pruneRemovedPoints(context, device) {
+// Forget what was recorded for a removed point, so a point later added back under the same id
+// starts from its own samples again.
+function forgetPoint(context, device, point) {
+  context.mapper.set(`ot-parameter-set:${device}:${point}`, null);
+  context.mapper.set(`ot-parameter-key:${device}:${point}`, null);
+}
+
+// Drop every point the device no longer has from every set — its values, and every key it
+// claimed, with or without a value — adding every set it changed to `changed`.
+function pruneRemovedPoints(context, device, changed) {
   const listed = configuredPoints(context, device);
-  if (!listed) return [];
+  if (!listed) return;
   const configured = new Set(listed); // a device can have thousands of points
-  const changed = new Set();
   for (const set of context.mapper.get(`ot-parameter-sets:${device}`) || []) {
     const values = context.mapper.get(`ot-parameter-values:${device}:${set}`) || {};
     for (const key of Object.keys(values)) {
       const point = ownerOf(context, device, set, key) ?? key;
       if (configured.has(point)) continue;
       dropValue(context, device, point, key, [set], changed);
-      context.mapper.set(`ot-parameter-set:${device}:${point}`, null);
-      context.mapper.set(`ot-parameter-key:${device}:${point}`, null);
+      forgetPoint(context, device, point);
     }
   }
-  return twinMessages(context, device, changed);
+  const claimants = context.mapper.get(`ot-parameter-claimants:${device}`) || [];
+  const kept = [];
+  for (const point of claimants) {
+    if (configured.has(point)) {
+      kept.push(point);
+      continue;
+    }
+    for (const [set, key] of claimsOf(context, device, point)) {
+      dropValue(context, device, point, key, [set], changed);
+    }
+    context.mapper.set(`ot-parameter-claims:${device}:${point}`, null);
+    forgetPoint(context, device, point);
+  }
+  if (kept.length !== claimants.length) context.mapper.set(`ot-parameter-claimants:${device}`, kept);
+}
+
+// A connector's retained capability descriptor lists every point of it that names its own key
+// (parameter_keys, contract §7), grouped here per device; a device the service declared keys for
+// before and lists no more has none left. Placing the points claims their keys at once, so an
+// edit of the fragment reaches the right point — and a replayed write result lands under the
+// right key — even before any sample.
+function onCapabilities(context, service, caps) {
+  const protocol = typeof caps.protocol === "string" && caps.protocol ? caps.protocol : null;
+  if (!protocol) return [];
+  const byDevice = {};
+  for (const entry of Array.isArray(caps.parameter_keys) ? caps.parameter_keys : []) {
+    if (!entry || typeof entry.device !== "string" || !entry.device) continue;
+    if (!byDevice[entry.device]) byDevice[entry.device] = [];
+    byDevice[entry.device].push({ point: entry.point, key: entry.key, set: entry.set, group: entry.group });
+  }
+  const devices = Object.keys(byDevice);
+  const previous = context.mapper.get(`ot-parameter-declaring:${service}`) || [];
+  const out = [];
+  for (const device of new Set([...previous, ...devices])) {
+    context.mapper.set(`ot-parameter-declared:${device}:${protocol}`, byDevice[device] || []);
+    const changed = new Set();
+    applyDeclarations(context, device, protocol, changed);
+    out.push(...twinMessages(context, device, changed));
+  }
+  context.mapper.set(`ot-parameter-declaring:${service}`, devices);
+  return out;
 }
 
 export function onMessage(message, context) {
   const parts = message.topic.split("/");
-  const device = parts[2];
-  const protocol = parts[4];
-  const kind = parts[5];
   let payload;
   try {
     payload = JSON.parse(decoder.decode(message.payload));
@@ -312,6 +412,13 @@ export function onMessage(message, context) {
     return [];
   }
   if (!payload || typeof payload !== "object") return [];
+  // te/device/main/service/<service>/ot/capabilities
+  if (parts[3] === "service" && parts[5] === "ot" && parts[6] === "capabilities") {
+    return onCapabilities(context, parts[4], payload);
+  }
+  const device = parts[2];
+  const protocol = parts[4];
+  const kind = parts[5];
   context.mapper.set(`ot-protocol:${device}`, protocol);
   // Only from what a connector publishes on its own: a command request can name any protocol,
   // and one no connector serves would never list its points and so stop all pruning.
@@ -347,15 +454,16 @@ export function onMessage(message, context) {
       ? payload.points.filter((p) => typeof p === "string")
       : null;
     context.mapper.set(`ot-parameter-points:${device}:${protocol}`, listed);
-    return pruneRemovedPoints(context, device);
+    const changed = new Set();
+    pruneRemovedPoints(context, device, changed);
+    // The type just reported names the sets the declared keys belong to.
+    applyDeclarations(context, device, protocol, changed);
+    return twinMessages(context, device, changed);
   }
   const names = naming(context, device, protocol);
 
   if (kind === "sample") {
     const point = payload.point || parts[6];
-    // Remember the point's sets (or opt-out) so write results can be attributed later.
-    const setsKey = `ot-parameter-set:${device}:${point}`;
-    const previous = recordedSets(context.mapper.get(setsKey));
     const sets = setsFromSample(payload, names);
     // A sample is the authority on where its point belongs now: it leaves every set it was in
     // before and is not in any more (its group, type or access changed), whatever the quality,
@@ -365,15 +473,7 @@ export function onMessage(message, context) {
     // sets, the key nor the values are touched.
     const changed = new Set();
     if (payload.access !== undefined || payload.meta !== undefined) {
-      context.mapper.set(setsKey, sets);
-      const current = sets || [];
-      const previousKey = keyOf(context, device, point);
-      const key = keyFromSample(payload, point);
-      const leaving = previousKey === key ? previous.filter((s) => !current.includes(s)) : previous;
-      dropValue(context, device, point, previousKey, leaving, changed);
-      context.mapper.set(`ot-parameter-key:${device}:${point}`, key);
-      // Claimed even before a good reading, so an edit of the fragment can already reach it.
-      for (const set of current) claim(context, device, set, key, point);
+      placePoint(context, device, point, sets, keyFromSample(payload, point), changed);
     }
     if (sets && payload.quality === "good" && payload.value !== undefined) {
       applyValues(context, device, { [point]: payload.value }, () => sets, changed);
@@ -386,7 +486,7 @@ export function onMessage(message, context) {
   // The connector echoes `origin` into every transition it publishes (§6.4), so this survives
   // the request being overwritten on the retained command topic, and therefore survives a
   // mapper restart, which replays the terminal state alone.
-  // Recorded, never overriding what a sample already established.
+  // Recorded, never overriding what a sample or a declared key already established.
   if (kind === "cmd") {
     const set = payload.origin?.set;
     if (typeof set === "string" && isValidSet(set)) {
@@ -420,8 +520,8 @@ export function onMessage(message, context) {
     // Samples need no such check: the connector only samples the points it has, in the order
     // it publishes the link status that lists them.
     const configured = context.mapper.get(`ot-parameter-points:${device}:${protocol}`);
-    // A point that was written is writable by definition: the sets learned from its samples or
-    // from the request that wrote it, else the default one.
+    // A point that was written is writable by definition: the sets learned from its samples, its
+    // declared key or the request that wrote it, else the default one.
     const resolveSets = (point) => {
       if (Array.isArray(configured) && !configured.includes(point)) return false;
       const known = context.mapper.get(`ot-parameter-set:${device}:${point}`);

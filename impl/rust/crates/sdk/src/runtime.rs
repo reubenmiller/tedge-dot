@@ -1532,16 +1532,20 @@ fn augment_management_caps(caps: &mut Capabilities) {
 }
 
 /// The retained capability descriptor payload (§7): the module's declared capabilities plus
-/// the configured points' human-readable labels.
+/// the configured points' human-readable labels and named parameter keys.
 ///
-/// The labels are static per point, so they belong in this one retained message rather than in
-/// every sample — but they come from the *configuration*, unlike everything else here, so this
-/// has to be rebuilt and republished whenever a management command changes it.
+/// Both are static per point, so they belong in this one retained message rather than in every
+/// sample — but they come from the *configuration*, unlike everything else here, so this has to
+/// be rebuilt and republished whenever a management command changes it.
 fn capability_payload(caps: &Capabilities, config: &ConnectorConfig) -> String {
     let mut json = caps.to_json();
     let labels = crate::descriptor::point_labels(config);
     if !labels.is_empty() {
         json["point_labels"] = serde_json::Value::Array(labels);
+    }
+    let keys = crate::descriptor::parameter_keys(config);
+    if !keys.is_empty() {
+        json["parameter_keys"] = serde_json::Value::Array(keys);
     }
     json.to_string()
 }

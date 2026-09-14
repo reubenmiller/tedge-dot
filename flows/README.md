@@ -75,9 +75,10 @@ meta     = { parameter = { set = "firmware", key = "version" }, measurement = fa
 ```
 
 publishes `te/device/<device>///twin/firmware` as `{"version": "..."}`. `ot-command-forward` turns
-an edit of that key back into a write of `firmwareVersion` (the mapping comes from the point's
-samples, so a write-only point cannot name a key — `tedge-dot describe` refuses one, and two
-points of a device with the same key in a set). It also drops a point from the twin when the
+an edit of that key back into a write of `firmwareVersion`. The mapping comes from the connector's
+retained capability descriptor (`parameter_keys`) as well as the point's samples, so it holds right
+after a mapper restart and for write-only points too; `tedge-dot describe` refuses two points of a
+device with the same key in a set. It also drops a point from the twin when the
 retained link status no longer lists it (a reload removed it) or its latest sample no longer
 names that set, and clears a set left empty: Cumulocity sends the whole fragment back with an
 edit, so a stale key would fail every update of the set. `ot-command-forward` reshapes a

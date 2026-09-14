@@ -380,6 +380,26 @@ Alarm And Event Declared On A Point Follow Its Value
     Wait Until Keyword Succeeds    ${FLOWS_TIMEOUT}s    1s    Latest Message Should Be Empty    ${alarm_topic}
     Wait Until Keyword Succeeds    ${FLOWS_TIMEOUT}s    1s    Latest Message Should Contain    ${event_topic}    Running changed to false
 
+Capability Descriptor Declares The Parameter Keys
+    [Documentation]    A point naming its own key in its parameter set (meta.parameter.key) is listed
+    ...                in the retained capability descriptor's parameter_keys (§7), so a consumer
+    ...                knows the key before the point samples. Only keyed points appear.
+    ${payload}=    Wait For Retained    ${CAPS_TOPIC}    timeout=${READY_TIMEOUT}
+    ${keys}=    Get Json Field    ${payload}    parameter_keys
+    Length Should Be    ${keys}    1
+    Should Be Equal    ${keys}[0][device]    ${DEVICE}
+    Should Be Equal    ${keys}[0][point]    cycle_count
+    Should Be Equal    ${keys}[0][key]    count
+    Should Be Equal    ${keys}[0][set]    counters
+
+Parameter Twin Publishes A Point Under Its Key
+    [Documentation]    (flows) ot-parameter-state publishes the keyed point under its key, not its id.
+    [Tags]    flows
+    ${payload}=    Wait For Message Containing    te/device/${DEVICE}///twin/counters    "count":    timeout=${FLOWS_TIMEOUT}
+    ${twin}=    Evaluate    json.loads($payload)    modules=json
+    Dictionary Should Not Contain Key    ${twin}    cycle_count
+    Should Be Equal As Numbers    ${twin}[count]    617001
+
 
 *** Keywords ***
 Write Running

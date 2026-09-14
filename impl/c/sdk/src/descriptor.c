@@ -1,6 +1,7 @@
 #include "tedge_dot/descriptor.h"
 
 #include <ctype.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -186,6 +187,26 @@ static void append(char **buf, size_t *len, const char *sep, const char *text) {
     *len += add;
 }
 
+/* Append a formatted item, built on the heap: the names in it are arbitrary
+ * configured strings, and a fixed buffer would truncate where the Rust build
+ * does not. */
+static void append_fmt(char **buf, size_t *len, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (n < 0)
+        return;
+    char *item = malloc((size_t)n + 1);
+    if (!item)
+        return;
+    va_start(ap, fmt);
+    vsnprintf(item, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    append(buf, len, ", ", item);
+    free(item);
+}
+
 char *tdot_param_invalid_keys(const tdot_config_t *cfg, const char *forced) {
     return tdot_param_invalid_keys_across(&cfg, 1, forced);
 }
@@ -216,25 +237,18 @@ char *tdot_param_invalid_keys_across(const tdot_config_t *const *cfgs,
                 size_t nsets = 0;
                 char **sets = sets_of(options, &naming, &nsets);
                 const char *key = param_key(pt, options);
-                char item[256];
                 /* A point that names its key is published under the key, so
                  * only the key has to be usable -- not the id. */
                 if (strcmp(key, pt->id) != 0) {
-                    if (!tdot_param_key_valid(key)) {
-                        snprintf(item, sizeof item,
-                                 "parameter key '%s' of point '%s'", key, pt->id);
-                        append(&buf, &len, ", ", item);
-                    }
+                    if (!tdot_param_key_valid(key))
+                        append_fmt(&buf, &len, "parameter key '%s' of point '%s'",
+                                   key, pt->id);
                 } else if (!tdot_param_key_valid(pt->id)) {
-                    snprintf(item, sizeof item, "point id '%s'", pt->id);
-                    append(&buf, &len, ", ", item);
+                    append_fmt(&buf, &len, "point id '%s'", pt->id);
                 }
                 for (size_t k = 0; k < nsets; k++)
-                    if (!tdot_param_key_valid(sets[k])) {
-                        snprintf(item, sizeof item, "parameter set '%s'",
-                                 sets[k]);
-                        append(&buf, &len, ", ", item);
-                    }
+                    if (!tdot_param_key_valid(sets[k]))
+                        append_fmt(&buf, &len, "parameter set '%s'", sets[k]);
                 tdot_param_sets_free(sets, nsets);
                 cJSON_Delete(options);
             }
@@ -267,28 +281,17 @@ char *tdot_param_key_conflicts_across(const tdot_config_t *const *cfgs,
                 size_t nsets = 0;
                 char **sets = sets_of(options, &naming, &nsets);
                 const char *key = param_key(pt, options);
-                char item[512];
-                /* A write-only point never samples, so the flows cannot learn
-                 * its key: an edit would never reach the point. */
-                if (nsets && strcmp(key, pt->id) != 0 &&
-                    pt->access == TDOT_ACCESS_WRITE) {
-                    snprintf(item, sizeof item,
-                             "key '%s' of write-only point '%s' on device '%s'",
-                             key, pt->id, dev->name);
-                    append(&buf, &len, ", ", item);
-                }
                 for (size_t k = 0; k < nsets; k++) {
                     cJSON *keys = cJSON_GetObjectItemCaseSensitive(seen, sets[k]);
                     if (!keys)
                         keys = cJSON_AddObjectToObject(seen, sets[k]);
                     const cJSON *first = cJSON_GetObjectItemCaseSensitive(keys, key);
                     if (cJSON_IsString(first)) {
-                        snprintf(item, sizeof item,
-                                 "key '%s' of points '%s' and '%s' in set '%s' "
-                                 "on device '%s'",
-                                 key, first->valuestring, pt->id, sets[k],
-                                 dev->name);
-                        append(&buf, &len, ", ", item);
+                        append_fmt(&buf, &len,
+                                   "key '%s' of points '%s' and '%s' in set '%s' "
+                                   "on device '%s'",
+                                   key, first->valuestring, pt->id, sets[k],
+                                   dev->name);
                     } else {
                         cJSON_AddStringToObject(keys, key, pt->id);
                     }

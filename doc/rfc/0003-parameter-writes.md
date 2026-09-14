@@ -77,9 +77,10 @@ name was `<protocol>_parameters`, which collides across device types;
 JSON-schema type and integer bounds are automatic;
 `meta.parameter.{title, description, min, max, enum, default, order}` enrich the schema. The keys of a set are the point ids, unless a point names its own with
 `meta.parameter.key` (so `firmwareVersion` can be `version` in a `firmware` set); keys must be plain
-identifiers (`[A-Za-z0-9_]`; Cumulocity rejects dots in keys), unique per set on a device, and a
-write-only point cannot name one (it never samples, so the flows cannot learn it) — `describe`
-refuses all three.
+identifiers (`[A-Za-z0-9_]`; Cumulocity rejects dots in keys) and unique per set on a device —
+`describe` refuses both. The connector's retained capability descriptor lists the keyed points
+(`parameter_keys`), so the flows know a key before the point samples: after a mapper restart, and
+for a write-only point.
 
 Three places could own the definition; the config wins:
 
@@ -115,7 +116,8 @@ is left out). Values come from:
   then confirmed by the next sample;
 * **write-only parameters** (`access = "write"`) — the last *acknowledged* write. They never
   produce samples, so their set is learned from nothing: they land in the default set (whose
-  name the retained link status still qualifies with the device type — RFC 0005).
+  name the retained link status still qualifies with the device type — RFC 0005) — unless they
+  name a key, whose entry in the capability descriptor (`parameter_keys`) names their sets.
 
 Output-only points exist in every protocol (Modbus write-only registers behind FC06/16 on
 devices that reject reads of them, OPC UA nodes with `AccessLevel = CurrentWrite`, CANopen

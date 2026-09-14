@@ -11,6 +11,9 @@ input.mqtt.topics = [
   # It is also the only source of the type for a device whose parameters are all write-only,
   # since those points never produce a sample.
   "te/+/+/ot/+/status/link",
+  # Retained: the points that name their own key in a set (parameter_keys, contract §7), so a
+  # key is known before the point samples — after a restart, and for write-only points.
+  "te/device/main/service/+/ot/capabilities",
   "te/+/+/ot/+/sample/+",
   "te/+/+/ot/+/cmd/write/+",
   "te/+/+/ot/+/cmd/write-batch/+",

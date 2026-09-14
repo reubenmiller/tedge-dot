@@ -406,11 +406,12 @@ static void check_parameter_keys(void) {
               "an unusable key must be reported, got: %s", bad ? bad : "<none>");
         free(bad);
         char *conflicts = tdot_param_key_conflicts(cfg, NULL);
+        /* A key on a write-only point is fine: the capability descriptor
+         * carries it (parameter_keys), so the flows know it without a sample. */
         CHECK(conflicts &&
                   strcmp(conflicts,
                          "key 'name' of points 'firmwareName' and 'bootName' in set "
-                         "'firmware' on device 'plc1', key 'update' of write-only "
-                         "point 'update_cmd' on device 'plc1'") == 0,
+                         "'firmware' on device 'plc1'") == 0,
               "conflicts = %s", conflicts ? conflicts : "<none>");
         free(conflicts);
         tdot_config_free(cfg);

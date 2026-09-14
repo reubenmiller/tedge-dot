@@ -588,6 +588,47 @@ static void add_point_labels(cJSON *caps, const tdot_config_t *cfg) {
     }
 }
 
+/* `parameter_keys` of the capability descriptor (contract §7): every configured
+ * point that names its own key inside its parameter sets (`meta.parameter.key`),
+ * with the `set` / `group` that name those sets, exactly as configured.
+ *
+ * A consumer (the ot-parameter-state flow) learns from it which point a key
+ * belongs to before the point samples -- right after a restart (samples are not
+ * retained), and at all for a write-only point, which never samples. Points
+ * without a key are omitted: their key is their id. Mirrors descriptor.rs
+ * `parameter_keys`. */
+static void add_parameter_keys(cJSON *caps, const tdot_config_t *cfg) {
+    cJSON *keys = NULL;
+    for (size_t i = 0; i < cfg->ndevices; i++) {
+        const tdot_device_t *dev = &cfg->devices[i];
+        for (size_t j = 0; j < dev->npoints; j++) {
+            const tdot_point_t *pt = &dev->points[j];
+            cJSON *meta = pt->meta_json ? cJSON_Parse(pt->meta_json) : NULL;
+            const cJSON *param =
+                meta ? cJSON_GetObjectItemCaseSensitive(meta, "parameter") : NULL;
+            const cJSON *key = cJSON_IsObject(param)
+                                   ? cJSON_GetObjectItemCaseSensitive(param, "key")
+                                   : NULL;
+            if (cJSON_IsString(key)) {
+                if (!keys)
+                    keys = cJSON_AddArrayToObject(caps, "parameter_keys");
+                cJSON *entry = cJSON_CreateObject();
+                cJSON_AddStringToObject(entry, "device", dev->name);
+                cJSON_AddStringToObject(entry, "point", pt->id);
+                cJSON_AddStringToObject(entry, "key", key->valuestring);
+                static const char *naming[] = {"set", "group"};
+                for (size_t k = 0; k < sizeof naming / sizeof *naming; k++) {
+                    const cJSON *v = cJSON_GetObjectItemCaseSensitive(param, naming[k]);
+                    if (v)
+                        cJSON_AddItemToObject(entry, naming[k], cJSON_Duplicate(v, 1));
+                }
+                cJSON_AddItemToArray(keys, entry);
+            }
+            cJSON_Delete(meta);
+        }
+    }
+}
+
 static char *augmented_capabilities(const char *json, const tdot_config_t *cfg) {
     cJSON *caps = cJSON_Parse(json);
     if (!caps)

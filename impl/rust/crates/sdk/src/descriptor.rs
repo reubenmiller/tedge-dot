@@ -7,8 +7,9 @@
 //! `ot-parameter-state` flow with the current values) and one DTM property definition in the
 //! tenant (rendered by `tedge-dot describe`). The keys of a set are the point ids, unless a point
 //! names its own with `meta.parameter.key` (so `firmwareVersion` can be `version` in a `firmware`
-//! set). Keys must be plain identifiers (`[A-Za-z0-9_]`) and unique per set on a device, and a
-//! write-only point cannot name one: it never samples, so the flows cannot learn its key.
+//! set). Keys must be plain identifiers (`[A-Za-z0-9_]`) and unique per set on a device; the
+//! capability descriptor lists the points naming one (`parameter_keys`), so the flows know a key
+//! before the point samples.
 //!
 //! ## Naming a set
 //!
@@ -381,34 +382,43 @@ pub fn invalid_keys(config: &ConnectorConfig, forced: Option<&str>) -> Vec<Strin
 
 /// [`invalid_keys`] over several configurations, in configuration order.
 pub fn invalid_keys_across(configs: &[ConnectorConfig], forced: Option<&str>) -> Vec<String> {
-    configs
-        .iter()
-        .flat_map(|config| parameters(config, forced))
-        .flat_map(|p| {
-            let mut bad = Vec::new();
-            // A point that names its key is published under the key, so only the key has to be
-            // usable — not the id.
-            if p.key != p.point {
-                if !is_valid_key(&p.key) {
-                    bad.push(format!("parameter key '{}' of point '{}'", p.key, p.point));
+    let mut bad = Vec::new();
+    for config in configs {
+        for device in &config.devices {
+            let naming = SetNaming::of(device, &config.connector.protocol, forced);
+            for point in &device.points {
+                // A point yields one parameter per set, but what is wrong with it is reported
+                // once, key first and then its sets — as the C build reports it.
+                let mut reported: Vec<String> = Vec::new();
+                for p in parameters_of(point, &naming) {
+                    let mut items = Vec::new();
+                    // A point that names its key is published under the key, so only the key
+                    // has to be usable — not the id.
+                    if p.key != p.point {
+                        if !is_valid_key(&p.key) {
+                            items.push(format!("parameter key '{}' of point '{}'", p.key, p.point));
+                        }
+                    } else if !is_valid_key(&p.point) {
+                        items.push(format!("point id '{}'", p.point));
+                    }
+                    if !is_valid_key(&p.set) {
+                        items.push(format!("parameter set '{}'", p.set));
+                    }
+                    for item in items {
+                        if !reported.contains(&item) {
+                            reported.push(item.clone());
+                            bad.push(item);
+                        }
+                    }
                 }
-            } else if !is_valid_key(&p.point) {
-                bad.push(format!("point id '{}'", p.point));
             }
-            if !is_valid_key(&p.set) {
-                bad.push(format!("parameter set '{}'", p.set));
-            }
-            bad
-        })
-        .collect()
+        }
+    }
+    bad
 }
 
-/// Parameter keys that cannot work on the twin:
-///
-/// * two points of one device with the same key in one set — a fragment holds one value per
-///   key;
-/// * a key named on a write-only point — it never samples, so the flows cannot learn the key
-///   and an edit of it would never reach the point.
+/// Parameter keys shared by two points of one device in one set: a fragment holds one value per
+/// key.
 pub fn key_conflicts(config: &ConnectorConfig, forced: Option<&str>) -> Vec<String> {
     key_conflicts_across(std::slice::from_ref(config), forced)
 }
@@ -424,14 +434,6 @@ pub fn key_conflicts_across(configs: &[ConnectorConfig], forced: Option<&str>) -
             let mut seen: Vec<(String, String, String)> = Vec::new();
             for point in &device.points {
                 let params = parameters_of(point, &naming);
-                if let Some(p) = params.first() {
-                    if p.key != p.point && p.access == Access::Write {
-                        conflicts.push(format!(
-                            "key '{}' of write-only point '{}' on device '{}'",
-                            p.key, p.point, device.name
-                        ));
-                    }
-                }
                 for p in params {
                     match seen.iter().find(|(set, key, _)| *set == p.set && *key == p.key) {
                         Some((_, _, first)) => conflicts.push(format!(
@@ -606,6 +608,40 @@ pub fn point_labels(config: &ConnectorConfig) -> Vec<Value> {
         }
     }
     labels
+}
+
+/// The `parameter_keys` of the capability descriptor (§7): every configured point that names its
+/// own key inside its parameter sets (`meta.parameter.key`), with the `set` / `group` that name
+/// those sets, exactly as configured.
+///
+/// A consumer — the `ot-parameter-state` flow — learns from it which point a key belongs to
+/// before the point samples: right after a restart (samples are not retained), and at all for a
+/// write-only point, which never samples. Points without a key are omitted, since their key is
+/// their id, so a configuration that names no key adds nothing to the descriptor.
+pub fn parameter_keys(config: &ConnectorConfig) -> Vec<Value> {
+    let mut keys = Vec::new();
+    for device in &config.devices {
+        for point in &device.points {
+            let Some(Value::Object(options)) = point.meta.as_ref().and_then(|m| m.get("parameter"))
+            else {
+                continue;
+            };
+            let Some(Value::String(key)) = options.get("key") else {
+                continue;
+            };
+            let mut entry = Map::new();
+            entry.insert("device".into(), json!(device.name));
+            entry.insert("point".into(), json!(point.id));
+            entry.insert("key".into(), json!(key));
+            for name in ["set", "group"] {
+                if let Some(value) = options.get(name) {
+                    entry.insert(name.into(), value.clone());
+                }
+            }
+            keys.push(Value::Object(entry));
+        }
+    }
+    keys
 }
 
 fn title_from_key(key: &str) -> String {
@@ -896,8 +932,9 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id 
     /// `meta.parameter.key` names the key a point has inside its sets, so a point keeps an id
     /// that is unique on the device and still carries a conventional key. The definition is
     /// keyed by it (a point without a label is titled by it), a usable key frees the id from the
-    /// key rule, and two points of a device sharing a key in a set, or a key on a write-only
-    /// point, are refused. Mirrors `check_parameter_keys` in impl/c/tests/describe.c.
+    /// key rule, and two points of a device sharing a key in a set are refused — a key on a
+    /// write-only point is not, since the capability descriptor carries it. Mirrors
+    /// `check_parameter_keys` in impl/c/tests/describe.c.
     #[test]
     fn a_point_can_name_its_own_key() {
         const KEYED: &str = r#"
@@ -929,7 +966,7 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id 
   meta = { parameter = { key = "tank_level" } }
 "#;
         // Appended: a second point with the key `name` in `firmware`, a key on a write-only
-        // point, and an unusable key.
+        // point (allowed), and an unusable key.
         const CONFLICTS: &str = r#"
   [[device.point]]
   id = "bootName"
@@ -976,10 +1013,7 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id 
         );
         assert_eq!(
             key_conflicts(&config, None),
-            vec![
-                "key 'name' of points 'firmwareName' and 'bootName' in set 'firmware' on device 'plc1'",
-                "key 'update' of write-only point 'update_cmd' on device 'plc1'",
-            ]
+            vec!["key 'name' of points 'firmwareName' and 'bootName' in set 'firmware' on device 'plc1'"]
         );
     }
 
@@ -1063,6 +1097,55 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id 
             point.description = None;
         }
         assert!(point_labels(&bare).is_empty());
+    }
+
+    /// The capability descriptor's `parameter_keys` (§7): only the points that name their own
+    /// key, with the `set` / `group` that name their sets as configured — what the
+    /// ot-parameter-state flow needs to claim a key before the point samples.
+    #[test]
+    fn parameter_keys_list_the_points_naming_a_key() {
+        let config: ConnectorConfig = toml::from_str(
+            r#"
+[connector]
+protocol = "modbus"
+
+[[device]]
+name = "plc1"
+protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id = 1 }
+
+  [[device.point]]
+  id = "firmwareVersion"
+  datatype = "uint16"
+  address = { table = "holding", address = 1, count = 1 }
+  meta = { parameter = { set = "firmware", key = "version" } }
+
+  [[device.point]]
+  id = "valve_cmd"
+  datatype = "bool"
+  access = "write"
+  address = { table = "coil", address = 2, count = 1 }
+  meta = { parameter = { group = ["control", "commissioning"], key = "valve" } }
+
+  [[device.point]]
+  id = "plain_rw"
+  datatype = "uint16"
+  access = "read_write"
+  address = { table = "holding", address = 3, count = 1 }
+  meta = { parameter = { group = "control" } }
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parameter_keys(&config),
+            vec![
+                json!({ "device": "plc1", "point": "firmwareVersion", "key": "version", "set": "firmware" }),
+                json!({ "device": "plc1", "point": "valve_cmd", "key": "valve", "group": ["control", "commissioning"] }),
+            ]
+        );
+        assert!(
+            parameter_keys(&cfg()).is_empty(),
+            "a configuration naming no key adds nothing to the descriptor"
+        );
     }
 
     #[test]
