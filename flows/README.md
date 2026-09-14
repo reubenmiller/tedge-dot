@@ -62,8 +62,25 @@ command whose `service` is not a plain topic level is **not forwarded**: the flo
 
 **Device parameters** (see [RFC 0003](../doc/rfc/0003-parameter-writes.md)): writable points are
 parameters. `ot-parameter-state` keeps one retained twin fragment per *parameter set*
-(`te/device/<device>///twin/<set>`, keyed by point id) current from the samples (which echo each
-point's `access`) and from acknowledged writes. It also drops a point from the twin when the
+(`te/device/<device>///twin/<set>`, keyed by point id or by the key a point names) current from the samples (which echo each
+point's `access`) and from acknowledged writes. A point can name its own key in the fragment with
+`meta.parameter.key`, keeping an id that is unique on the device:
+
+```toml
+[[point]]
+id       = "firmwareVersion"
+datatype = "string"
+address  = { node_id = "ns=1;s=FirmwareVersion" }
+meta     = { parameter = { key = "firmware.version" }, measurement = false }
+```
+
+publishes `te/device/<device>///twin/firmware` as `{"version": "..."}`: a key `<set>.<key>` names
+the set and the key at once, while a key without a dot (`key = "version"`) stays in the point's
+usual set. `ot-command-forward` turns
+an edit of that key back into a write of `firmwareVersion`. The mapping comes from the connector's
+retained capability descriptor (`parameter_keys`) as well as the point's samples, so it holds right
+after a mapper restart and for write-only points too; `tedge-dot describe` refuses two points of a
+device with the same key in a set. It also drops a point from the twin when the
 retained link status no longer lists it (a reload removed it) or its latest sample no longer
 names that set, and clears a set left empty: Cumulocity sends the whole fragment back with an
 edit, so a stale key would fail every update of the set. `ot-command-forward` reshapes a

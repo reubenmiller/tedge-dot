@@ -1150,6 +1150,12 @@ fn cmd_describe(args: DescribeArgs) -> Result<(), String> {
             bad.join(", ")
         ));
     }
+    // A fragment holds one value per key, and a key naming its set leaves no room for `set` or
+    // `group`. Worded like the C build (impl/c/src/main.c).
+    let conflicts = tedge_dot_sdk::descriptor::key_conflicts_across(&configs, forced);
+    if !conflicts.is_empty() {
+        return Err(format!("conflicting parameter keys: {}", conflicts.join(", ")));
+    }
     // A DTM identifier is tenant-wide, so a set named after the protocol is shared with every
     // other device type that speaks it. Declaring the device type is what keeps them apart.
     if forced.is_none() {

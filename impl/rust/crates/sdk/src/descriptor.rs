@@ -5,8 +5,12 @@
 //! `meta.parameter` (`meta.parameter = false` opts a writable point out). Parameters are grouped
 //! into **sets**: one set is one twin fragment on the device (published by the
 //! `ot-parameter-state` flow with the current values) and one DTM property definition in the
-//! tenant (rendered by `tedge-dot describe`). The keys of a set are the point ids, so parameter
-//! ids must be plain identifiers (`[A-Za-z0-9_]`).
+//! tenant (rendered by `tedge-dot describe`). The keys of a set are the point ids, unless a point
+//! names its own with `meta.parameter.key` (so `firmwareVersion` can be `version` in a `firmware`
+//! set: `key = "firmware.version"` names the set and the key at once, while a key without a dot
+//! stays in the point's usual set). Keys must be plain identifiers (`[A-Za-z0-9_]`) and unique per set on a device; the
+//! capability descriptor lists the points naming one (`parameter_keys`), so the flows know a key
+//! before the point samples.
 //!
 //! ## Naming a set
 //!
@@ -120,6 +124,10 @@ impl SetNaming {
     /// belongs on the commissioning screen and the daily-operation one. The point's value is
     /// published to every set's fragment, so the groups stay consistent with each other.
     pub fn sets_of(&self, options: &Map<String, Value>) -> Vec<String> {
+        // A key that names its set (`key = "<set>.<key>"`) is absolute, like `set`, and wins.
+        if let Some((set, _)) = options.get("key").and_then(Value::as_str).and_then(dotted_key) {
+            return vec![set.to_string()];
+        }
         // An absolute `set` bypasses the naming rule entirely and wins over `group`.
         let absolute = names_of(options.get("set"));
         if !absolute.is_empty() {
@@ -169,6 +177,15 @@ fn names_of(value: Option<&Value>) -> Vec<String> {
     names
 }
 
+/// A key that names its set too, `<set>.<key>`: both halves, split at its only dot. `None` for a
+/// plain key — and for one with more dots or an empty half, which stays a plain key and is
+/// refused by [`invalid_keys`]. A dot can only be this separator, because neither a set name nor
+/// a key may contain one.
+pub fn dotted_key(key: &str) -> Option<(&str, &str)> {
+    let (set, name) = key.split_once('.')?;
+    (!set.is_empty() && !name.is_empty() && !name.contains('.')).then_some((set, name))
+}
+
 /// True when `id` can be used verbatim as a fragment key (Cumulocity rejects `.` and `$`).
 pub fn is_valid_key(id: &str) -> bool {
     !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -177,8 +194,11 @@ pub fn is_valid_key(id: &str) -> bool {
 /// One parameter derived from a configured point.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Parameter {
-    /// Point id (= the key inside the set).
+    /// Point id.
     pub point: String,
+    /// The key inside the set: `meta.parameter.key`, else the point id. It lets a point keep an
+    /// id that is unique on the device and still carry a short, conventional key in its set.
+    pub key: String,
     /// Parameter set (twin fragment / DTM identifier).
     pub set: String,
     pub datatype: Option<DataType>,
@@ -216,11 +236,19 @@ pub fn parameters_of(point: &PointConfig, naming: &SetNaming) -> Vec<Parameter> 
         return Vec::new();
     }
     let options = options.unwrap_or_default();
+    // A string key replaces the id inside the set — its part after the set, for a key naming its
+    // set — and anything else is no key. An unusable string is kept as it is, so `invalid_keys`
+    // reports it rather than silently falling back to the id.
+    let key = match options.get("key") {
+        Some(Value::String(key)) => dotted_key(key).map_or(key.as_str(), |(_, name)| name).to_string(),
+        _ => point.id.clone(),
+    };
     naming
         .sets_of(&options)
         .into_iter()
         .map(|set| Parameter {
             point: point.id.clone(),
+            key: key.clone(),
             set,
             datatype: point.datatype,
             access,
@@ -362,27 +390,96 @@ pub fn type_warnings_across(configs: &[ConnectorConfig]) -> Vec<String> {
     warnings
 }
 
-/// Parameter ids (and set names) that cannot be used as fragment keys.
+/// Parameter keys (and set names) that cannot be used as fragment keys.
 pub fn invalid_keys(config: &ConnectorConfig, forced: Option<&str>) -> Vec<String> {
     invalid_keys_across(std::slice::from_ref(config), forced)
 }
 
 /// [`invalid_keys`] over several configurations, in configuration order.
 pub fn invalid_keys_across(configs: &[ConnectorConfig], forced: Option<&str>) -> Vec<String> {
-    configs
-        .iter()
-        .flat_map(|config| parameters(config, forced))
-        .flat_map(|p| {
-            let mut bad = Vec::new();
-            if !is_valid_key(&p.point) {
-                bad.push(format!("point id '{}'", p.point));
+    let mut bad = Vec::new();
+    for config in configs {
+        for device in &config.devices {
+            let naming = SetNaming::of(device, &config.connector.protocol, forced);
+            for point in &device.points {
+                // A point yields one parameter per set, but what is wrong with it is reported
+                // once, key first and then its sets — as the C build reports it.
+                let mut reported: Vec<String> = Vec::new();
+                for p in parameters_of(point, &naming) {
+                    let mut items = Vec::new();
+                    // A point that names its key is published under the key, so only the key
+                    // has to be usable — not the id.
+                    if p.key != p.point {
+                        if !is_valid_key(&p.key) {
+                            items.push(format!("parameter key '{}' of point '{}'", p.key, p.point));
+                        }
+                    } else if !is_valid_key(&p.point) {
+                        items.push(format!("point id '{}'", p.point));
+                    }
+                    if !is_valid_key(&p.set) {
+                        items.push(format!("parameter set '{}'", p.set));
+                    }
+                    for item in items {
+                        if !reported.contains(&item) {
+                            reported.push(item.clone());
+                            bad.push(item);
+                        }
+                    }
+                }
             }
-            if !is_valid_key(&p.set) {
-                bad.push(format!("parameter set '{}'", p.set));
+        }
+    }
+    bad
+}
+
+/// Parameter keys that cannot be rendered:
+///
+/// * two points of one device with the same key in one set — a fragment holds one value per key;
+/// * a point combining `set` with `key` — a key names its set itself (`<set>.<key>`);
+/// * a point combining `group` with a key that names its set — the set is then absolute.
+pub fn key_conflicts(config: &ConnectorConfig, forced: Option<&str>) -> Vec<String> {
+    key_conflicts_across(std::slice::from_ref(config), forced)
+}
+
+/// [`key_conflicts`] over several configurations, in configuration order. Same text as the C
+/// build's `tdot_param_key_conflicts`.
+pub fn key_conflicts_across(configs: &[ConnectorConfig], forced: Option<&str>) -> Vec<String> {
+    let mut conflicts = Vec::new();
+    for config in configs {
+        for device in &config.devices {
+            let naming = SetNaming::of(device, &config.connector.protocol, forced);
+            // (set, key, the point of this device that has it first)
+            let mut seen: Vec<(String, String, String)> = Vec::new();
+            for point in &device.points {
+                let params = parameters_of(point, &naming);
+                if let Some(p) = params.first() {
+                    if let Some(key) = p.options.get("key").and_then(Value::as_str) {
+                        if p.options.contains_key("set") {
+                            conflicts.push(format!(
+                                "point '{}' on device '{}' combines \"set\" with \"key\": write the key as '<set>.<key>'",
+                                p.point, device.name
+                            ));
+                        } else if dotted_key(key).is_some() && p.options.contains_key("group") {
+                            conflicts.push(format!(
+                                "point '{}' on device '{}' combines \"group\" with a key that names its set",
+                                p.point, device.name
+                            ));
+                        }
+                    }
+                }
+                for p in params {
+                    match seen.iter().find(|(set, key, _)| *set == p.set && *key == p.key) {
+                        Some((_, _, first)) => conflicts.push(format!(
+                            "key '{}' of points '{}' and '{}' in set '{}' on device '{}'",
+                            p.key, first, p.point, p.set, device.name
+                        )),
+                        None => seen.push((p.set, p.key, p.point)),
+                    }
+                }
             }
-            bad
-        })
-        .collect()
+        }
+    }
+    conflicts
 }
 
 /// Render Cumulocity Digital Twin Manager property definitions — one per parameter set — for
@@ -417,11 +514,11 @@ pub fn c8y_dtm_definitions_across(
                 }
             };
             let props = &mut sets[index].2;
-            if props.iter().any(|(k, _)| *k == param.point) {
+            if props.iter().any(|(k, _)| *k == param.key) {
                 continue; // same key on another device: first definition wins
             }
             let schema = property_schema(&param);
-            props.push((param.point.clone(), schema));
+            props.push((param.key.clone(), schema));
         }
     }
     sets.into_iter()
@@ -475,7 +572,7 @@ pub fn property_schema(param: &Parameter) -> Value {
         .and_then(|t| t.as_str())
         .map(String::from)
         .or_else(|| param.name.clone())
-        .unwrap_or_else(|| param.point.clone());
+        .unwrap_or_else(|| param.key.clone());
     schema.insert("title".into(), json!(title));
     let mut description = param
         .options
@@ -544,6 +641,40 @@ pub fn point_labels(config: &ConnectorConfig) -> Vec<Value> {
         }
     }
     labels
+}
+
+/// The `parameter_keys` of the capability descriptor (§7): every configured point that names its
+/// own key inside its parameter sets (`meta.parameter.key`), with the `set` / `group` that name
+/// those sets, exactly as configured.
+///
+/// A consumer — the `ot-parameter-state` flow — learns from it which point a key belongs to
+/// before the point samples: right after a restart (samples are not retained), and at all for a
+/// write-only point, which never samples. Points without a key are omitted, since their key is
+/// their id, so a configuration that names no key adds nothing to the descriptor.
+pub fn parameter_keys(config: &ConnectorConfig) -> Vec<Value> {
+    let mut keys = Vec::new();
+    for device in &config.devices {
+        for point in &device.points {
+            let Some(Value::Object(options)) = point.meta.as_ref().and_then(|m| m.get("parameter"))
+            else {
+                continue;
+            };
+            let Some(Value::String(key)) = options.get("key") else {
+                continue;
+            };
+            let mut entry = Map::new();
+            entry.insert("device".into(), json!(device.name));
+            entry.insert("point".into(), json!(point.id));
+            entry.insert("key".into(), json!(key));
+            for name in ["set", "group"] {
+                if let Some(value) = options.get(name) {
+                    entry.insert(name.into(), value.clone());
+                }
+            }
+            keys.push(Value::Object(entry));
+        }
+    }
+    keys
 }
 
 fn title_from_key(key: &str) -> String {
@@ -831,6 +962,131 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id 
             .all(|b| b.contains("parameter set")));
     }
 
+    /// A dot can only separate a set from a key, and only one dot with both halves non-empty
+    /// does: anything else stays a plain key, which `invalid_keys` refuses.
+    #[test]
+    fn a_dotted_key_names_its_set() {
+        assert_eq!(dotted_key("firmware.version"), Some(("firmware", "version")));
+        for plain in ["version", "a.", ".b", "a..b", "a.b.c", ".", ""] {
+            assert_eq!(dotted_key(plain), None, "{plain:?}");
+        }
+        let naming = SetNaming::of(&cfg().devices[0], "modbus", Some("forced_set"));
+        let point: PointConfig = toml::from_str(
+            "id = \"p\"\ndatatype = \"uint16\"\naccess = \"read_write\"\n\
+             address = { table = \"holding\", address = 1, count = 1 }\n\
+             meta = { parameter = { key = \"firmware.version\", set = [\"other\"] } }",
+        )
+        .unwrap();
+        // The set it names is absolute: it wins over `set` and over the forced set.
+        let params = parameters_of(&point, &naming);
+        assert_eq!(params.len(), 1);
+        assert_eq!((params[0].set.as_str(), params[0].key.as_str()), ("firmware", "version"));
+    }
+
+    /// `meta.parameter.key` names the key a point has inside its sets, so a point keeps an id
+    /// that is unique on the device and still carries a conventional key. The definition is
+    /// keyed by it (a point without a label is titled by it), a usable key frees the id from the
+    /// key rule, and two points of a device sharing a key in a set are refused — a key on a
+    /// write-only point is not, since the capability descriptor carries it. Mirrors
+    /// `check_parameter_keys` in impl/c/tests/describe.c.
+    #[test]
+    fn a_point_can_name_its_own_key() {
+        const KEYED: &str = r#"
+[connector]
+protocol = "modbus"
+
+[[device]]
+name = "plc1"
+type = "zephyr"
+protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id = 1 }
+
+  [[device.point]]
+  id = "firmwareName"
+  datatype = "uint16"
+  name = "Firmware name"
+  address = { table = "holding", address = 1, count = 1 }
+  meta = { parameter = { key = "firmware.name" } }
+
+  [[device.point]]
+  id = "firmwareVersion"
+  datatype = "uint16"
+  address = { table = "holding", address = 2, count = 1 }
+  meta = { parameter = { key = "firmware.version" } }
+
+  [[device.point]]
+  id = "Tank.Level"
+  datatype = "uint16"
+  address = { table = "holding", address = 5, count = 1 }
+  meta = { parameter = { key = "tank_level" } }
+"#;
+        // Appended: a second point with the key `name` in `firmware`, a key on a write-only
+        // point (allowed), an unusable key, and the two option combinations a key refuses.
+        const CONFLICTS: &str = r#"
+  [[device.point]]
+  id = "bootName"
+  datatype = "uint16"
+  address = { table = "holding", address = 3, count = 1 }
+  meta = { parameter = { key = "firmware.name" } }
+
+  [[device.point]]
+  id = "update_cmd"
+  datatype = "uint16"
+  access = "write"
+  address = { table = "holding", address = 4, count = 1 }
+  meta = { parameter = { key = "firmware.update" } }
+
+  [[device.point]]
+  id = "level"
+  datatype = "uint16"
+  address = { table = "holding", address = 6, count = 1 }
+  meta = { parameter = { key = "a.b.c" } }
+
+  [[device.point]]
+  id = "mixed_set"
+  datatype = "uint16"
+  address = { table = "holding", address = 7, count = 1 }
+  meta = { parameter = { set = "firmware", key = "mixed" } }
+
+  [[device.point]]
+  id = "mixed_group"
+  datatype = "uint16"
+  address = { table = "holding", address = 8, count = 1 }
+  meta = { parameter = { group = "control", key = "info.mixed" } }
+"#;
+        let config: ConnectorConfig = toml::from_str(KEYED).unwrap();
+        assert!(
+            invalid_keys(&config, None).is_empty(),
+            "a usable key frees the id from the key rule"
+        );
+        assert!(key_conflicts(&config, None).is_empty());
+        let defs = c8y_dtm_definitions(&config, None);
+        assert_eq!(defs[0]["identifier"], "firmware");
+        let firmware = &defs[0]["jsonSchema"]["properties"];
+        assert_eq!(firmware["name"]["title"], "Firmware name");
+        assert_eq!(
+            firmware["version"]["title"], "version",
+            "a point without a label is titled by its key"
+        );
+        assert!(firmware.get("firmwareName").is_none());
+        let control = &defs[1]["jsonSchema"]["properties"];
+        assert!(control["tank_level"].is_object());
+        assert!(control.get("Tank.Level").is_none());
+
+        let config: ConnectorConfig = toml::from_str(&format!("{KEYED}{CONFLICTS}")).unwrap();
+        assert_eq!(
+            invalid_keys(&config, None),
+            vec!["parameter key 'a.b.c' of point 'level'"]
+        );
+        assert_eq!(
+            key_conflicts(&config, None),
+            vec![
+                "key 'name' of points 'firmwareName' and 'bootName' in set 'firmware' on device 'plc1'",
+                "point 'mixed_set' on device 'plc1' combines \"set\" with \"key\": write the key as '<set>.<key>'",
+                "point 'mixed_group' on device 'plc1' combines \"group\" with a key that names its set",
+            ]
+        );
+    }
+
     #[test]
     fn dtm_definitions_group_by_set_and_render_schema() {
         let defs = c8y_dtm_definitions(&cfg(), None);
@@ -911,6 +1167,55 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id 
             point.description = None;
         }
         assert!(point_labels(&bare).is_empty());
+    }
+
+    /// The capability descriptor's `parameter_keys` (§7): only the points that name their own
+    /// key, with the `set` / `group` that name their sets as configured — what the
+    /// ot-parameter-state flow needs to claim a key before the point samples.
+    #[test]
+    fn parameter_keys_list_the_points_naming_a_key() {
+        let config: ConnectorConfig = toml::from_str(
+            r#"
+[connector]
+protocol = "modbus"
+
+[[device]]
+name = "plc1"
+protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id = 1 }
+
+  [[device.point]]
+  id = "firmwareVersion"
+  datatype = "uint16"
+  address = { table = "holding", address = 1, count = 1 }
+  meta = { parameter = { key = "firmware.version" } }
+
+  [[device.point]]
+  id = "valve_cmd"
+  datatype = "bool"
+  access = "write"
+  address = { table = "coil", address = 2, count = 1 }
+  meta = { parameter = { group = ["control", "commissioning"], key = "valve" } }
+
+  [[device.point]]
+  id = "plain_rw"
+  datatype = "uint16"
+  access = "read_write"
+  address = { table = "holding", address = 3, count = 1 }
+  meta = { parameter = { group = "control" } }
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parameter_keys(&config),
+            vec![
+                json!({ "device": "plc1", "point": "firmwareVersion", "key": "firmware.version" }),
+                json!({ "device": "plc1", "point": "valve_cmd", "key": "valve", "group": ["control", "commissioning"] }),
+            ]
+        );
+        assert!(
+            parameter_keys(&cfg()).is_empty(),
+            "a configuration naming no key adds nothing to the descriptor"
+        );
     }
 
     #[test]

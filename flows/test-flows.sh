@@ -704,6 +704,193 @@ check "parameter-state: a point made read-only leaves the twin" ot-parameter-sta
   "[te/device/plc1/ot/modbus/sample/temp_u16] $ST"$'\n'"[te/device/plc1/ot/modbus/sample/old_rw] $SOLD"$'\n'"[te/device/plc1/ot/modbus/sample/old_rw] $SREADONLY" \
   '[te/device/plc1///twin/modbus_control_parameters] {"temp_u16":17001}'
 
+# meta.parameter.key: the key a point has inside its sets, so a point keeps an id that is unique
+# on the device (firmwareVersion) and is still `version` in its `firmware` fragment.
+SFWNAME='{"ts":"2026-05-30T10:00:00.000Z","device":"opc1","type":"zephyr","protocol":"opcua","point":"firmwareName","mode":"typed","datatype":"string","value":"zephyr-opcua-server","value_repr":"string","quality":"good","addr":{},"access":"read","meta":{"parameter":{"key":"firmware.name"},"measurement":false}}'
+SFWVER='{"ts":"2026-05-30T10:00:00.000Z","device":"opc1","type":"zephyr","protocol":"opcua","point":"firmwareVersion","mode":"typed","datatype":"string","value":"0.2.0","value_repr":"string","quality":"good","addr":{},"access":"read","meta":{"parameter":{"key":"firmware.version"},"measurement":false}}'
+check "parameter-state: meta.parameter.key names the point's key in its set" ot-parameter-state \
+  "[te/device/opc1/ot/opcua/sample/firmwareName] $SFWNAME"$'\n'"[te/device/opc1/ot/opcua/sample/firmwareVersion] $SFWVER" \
+  '[te/device/opc1///twin/firmware] {"name":"zephyr-opcua-server","version":"0.2.0"}'
+# A changed key leaves no stale key behind: Cumulocity would send it back with every edit.
+SFWRENAMED='{"ts":"2026-05-30T10:00:01.000Z","device":"opc1","type":"zephyr","protocol":"opcua","point":"firmwareName","mode":"typed","datatype":"string","value":"zephyr-opcua-server","value_repr":"string","quality":"good","addr":{},"access":"read","meta":{"parameter":{"key":"firmware.fw_name"}}}'
+check "parameter-state: a changed key replaces the old one" ot-parameter-state \
+  "[te/device/opc1/ot/opcua/sample/firmwareName] $SFWNAME"$'\n'"[te/device/opc1/ot/opcua/sample/firmwareVersion] $SFWVER"$'\n'"[te/device/opc1/ot/opcua/sample/firmwareName] $SFWRENAMED" \
+  '[te/device/opc1///twin/firmware] {"fw_name":"zephyr-opcua-server","version":"0.2.0"}'
+check "parameter-state: a removed point's key leaves the twin" ot-parameter-state \
+  "[te/device/opc1/ot/opcua/sample/firmwareName] $SFWNAME"$'\n'"[te/device/opc1/ot/opcua/sample/firmwareVersion] $SFWVER"$'\n''[te/device/opc1/ot/opcua/status/link] {"status":"connected","type":"zephyr","points":["firmwareVersion"]}' \
+  '[te/device/opc1///twin/firmware] {"version":"0.2.0"}'
+# Two points of a device sharing a key in a set: `describe` refuses that; the flow keeps the first.
+SFWDUP='{"ts":"2026-05-30T10:00:00.000Z","device":"opc1","type":"zephyr","protocol":"opcua","point":"bootName","mode":"typed","datatype":"string","value":"bootloader","value_repr":"string","quality":"good","addr":{},"access":"read","meta":{"parameter":{"key":"firmware.name"}}}'
+check_absent "parameter-state: the first point to claim a key keeps it" ot-parameter-state \
+  "[te/device/opc1/ot/opcua/sample/firmwareName] $SFWNAME"$'\n'"[te/device/opc1/ot/opcua/sample/bootName] $SFWDUP" \
+  '[te/device/opc1///twin/firmware] {"name":"zephyr-opcua-server"}' \
+  'bootloader'
+SBADKEY='{"ts":"2026-05-30T10:00:00.000Z","device":"opc1","protocol":"opcua","point":"p","mode":"typed","datatype":"uint16","value":1,"value_repr":"number","raw":"0001","quality":"good","addr":{},"access":"read_write","meta":{"parameter":{"key":"a-b"}}}'
+check "parameter-state: an unusable key falls back to the point id" ot-parameter-state \
+  "[te/device/opc1/ot/opcua/sample/p] $SBADKEY" \
+  '[te/device/opc1///twin/opcua_control_parameters] {"p":1}'
+# An edit of the fragment names keys; the forward flow turns them back into the points they belong
+# to, and the acknowledged write lands on the twin under the key again.
+SKEYED='{"ts":"2026-05-30T10:00:00.000Z","device":"opc1","type":"zephyr","protocol":"opcua","point":"setpointValue","mode":"typed","datatype":"int32","value":0,"value_repr":"number","raw":"0000 0000","quality":"good","addr":{},"access":"read_write","meta":{"parameter":{"key":"target"}}}'
+KEYCHAIN="[te/device/opc1/ot/opcua/sample/setpointValue] $SKEYED
+[te/device/opc1///cmd/parameter_update/k1] {\"status\":\"init\",\"set\":\"zephyr_control_parameters\",\"parameters\":{\"target\":7}}
+[te/device/opc1/ot/opcua/cmd/write-batch/ot--k1] {\"status\":\"successful\",\"results\":[{\"point\":\"setpointValue\",\"status\":\"successful\",\"value\":7}]}"
+check_multi "parameter key: an edit of the key writes the point it belongs to" \
+  "ot-parameter-state ot-command-forward" "$KEYCHAIN" \
+  '[te/device/opc1/ot/opcua/cmd/write-batch/ot--k1] {"status":"init","writes":[{"point":"setpointValue","value":7}],"origin":{"command":"parameter_update","set":"zephyr_control_parameters","parameters":{"target":7}}}'
+check_multi "parameter key: the acknowledged write lands on the twin under the key" \
+  "ot-parameter-state ot-command-forward" "$KEYCHAIN" \
+  '[te/device/opc1///twin/zephyr_control_parameters] {"target":7}'
+# A key is claimed before the point's first good reading, so a point removed while it still reads
+# bad must release it too: otherwise the point that takes the key over is never published, and an
+# edit of the key is written to the removed point.
+SFWBAD='{"ts":"2026-05-30T10:00:00.000Z","device":"opc1","type":"zephyr","protocol":"opcua","point":"firmwareName","mode":"typed","datatype":"string","quality":"bad","error":"timeout","addr":{},"access":"read_write","meta":{"parameter":{"key":"firmware.name"}}}'
+SFWNEW='{"ts":"2026-05-30T10:00:01.000Z","device":"opc1","type":"zephyr","protocol":"opcua","point":"fwName","mode":"typed","datatype":"string","value":"zephyr","value_repr":"string","quality":"good","addr":{},"access":"read_write","meta":{"parameter":{"key":"firmware.name"}}}'
+RENAMECHAIN="[te/device/opc1/ot/opcua/sample/firmwareName] $SFWBAD
+[te/device/opc1/ot/opcua/status/link] {\"status\":\"connected\",\"type\":\"zephyr\",\"points\":[\"fwName\"]}
+[te/device/opc1/ot/opcua/sample/fwName] $SFWNEW
+[te/device/opc1///cmd/parameter_update/r1] {\"status\":\"init\",\"set\":\"firmware\",\"parameters\":{\"name\":\"y\"}}"
+check_multi "parameter key: a point removed before any good reading releases its key" \
+  "ot-parameter-state ot-command-forward" "$RENAMECHAIN" \
+  '[te/device/opc1///twin/firmware] {"name":"zephyr"}'
+check_multi "parameter key: ...so an edit of the key reaches the point that took it over" \
+  "ot-parameter-state ot-command-forward" "$RENAMECHAIN" \
+  '"writes":[{"point":"fwName","value":"y"}]'
+# A key equal to ANOTHER point's id belongs to the point that claimed it first; the other point's
+# value does not overwrite it, and an edit of the key is written to the claimant.
+SALPHA='{"device":"opc1","type":"zephyr","protocol":"opcua","point":"alpha","mode":"typed","datatype":"int32","value":1,"value_repr":"number","quality":"good","addr":{},"access":"read_write","meta":{"parameter":{"key":"beta"}}}'
+SBETA='{"device":"opc1","type":"zephyr","protocol":"opcua","point":"beta","mode":"typed","datatype":"int32","value":2,"value_repr":"number","quality":"good","addr":{},"access":"read_write"}'
+SHADOWED="[te/device/opc1/ot/opcua/sample/alpha] $SALPHA
+[te/device/opc1/ot/opcua/sample/beta] $SBETA
+[te/device/opc1///cmd/parameter_update/s1] {\"status\":\"init\",\"set\":\"zephyr_control_parameters\",\"parameters\":{\"beta\":5}}"
+check_multi "parameter key: a key equal to another point's id stays with its claimant" \
+  "ot-parameter-state ot-command-forward" "$SHADOWED" \
+  '[te/device/opc1///twin/zephyr_control_parameters] {"beta":1}' --absent '"beta":2'
+check_multi "parameter key: ...and an edit of it is written to the claimant" \
+  "ot-parameter-state ot-command-forward" "$SHADOWED" \
+  '"writes":[{"point":"alpha","value":5}]'
+# Pruning that claimant frees the key for the point whose id it is.
+check "parameter-state: a pruned claimant hands a key back to the point of that id" ot-parameter-state \
+  "[te/device/opc1/ot/opcua/sample/alpha] $SALPHA"$'\n'"[te/device/opc1/ot/opcua/sample/beta] $SBETA"$'\n''[te/device/opc1/ot/opcua/status/link] {"status":"connected","type":"zephyr","points":["beta"]}'$'\n'"[te/device/opc1/ot/opcua/sample/beta] $SBETA" \
+  '[te/device/opc1///twin/zephyr_control_parameters] {"beta":2}'
+# ...and a second claimant of a key takes it over once the first is removed.
+check "parameter-state: once the first claimant is removed, the other takes the key over" ot-parameter-state \
+  "[te/device/opc1/ot/opcua/sample/firmwareName] $SFWNAME"$'\n'"[te/device/opc1/ot/opcua/sample/bootName] $SFWDUP"$'\n''[te/device/opc1/ot/opcua/status/link] {"status":"connected","type":"zephyr","points":["bootName"]}'$'\n'"[te/device/opc1/ot/opcua/sample/bootName] $SFWDUP" \
+  '[te/device/opc1///twin/firmware] {"name":"bootloader"}'
+# A key and a group changed by one reload: the old key leaves the old set, the new key lands in
+# the new one.
+SKG1='{"device":"plc1","type":"acme-boiler-v2","protocol":"modbus","point":"limit","mode":"typed","datatype":"uint16","value":3,"value_repr":"number","quality":"good","addr":{},"access":"read_write","meta":{"parameter":{"group":"control","key":"k1"}}}'
+SKG2='{"device":"plc1","type":"acme-boiler-v2","protocol":"modbus","point":"limit","mode":"typed","datatype":"uint16","value":3,"value_repr":"number","quality":"good","addr":{},"access":"read_write","meta":{"parameter":{"group":"commissioning","key":"k2"}}}'
+check "parameter-state: a key and a group changed together leave nothing behind" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/limit] $SKG1"$'\n'"[te/device/plc1/ot/modbus/sample/limit] $SKG2" \
+  $'[te/device/plc1///twin/acme_boiler_v2_control_parameters] \n[te/device/plc1///twin/acme_boiler_v2_commissioning_parameters] {"k2":3}'
+# The connector's retained capability descriptor lists the points that name a key (parameter_keys,
+# §7), so a key is known before any sample. After a mapper restart — samples are not retained, and
+# a subscribed point may not sample again for a long time — an edit of the key already reaches its
+# point, and the replayed result of the last write lands under the key. The descriptor here comes
+# before the link status that reports the device type, so the key first lands in the set named
+# after the protocol and must move to the one named after the type.
+CAPS='{"protocol":"opcua","parameter_keys":[{"device":"opc1","point":"setpointValue","key":"target"}]}'
+RESTART="[te/device/main/service/tedge-dot/ot/capabilities] $CAPS
+[te/device/opc1/ot/opcua/status/link] {\"status\":\"connected\",\"type\":\"zephyr\",\"points\":[\"setpointValue\"]}
+[te/device/opc1///cmd/parameter_update/p1] {\"status\":\"init\",\"set\":\"zephyr_control_parameters\",\"parameters\":{\"target\":1}}
+[te/device/opc1/ot/opcua/cmd/write-batch/ot--p0] {\"status\":\"successful\",\"results\":[{\"point\":\"setpointValue\",\"status\":\"successful\",\"value\":7}]}"
+check_multi "parameter key: after a restart, the declared key maps an edit before any sample" \
+  "ot-parameter-state ot-command-forward" "$RESTART" \
+  '"writes":[{"point":"setpointValue","value":1}]'
+check_multi "parameter key: ...and a replayed write result lands under the declared key" \
+  "ot-parameter-state ot-command-forward" "$RESTART" \
+  '[te/device/opc1///twin/zephyr_control_parameters] {"target":7}' --absent '"setpointValue":7'
+# A write-only point never samples: its declared key and group are all that place it.
+CAPSWO='{"protocol":"modbus","parameter_keys":[{"device":"plc1","point":"valve_cmd","key":"valve","group":"commissioning"}]}'
+check "parameter-state: a write-only point takes its declared key and set" ot-parameter-state \
+  '[te/device/plc1/ot/modbus/status/link] {"status":"connected","type":"acme-boiler-v2","points":["valve_cmd"]}'$'\n'"[te/device/main/service/tedge-dot-modbus/ot/capabilities] $CAPSWO"$'\n''[te/device/plc1/ot/modbus/cmd/write-batch/ot--1] {"status":"successful","results":[{"point":"valve_cmd","status":"successful","value":true}]}' \
+  '[te/device/plc1///twin/acme_boiler_v2_commissioning_parameters] {"valve":true}'
+# The dotted key: `firmware.version` names the set (absolutely, winning over `set`) and the key; an
+# unusable set in it falls back to the point's usual set, and a key with more dots to the point id.
+SDOTSET='{"device":"opc1","type":"zephyr","protocol":"opcua","point":"fwVersion","mode":"typed","datatype":"string","value":"0.2.0","value_repr":"string","quality":"good","addr":{},"access":"read","meta":{"parameter":{"set":"other","key":"firmware.version"}}}'
+check "parameter-state: a key naming its set wins over set" ot-parameter-state \
+  "[te/device/opc1/ot/opcua/sample/fwVersion] $SDOTSET" \
+  '[te/device/opc1///twin/firmware] {"version":"0.2.0"}'
+SDOTBADSET='{"device":"opc1","type":"zephyr","protocol":"opcua","point":"fwVersion","mode":"typed","datatype":"string","value":"0.2.0","value_repr":"string","quality":"good","addr":{},"access":"read_write","meta":{"parameter":{"key":"firm-ware.version"}}}'
+check "parameter-state: an unusable set in a dotted key falls back to the usual set" ot-parameter-state \
+  "[te/device/opc1/ot/opcua/sample/fwVersion] $SDOTBADSET" \
+  '[te/device/opc1///twin/zephyr_control_parameters] {"version":"0.2.0"}'
+SDOTS='{"device":"opc1","type":"zephyr","protocol":"opcua","point":"fwVersion","mode":"typed","datatype":"string","value":"0.2.0","value_repr":"string","quality":"good","addr":{},"access":"read_write","meta":{"parameter":{"key":"a.b.c"}}}'
+check "parameter-state: a key with more than one dot falls back to the point id" ot-parameter-state \
+  "[te/device/opc1/ot/opcua/sample/fwVersion] $SDOTS" \
+  '[te/device/opc1///twin/zephyr_control_parameters] {"fwVersion":"0.2.0"}'
+# A dotted key declared in the descriptor maps an edit of its set before any sample.
+CAPSDOT='{"protocol":"opcua","parameter_keys":[{"device":"opc1","point":"fwVersion","key":"firmware.version"}]}'
+check_multi "parameter key: a declared dotted key maps an edit of its set before any sample" \
+  "ot-parameter-state ot-command-forward" \
+  "[te/device/main/service/tedge-dot/ot/capabilities] $CAPSDOT
+[te/device/opc1///cmd/parameter_update/d1] {\"status\":\"init\",\"set\":\"firmware\",\"parameters\":{\"version\":\"1.0.0\"}}" \
+  '"writes":[{"point":"fwVersion","value":"1.0.0"}]'
+# The dot moves a point between sets by what reads like a key edit: two points swapping sets under
+# the same key name in one reload are both free before either is claimed again, so an edit reaches
+# the point that has the set now — without waiting for the next link status.
+CAPSSETS1='{"protocol":"opcua","parameter_keys":[{"device":"opc1","point":"a","key":"firmware.version"},{"device":"opc1","point":"b","key":"boot.version"}]}'
+CAPSSETS2='{"protocol":"opcua","parameter_keys":[{"device":"opc1","point":"a","key":"boot.version"},{"device":"opc1","point":"b","key":"firmware.version"}]}'
+check_multi "parameter key: sets swapped between points under one key name map to their new points" \
+  "ot-parameter-state ot-command-forward" \
+  "[te/device/opc1/ot/opcua/status/link] {\"status\":\"connected\",\"type\":\"zephyr\",\"points\":[\"a\",\"b\"]}
+[te/device/main/service/tedge-dot/ot/capabilities] $CAPSSETS1
+[te/device/main/service/tedge-dot/ot/capabilities] $CAPSSETS2
+[te/device/opc1///cmd/parameter_update/ss] {\"status\":\"init\",\"set\":\"boot\",\"parameters\":{\"version\":1}}" \
+  '"writes":[{"point":"a","value":1}]'
+# A plain key made dotted by a reload moves the point to the named set and frees its old one.
+CAPSPLAIN='{"protocol":"opcua","parameter_keys":[{"device":"opc1","point":"fw","key":"version"}]}'
+CAPSDOTTED='{"protocol":"opcua","parameter_keys":[{"device":"opc1","point":"fw","key":"firmware.version"}]}'
+PLAIN2DOT="[te/device/opc1/ot/opcua/status/link] {\"status\":\"connected\",\"type\":\"zephyr\",\"points\":[\"fw\"]}
+[te/device/main/service/tedge-dot/ot/capabilities] $CAPSPLAIN
+[te/device/main/service/tedge-dot/ot/capabilities] $CAPSDOTTED
+[te/device/opc1///cmd/parameter_update/p2d] {\"status\":\"init\",\"set\":\"firmware\",\"parameters\":{\"version\":1}}
+[te/device/opc1///cmd/parameter_update/p2d-old] {\"status\":\"init\",\"set\":\"zephyr_control_parameters\",\"parameters\":{\"version\":2}}"
+check_multi "parameter key: a plain key made dotted moves the point to the named set" \
+  "ot-parameter-state ot-command-forward" "$PLAIN2DOT" \
+  '[te/device/opc1/ot/opcua/cmd/write-batch/ot--p2d] {"status":"init","writes":[{"point":"fw","value":1}]'
+check_multi "parameter key: ...and its old set no longer maps the key to it" \
+  "ot-parameter-state ot-command-forward" "$PLAIN2DOT" \
+  '[te/device/opc1/ot/opcua/cmd/write-batch/ot--p2d-old] {"status":"init","writes":[{"point":"version","value":2}]'
+check_empty "parameter-state: a descriptor alone publishes nothing" ot-parameter-state \
+  "[te/device/main/service/tedge-dot/ot/capabilities] $CAPS"
+# A reload that removes the key (here: the device is gone from parameter_keys) must undo it. A
+# write-only point never samples, so nothing else would: its value leaves the declared set and its
+# next acknowledged write lands under its id, in the default set, as `describe` now renders it.
+check "parameter-state: a key the descriptor no longer declares goes back to the point id" ot-parameter-state \
+  '[te/device/plc1/ot/modbus/status/link] {"status":"connected","type":"acme-boiler-v2","points":["valve_cmd"]}'$'\n'"[te/device/main/service/tedge-dot-modbus/ot/capabilities] $CAPSWO"$'\n''[te/device/plc1/ot/modbus/cmd/write-batch/ot--1] {"status":"successful","results":[{"point":"valve_cmd","status":"successful","value":true}]}'$'\n''[te/device/main/service/tedge-dot-modbus/ot/capabilities] {"protocol":"modbus"}'$'\n''[te/device/plc1/ot/modbus/cmd/write-batch/ot--2] {"status":"successful","results":[{"point":"valve_cmd","status":"successful","value":false}]}' \
+  $'[te/device/plc1///twin/acme_boiler_v2_commissioning_parameters] \n[te/device/plc1///twin/acme_boiler_v2_control_parameters] {"valve_cmd":false}'
+# The reverse: a key ADDED to a write-only point that was written without origin.set (so it sits
+# in the default set under its id, with no recorded sets). What it leaves comes from what it holds,
+# so the default set is cleared and the next acknowledged write lands under the key.
+check "parameter-state: a key added to a write-only point clears its id from the default set" ot-parameter-state \
+  '[te/device/plc1/ot/modbus/status/link] {"status":"connected","type":"acme-boiler-v2","points":["valve_cmd"]}'$'\n''[te/device/plc1/ot/modbus/cmd/write/w1] {"status":"successful","point":"valve_cmd","value":true}'$'\n'"[te/device/main/service/tedge-dot-modbus/ot/capabilities] $CAPSWO"$'\n''[te/device/plc1/ot/modbus/cmd/write-batch/ot--2] {"status":"successful","results":[{"point":"valve_cmd","status":"successful","value":false}]}' \
+  $'[te/device/plc1///twin/acme_boiler_v2_control_parameters] \n[te/device/plc1///twin/acme_boiler_v2_commissioning_parameters] {"valve":false}'
+# A readable point released by the descriptor is placed again by its next sample, under its id.
+SKEYEDX='{"device":"opc1","type":"zephyr","protocol":"opcua","point":"setpointValue","mode":"typed","datatype":"int32","value":3,"value_repr":"number","quality":"good","addr":{},"access":"read_write","meta":{"parameter":{"key":"target"}}}'
+SUNKEYED='{"device":"opc1","type":"zephyr","protocol":"opcua","point":"setpointValue","mode":"typed","datatype":"int32","value":3,"value_repr":"number","quality":"good","addr":{},"access":"read_write"}'
+# ...but a descriptor that stops declaring a key does not undo a point a newer sample has already
+# placed under its id: the value stays.
+check_absent "parameter-state: a stale declaration is not released over a newer sample" ot-parameter-state \
+  '[te/device/opc1/ot/opcua/status/link] {"status":"connected","type":"zephyr","points":["setpointValue"]}'$'\n'"[te/device/main/service/tedge-dot/ot/capabilities] $CAPS"$'\n'"[te/device/opc1/ot/opcua/sample/setpointValue] $SKEYEDX"$'\n'"[te/device/opc1/ot/opcua/sample/setpointValue] $SUNKEYED"$'\n''[te/device/main/service/tedge-dot/ot/capabilities] {"protocol":"opcua"}' \
+  '[te/device/opc1///twin/zephyr_control_parameters] {"setpointValue":3}' \
+  $'{"setpointValue":3}\n[te/device/opc1///twin/zephyr_control_parameters] '
+check "parameter-state: a released readable point is placed again by its next sample" ot-parameter-state \
+  '[te/device/opc1/ot/opcua/status/link] {"status":"connected","type":"zephyr","points":["setpointValue"]}'$'\n'"[te/device/main/service/tedge-dot/ot/capabilities] $CAPS"$'\n'"[te/device/opc1/ot/opcua/sample/setpointValue] $SKEYEDX"$'\n''[te/device/main/service/tedge-dot/ot/capabilities] {"protocol":"opcua"}'$'\n'"[te/device/opc1/ot/opcua/sample/setpointValue] $SUNKEYED" \
+  $'[te/device/opc1///twin/zephyr_control_parameters] \n[te/device/opc1///twin/zephyr_control_parameters] {"setpointValue":3}'
+# Keys swapped between two points by one reload: both are free before either is claimed again, so
+# an edit of a key reaches the point that has it now.
+CAPSAB='{"protocol":"opcua","parameter_keys":[{"device":"opc1","point":"a","key":"x"},{"device":"opc1","point":"b","key":"y"}]}'
+CAPSBA='{"protocol":"opcua","parameter_keys":[{"device":"opc1","point":"a","key":"y"},{"device":"opc1","point":"b","key":"x"}]}'
+SWAP="[te/device/opc1/ot/opcua/status/link] {\"status\":\"connected\",\"type\":\"zephyr\",\"points\":[\"a\",\"b\"]}
+[te/device/main/service/tedge-dot/ot/capabilities] $CAPSAB
+[te/device/main/service/tedge-dot/ot/capabilities] $CAPSBA
+[te/device/opc1///cmd/parameter_update/sw] {\"status\":\"init\",\"set\":\"zephyr_control_parameters\",\"parameters\":{\"x\":1,\"y\":2}}"
+check_multi "parameter key: keys swapped between points by one reload map to their new points" \
+  "ot-parameter-state ot-command-forward" "$SWAP" \
+  '"writes":[{"point":"b","value":1},{"point":"a","value":2}]'
+
 # --- ot-command-forward: parameter_update -> write-batch ---
 C8YOP='{"status":"init","operation":{"deviceId":"123","c8y_ParameterUpdate":{},"c8y_ParameterUpdate_acme_boiler_v2_control_parameters":{},"acme_boiler_v2_control_parameters":{"temp_u16":4242,"coil_rw":true}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}'
 check "command-forward: c8y parameter update -> one write-batch with origin + mapper metadata" ot-command-forward \

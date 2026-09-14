@@ -497,8 +497,15 @@ this beyond echoing `access`, `meta` and the device `type` in samples: a flow
 retained twin fragment per *parameter set* from the samples and acknowledged writes, and
 cloud-specific tooling (`tedge-dot describe`) renders the same sets as cloud-side definitions.
 A read-only point can opt in with `meta.parameter = true`, a writable point can opt out with
-`meta.parameter = false`. Because point ids become the fragment keys, parameter ids SHOULD be
-plain identifiers (`[A-Za-z0-9_]`).
+`meta.parameter = false`. A parameter's key inside its fragment is its point id, or
+`meta.parameter.key` when the point names one — so a point can keep an id that is unique on the
+device (`firmwareVersion`) and still be `version` in its `firmware` set with
+`meta.parameter = { key = "firmware.version" }`: a key `<set>.<key>` names its set too (absolutely,
+so it cannot be combined with `set` or `group`), while a key without a dot stays in the point's usual
+set (and cannot be combined with `set`). Keys SHOULD be plain
+identifiers (`[A-Za-z0-9_]`) and unique per set on a device. The capability descriptor lists
+every point that names a key (`parameter_keys`, §7), so consumers know the keys before any sample:
+after a restart, since samples are not retained, and for a write-only point, which never samples.
 
 **Naming a set.** A set name is a tenant-wide identifier in the cloud, so it is qualified by the
 *device type* (§3.1) — what decides which points exist — and never by the protocol alone, which
@@ -805,6 +812,9 @@ same fields with its own values (and typically `"subscribe": true`):
   "point_labels": [
     { "device": "plc-1", "point": "boiler_temp",
       "name": "Boiler temp", "description": "Outlet temperature after the heat exchanger" }
+  ],
+  "parameter_keys": [
+    { "device": "plc-1", "point": "boiler_setpoint", "key": "setpoint", "group": "control" }
   ]
 }
 ```
@@ -818,12 +828,13 @@ same fields with its own values (and typically `"subscribe": true`):
 | `features` | Optional capability tags: `polling`, `subscribe`, `bitfield`, `string`, `bulk_read`, … |
 | `subscribe` | Whether the connector supports event-driven (push) reads in addition to polling. |
 | `point_labels` | The human-readable `name`/`description` of the configured points (§3.1), so a consumer can show something friendlier than the point id. Only points declaring one of them appear, and each entry carries only the fields it declares — **no entry means the id is the label**, so a configuration that labels nothing adds nothing here. Unlike the fields above, this describes the *configuration* rather than the connector's abilities; it lives here because it is static per point, which makes one retained message the right place for it and a per-sample echo the wrong one (§5 samples are a time series). |
+| `parameter_keys` | The configured points that name their own key inside their parameter sets (`meta.parameter.key`, §5.2), with the key and any `set` / `group` exactly as configured — so a key of the form `<set>.<key>` names its set too. A consumer learns from it which point a key belongs to before the point samples — after a restart, since samples are not retained, and for a write-only point, which never samples. Only points naming a key appear, so a configuration naming none adds nothing here. Like `point_labels`, this describes the configuration. |
 
 Tooling and the conformance suite use the descriptor to decide which tests apply.
 
 The descriptor is retained, so it MUST be republished whenever something it reports changes.
-Everything except `point_labels` is a property of the connector build and so is published once
-at startup; `point_labels` follows the configuration, and a connector MUST therefore republish
+Everything except `point_labels` and `parameter_keys` is a property of the connector build and so
+is published once at startup; those two follow the configuration, and a connector MUST therefore republish
 the descriptor after a management command (§6.3) changes it — a retained message describing the
 configuration as it was at startup is worse than none. Note also that labelling every point of
 a large list has a size: two hundred fully labelled points add on the order of ten kilobytes to

@@ -102,3 +102,15 @@ default_mode     = "typed"
   datatype = "float64"
   unit     = "°C"
   address  = { node_id = "ns=2;s=Temperature" }
+
+  # The Count node again, as a read-only parameter that names its own key in its set: the
+  # `counters` twin fragment carries it as `count`, not as its id, and the capability descriptor
+  # lists the key (parameter_keys, §7) so the flows know it before the point samples. Last on
+  # purpose: `describe` renders sets in the order they first appear, and the describe test reads
+  # the first one.
+  [[device.point]]
+  id       = "cycle_count"
+  subscribe = false
+  datatype = "uint32"
+  address  = { node_id = "ns=2;s=Count" }
+  meta     = { parameter = { key = "counters.count" }, measurement = false }

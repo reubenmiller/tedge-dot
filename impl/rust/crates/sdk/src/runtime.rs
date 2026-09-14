@@ -1532,16 +1532,20 @@ fn augment_management_caps(caps: &mut Capabilities) {
 }
 
 /// The retained capability descriptor payload (§7): the module's declared capabilities plus
-/// the configured points' human-readable labels.
+/// the configured points' human-readable labels and named parameter keys.
 ///
-/// The labels are static per point, so they belong in this one retained message rather than in
-/// every sample — but they come from the *configuration*, unlike everything else here, so this
-/// has to be rebuilt and republished whenever a management command changes it.
+/// Both are static per point, so they belong in this one retained message rather than in every
+/// sample — but they come from the *configuration*, unlike everything else here, so this has to
+/// be rebuilt and republished whenever a management command changes it.
 fn capability_payload(caps: &Capabilities, config: &ConnectorConfig) -> String {
     let mut json = caps.to_json();
     let labels = crate::descriptor::point_labels(config);
     if !labels.is_empty() {
         json["point_labels"] = serde_json::Value::Array(labels);
+    }
+    let keys = crate::descriptor::parameter_keys(config);
+    if !keys.is_empty() {
+        json["parameter_keys"] = serde_json::Value::Array(keys);
     }
     json.to_string()
 }
@@ -2805,6 +2809,51 @@ protocol_address = { host = "127.0.0.1" }
         read_only.command_verbs = vec![];
         augment_batch_caps(&mut read_only);
         assert!(read_only.command_verbs.is_empty());
+    }
+
+    /// The published capability descriptor carries the configuration's parameter keys (§7) —
+    /// what lets the flows map a key to its point before any sample — and adds nothing for a
+    /// configuration that names no key.
+    #[test]
+    fn capability_payload_carries_parameter_keys() {
+        let caps = Capabilities {
+            protocol: "modbus",
+            version: "0",
+            modes: vec![],
+            datatypes: vec![],
+            point_kinds: vec![],
+            command_verbs: vec![],
+            features: vec![],
+            subscribe: false,
+        };
+        let keyed: ConnectorConfig = toml::from_str(
+            r#"
+[connector]
+protocol = "modbus"
+
+[[device]]
+name = "plc1"
+protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id = 1 }
+  [[device.point]]
+  id = "firmwareVersion"
+  datatype = "uint16"
+  address = { table = "holding", address = 1, count = 1 }
+  meta = { parameter = { key = "firmware.version" } }
+"#,
+        )
+        .unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(&capability_payload(&caps, &keyed)).unwrap();
+        assert_eq!(
+            payload["parameter_keys"],
+            serde_json::json!([
+                { "device": "plc1", "point": "firmwareVersion", "key": "firmware.version" }
+            ])
+        );
+        let plain: ConnectorConfig = toml::from_str(BASE).unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(&capability_payload(&caps, &plain)).unwrap();
+        assert!(payload.get("parameter_keys").is_none());
     }
 
     #[test]

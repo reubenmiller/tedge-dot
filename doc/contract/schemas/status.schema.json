@@ -104,6 +104,25 @@
               "description": { "type": "string" }
             }
           }
+        },
+        "parameter_keys": {
+          "type": "array",
+          "description": "The configured points that name their own key inside their parameter sets (§5.2 meta.parameter.key), with the set / group that name those sets as configured. A consumer learns from it which point a key belongs to before the point samples: after a restart, since samples are not retained, and for a write-only point, which never samples. Points without a key are omitted; their key is their id.",
+          "items": {
+            "type": "object",
+            "required": ["device", "point", "key"],
+            "additionalProperties": false,
+            "properties": {
+              "device": { "type": "string", "minLength": 1 },
+              "point": { "type": "string", "minLength": 1 },
+              "key": {
+                "type": "string",
+                "description": "As configured: `<key>`, or `<set>.<key>` naming the set too. A consumer ignores a key it cannot use."
+              },
+              "set": { "description": "meta.parameter.set as configured: a set name or a list of them." },
+              "group": { "description": "meta.parameter.group as configured: a group name or a list of them." }
+            }
+          }
         }
       }
     }
