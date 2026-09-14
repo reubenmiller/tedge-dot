@@ -21,8 +21,8 @@ modules that run inside a mapper and are hot-reloaded without restarts.
 | Flow | Direction | Reads | Emits |
 | --- | --- | --- | --- |
 | [ot-measurement](ot-measurement/) | OT → thin-edge | `ot/<protocol>/sample/<point>` | `m/<group>` measurement |
-| [ot-alarm](ot-alarm/) | thin-edge → thin-edge | `m/<group>` | `a/<type>` alarm (hysteresis) |
-| [ot-event](ot-event/) | thin-edge → thin-edge | `m/<group>` | `e/<type>` event (on change) |
+| [ot-alarm](ot-alarm/) | OT → thin-edge | `sample/<point>` (`meta.alarm`), `status/link`; or one `m/<group>` series | `a/<type>` alarm, retained: raised and cleared |
+| [ot-event](ot-event/) | OT → thin-edge | `sample/<point>` (`meta.event`); or one `m/<group>` series | `e/<type>` event |
 | [ot-registration](ot-registration/) | OT → thin-edge | `ot/<protocol>/status/link` | `te/device/<device>//` child registration (+ optional `twin/<fragment>`) |
 | [ot-command-forward](ot-command-forward/) | thin-edge → OT | `cmd/ot_<verb>/<id>` (incl. `parameter_update`) | `ot/<protocol>/cmd/<verb>/<id>`, or `service/<service>/ot/cmd/<verb>/<id>` for management verbs |
 | [ot-command-result](ot-command-result/) | OT → thin-edge | `ot/<protocol>/cmd/<verb>/<id>`, `service/<service>/ot/cmd/<verb>/<id>` | `cmd/ot_<verb>/<id>` (or the `origin.command`) |
@@ -86,13 +86,37 @@ admin to register — see [RFC 0005](../doc/rfc/0005-device-types-and-parameter-
 A parameter is still an ordinary signal otherwise, so by default its samples also become
 measurements through `ot-measurement`. To keep its value on the twin fragment only, and not also
 as a measurement series, set `meta.measurement = false` on the point: it stays a parameter and
-keeps being sampled. `ot-alarm` and `ot-event` work from measurements, so they no longer see
-such a point either.
+keeps being sampled. Alarms and events declared on the point (below) still work: they are
+evaluated on its samples, not its measurements.
+
+**Alarms and events** are declared per signal on the point's `meta`, next to its address — for
+whatever value a sample carries, a string or a boolean as much as a number:
+
+```toml
+[[device.point]]
+id       = "pump_state"
+datatype = "string"
+address  = { node_id = "ns=2;s=PumpState" }
+meta     = { measurement = false, alarm = { type = "pump_fault", severity = "critical", when = { equals = "FAULT" } }, event = { type = "pump_state_changed", text = "Pump is {value}" } }
+```
+
+`ot-alarm` publishes the alarm, retained, while `when` holds — `equals` / `not_equals` a value or
+a list of values, `above` / `below` a number with an optional `hysteresis`; without `when`, while
+the value is `true` — and clears it with an empty retained message. `ot-event` raises an event on
+every change of the value or, with `when`, each time the condition starts to hold. `alarm` and
+`event` may each be a list; the header of each flow's `main.js` documents every key. The alarm
+is retained but the flows' memory is not, so the first reading after a mapper restart settles
+each alarm by publishing it, raised or cleared: an alarm whose condition went away in the
+meantime does not stay active. An alarm is also cleared when its point stops declaring it or is
+removed from the configuration (seen while the mapper runs). An event, by contrast, takes the
+first reading after a restart as its baseline, so a restart never reports a change that did not
+happen — and a change made while the mapper was down is not reported.
 
 By default `ot-measurement` names the measurement group after the sample's `protocol`
-(`m/modbus`, `m/opcua`, ...), `ot-registration` types the child device as `<protocol>-device`,
-and `ot-alarm`/`ot-event` follow whatever `m/<group>` they are fed. Override any of these via each
-flow's `params.toml`.
+(`m/modbus`, `m/opcua`, ...) and `ot-registration` types the child device as `<protocol>-device`.
+Override either via each flow's `params.toml`, where `ot-alarm` / `ot-event` can also watch one
+`m/<group>` series for a threshold or for changes (their measurement mode, off until `series` is
+set).
 
 To remap individual signals to specific groups/series with a single flow instance, name the
 connector points with a separator and set `point_separator` (e.g. `"."`): the point id
@@ -143,7 +167,7 @@ echo '[te/device/plc1/ot/modbus/sample/level_f32] {"ts":"2026-05-30T10:00:00.000
 ## Deploy
 
 The `tedge-dot` packages (both the Rust and the C build) already ship these flows, so on a
-packaged install there is nothing to copy. The core pipeline is deployed **active**, into the
+packaged install there is nothing to copy. All of them are deployed **active**, into the
 Cumulocity mapper's flows directory:
 
 ```
@@ -152,18 +176,23 @@ Cumulocity mapper's flows directory:
 /etc/tedge/mappers/c8y/flows/ot-command-forward/
 /etc/tedge/mappers/c8y/flows/ot-command-result/
 /etc/tedge/mappers/c8y/flows/ot-parameter-state/
+/etc/tedge/mappers/c8y/flows/ot-alarm/
+/etc/tedge/mappers/c8y/flows/ot-event/
 ```
 
-`ot-alarm` and `ot-event` only mean something once a threshold or an event type has been chosen
-for a specific signal, so they ship inert in `/usr/share/tedge-dot/flows/`. Opt one in by copying
-it across and giving it a `params.toml`:
+`ot-alarm` and `ot-event` do nothing until a point declares an alarm or an event, so they need no
+settings. Only their measurement mode — one `m/<group>` series watched for a threshold or for
+changes — is configured, in a `params.toml`:
 
 ```sh
-sudo cp -Ra /usr/share/tedge-dot/flows/ot-alarm /etc/tedge/mappers/c8y/flows/
 sudo cp /etc/tedge/mappers/c8y/flows/ot-alarm/params.toml.template \
         /etc/tedge/mappers/c8y/flows/ot-alarm/params.toml
 sudo -u tedge $EDITOR /etc/tedge/mappers/c8y/flows/ot-alarm/params.toml
 ```
+
+Earlier packages shipped these two inert in `/usr/share/tedge-dot/flows/`. A copy enabled from
+there by hand is replaced by the packaged flow on upgrade and the `params.toml` next to it is
+kept, so a measurement alarm or event set up that way keeps working.
 
 Either way the mapper picks the change up and hot-reloads — no restart. Only the flow logic
 (`flow.toml`, `main.js`) and the `params.toml.template` are packaged; the `params.toml` you write

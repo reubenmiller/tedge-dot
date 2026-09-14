@@ -359,8 +359,33 @@ Generic Write Command Is Bridged By The Flows
     ${result}=    Wait For Message Containing    te/device/${DEVICE}///cmd/ot_write/w-1    "status":"successful"    timeout=${FLOWS_TIMEOUT}
     ${twin}=    Wait For Message Containing    ${PARAM_TWIN}    "setpoint":17001    timeout=${FLOWS_TIMEOUT}
 
+Alarm And Event Declared On A Point Follow Its Value
+    [Documentation]    (flows) ot-alarm and ot-event act on the alarm and the event the running
+    ...                point declares in its meta (connector.toml), from its samples alone — no
+    ...                measurement or flow params involved. The alarm is retained: raised while
+    ...                the value is true, cleared with an empty retained message once it is false.
+    ...                The event is raised on a change of the value.
+    [Tags]    flows
+    ${alarm_topic}=    Set Variable    te/device/${DEVICE}///a/running_alarm
+    ${event_topic}=    Set Variable    te/device/${DEVICE}///e/running_changed
+    Publish Message    ${CMD_PREFIX}/alarm-on    {"status":"init","point":"running","value":true}    retain=True
+    Wait For Message Containing    ${CMD_PREFIX}/alarm-on    "status":"successful"    timeout=${SAMPLE_TIMEOUT}
+    ${alarm}=    Wait For Message Containing    ${alarm_topic}    "severity":"minor"    timeout=${FLOWS_TIMEOUT}
+    Should Contain    ${alarm}    running is true
+    # The flow has now seen the value true, so writing false is a change it must report.
+    Publish Message    ${CMD_PREFIX}/alarm-off    {"status":"init","point":"running","value":false}    retain=True
+    Wait For Message Containing    ${CMD_PREFIX}/alarm-off    "status":"successful"    timeout=${SAMPLE_TIMEOUT}
+    Wait Until Keyword Succeeds    ${FLOWS_TIMEOUT}s    1s    Latest Message Should Be Empty    ${alarm_topic}
+    Wait For Message Containing    ${event_topic}    Running changed to false    timeout=${FLOWS_TIMEOUT}
+
 
 *** Keywords ***
+Latest Message Should Be Empty
+    [Documentation]    An empty payload is how a retained alarm is cleared.
+    [Arguments]    ${topic}
+    ${payload}=    Get Message    ${topic}
+    Should Be Empty    ${payload}
+
 Sample Should Be Good
     [Arguments]    ${payload}
     ${quality}=    Get Json Field    ${payload}    quality

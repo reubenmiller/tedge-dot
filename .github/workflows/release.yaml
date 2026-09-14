@@ -135,12 +135,10 @@ jobs:
           contents=$(dpkg-deb -c "$deb")
           echo "$contents" | grep -q '/usr/bin/tedge-dot$'
           for flow in ot-measurement ot-registration ot-command-forward \
-                      ot-command-result ot-parameter-state; do
+                      ot-command-result ot-parameter-state ot-alarm ot-event; do
             echo "$contents" | grep -q "/etc/tedge/mappers/c8y/flows/$flow/flow.toml"
             echo "$contents" | grep -q "/etc/tedge/mappers/c8y/flows/$flow/main.js"
           done
-          echo "$contents" | grep -q "/usr/share/tedge-dot/flows/ot-alarm/flow.toml"
-          echo "$contents" | grep -q "/usr/share/tedge-dot/flows/ot-event/flow.toml"
           tar -tzf dist/tedge-dot-rs_Linux_x86_64.tar.gz | grep -q "flows/ot-measurement/main.js"
 
       - uses: actions/upload-artifact@v4
@@ -264,13 +262,10 @@ jobs:
           # reaches the cloud, so the package must deploy the core pipeline active.
           echo "== flows deployed =="
           for flow in ot-measurement ot-registration ot-command-forward \
-                      ot-command-result ot-parameter-state; do
+                      ot-command-result ot-parameter-state ot-alarm ot-event; do
             test -f "/etc/tedge/mappers/c8y/flows/$flow/flow.toml"
             test -f "/etc/tedge/mappers/c8y/flows/$flow/main.js"
           done
-          # ...and ship the opt-in ones for the admin to enable.
-          test -f /usr/share/tedge-dot/flows/ot-alarm/flow.toml
-          test -f /usr/share/tedge-dot/flows/ot-event/flow.toml
 
       - uses: actions/upload-artifact@v4
         with:

@@ -35,8 +35,8 @@ exists but a translation/behaviour piece is missing; **missing** — no equivale
 | Scaling `multiplier`/`divisor`/`decimalshiftright`/`offset` | `point.transform` `{multiplier, divisor, decimal_shift, offset}` applied by the connector ([`impl/rust/crates/sdk/src/model.rs`](../../impl/rust/crates/sdk/src/model.rs)) | covered |
 | `measurementmapping.templatestring` (`{"G":{"S":%%}}`) | `ot-measurement` `group`/`series`/`target_topic`/`point_separator` params | covered |
 | Per-register `on_change` | `point.meta.on_change` honoured by `ot-measurement` (plus `deadband`, `min_interval`, `debounce` — superset) | covered |
-| `alarmmapping` (raise on 0→1 edge, never clears) | [`ot-alarm`](../../flows/ot-alarm/) flow (threshold + hysteresis, raises **and clears**); requires the point to be mapped as a measurement first (`include_boolean`) | covered |
-| `eventmapping` (event on value change) | [`ot-event`](../../flows/ot-event/) flow | covered |
+| `alarmmapping` (raise on 0→1 edge, never clears) | [`ot-alarm`](../../flows/ot-alarm/) flow, declared per point as `point.meta.alarm` (a coil needs no `when`: the alarm stands while the value is `true`; thresholds with hysteresis and string values too), raises **and clears** | covered |
+| `eventmapping` (event on value change) | [`ot-event`](../../flows/ot-event/) flow, declared per point as `point.meta.event` | covered |
 | Coils / discrete inputs | `table = "coil"` / `"discrete_input"`, `datatype = "bool"` | covered |
 | `datatype = "float"` with `nobits = 16` (half precision) | no `float16` in the SDK datatype set (`bool`..`float64`, `string`, `bytes`) | missing |
 | Config hot-reload on file change (watchdog) | SDK runtime live-reload (config watch + `set-config` persistence) | covered |
@@ -165,13 +165,14 @@ explicitly documented as dropped — the legacy reader stored but never enforced
 ### G4 — Cloud Fieldbus alarm/event/status mappings from device types (missing in both)
 
 Neither implementation translates `alarmMapping`/`eventMapping`/`statusMapping` from the
-device type; tedge-dot has the runtime pieces (`ot-alarm` threshold+hysteresis, `ot-event`
-on-change, `point.meta` echoed in every sample).
+device type; tedge-dot has the runtime pieces: `ot-alarm` / `ot-event` act on the alarms and
+events a point declares in `point.meta.alarm` / `point.meta.event` (echoed in every sample):
+value conditions, thresholds with hysteresis, events on change.
 
 **Closure:** part of G1's mapping table — emit the type's alarm/event definitions into
-`point.meta`, and teach `ot-alarm`/`ot-event` to read per-signal `meta` overrides the same way
-`ot-measurement` already does (RFC 0002 "Signal metadata is the bridge"). This is a
-parity-plus item; it can land after G1 ships with measurement mappings only.
+`point.meta.alarm` / `point.meta.event`, which the flows already honour (RFC 0002 "Signal
+metadata is the bridge"). This is a parity-plus item; it can land after G1 ships with
+measurement mappings only.
 
 ### G5 — Cut-over ergonomics and small parity items
 

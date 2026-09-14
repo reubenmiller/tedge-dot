@@ -1,10 +1,20 @@
-# ot-event: measurement -> thin-edge event (on value change)
-# Matches any measurement group (m/<group>); the monitored group is taken from the topic unless
-# overridden by params.group.
-input.mqtt.topics = ["te/+/+/+/+/m/+"]
+# ot-event: OT signal -> thin-edge event
+#
+# Two independent sources, see main.js:
+#   * per-signal events declared on a connector point's `meta.event`, evaluated on its samples
+#     for any value (number, boolean, string). Inert without a declaration, so the flow ships
+#     active;
+#   * one measurement series, an event on every change (the config below). Off while
+#     params.series is empty.
+input.mqtt.topics = [
+  "te/+/+/ot/+/sample/+",
+  # Matches any measurement group (m/<group>); the monitored group is taken from the topic
+  # unless overridden by params.group.
+  "te/+/+/+/+/m/+",
+]
 
 [config]
-# Series within the measurement to monitor: payload[group][series].
+# Series within the measurement to monitor: payload[group][series]. Empty series = off.
 group      = "${params.group}"
 series     = "${params.series}"
 # Event metadata. event_type becomes the topic suffix: te/device/<device>///e/<event_type>.
