@@ -45,19 +45,23 @@
 // left standing; a cleared alarm thus gets one more, harmless, clear after a restart. After that
 // only changes are published. A reading inside a hysteresis band settles nothing: it is
 // consistent with both. (A sample handled before the broker's retained alarm raises the alarm
-// again, as if the companion flow were not there.)
+// again, as if the companion flow were not there.) The retained record is only a starting point:
+// once this flow has published or pruned an alarm it goes by its own state, because the record
+// lags behind what it publishes until the message comes back from the broker.
 //
 // A declared alarm is also cleared when its declaration goes away: when its point's sample no
 // longer declares it (the meta changed) or the link status no longer lists the point (it was
-// removed from the configuration). That relies on the flow having seen the declaration since it
-// started: a declaration removed while the mapper was down, or a whole device removed (no link
-// status of it is published any more), leaves its alarm standing.
+// removed from the configuration). The alarm type is then free for another point, which starts
+// from that clear. That relies on the flow having seen the declaration since it started: a
+// declaration removed while the mapper was down, or a whole device removed (no link status of it
+// is published any more), leaves its alarm standing.
 //
 // State:
 //   context.script "alarms:<device>"        -> { <type>: { point, protocol, active } } per
 //                                              declared alarm; active is what the condition held
 //                                              by ("equals", "above", ...), false, or absent
-//                                              while unknown
+//                                              while unknown. A pruned alarm is kept as
+//                                              { active: false }, without an owner.
 //   context.script "<alarm topic>:active"   -> true / false for the measurement alarm
 //   context.mapper "ot-alarm-retained:<alarm topic>" -> true / false, from alarm-state.js
 
@@ -108,11 +112,11 @@ function conditionOf(when) {
 }
 
 // Whether condition `c` holds for `value`, and by what: "equals", "not_equals", "above" or "below"
-// when it holds, false when it does not, undefined when the value is inside a hysteresis band and
-// the previous state is unknown. `was` is the previous result, or true when the condition held
-// for a reason not known. A band only keeps the condition holding when its own limit (or an
-// unknown reason) raised it: a value recovering from below the low limit is not held by the high
-// limit's band.
+// when it holds (the first of these that does), false when it does not, undefined when the value
+// is inside a hysteresis band and the previous state is unknown. `was` is the previous result, or
+// true when the condition held for a reason not known. A band only keeps the condition holding
+// when its own limit (or an unknown reason) raised it: a value recovering from below the low
+// limit is not held by the high limit's band.
 // Kept identical in ot-event/main.js: flows cannot share modules.
 function evaluate(c, value, was) {
   const listed = (list) => list.some((v) => v === value);
@@ -168,6 +172,14 @@ function clearMessage(topic) {
   return { topic, payload: "", mqtt: { retain: true, qos: 1 } };
 }
 
+// Prune a declared alarm: clear it unless it is known to be clear, and keep it as cleared with no
+// owner, so the next point to declare the type starts from what was published rather than from
+// the retained record, which has not caught up with that clear yet.
+function prune(state, type, topic, out) {
+  if (knownState(state[type].active) !== false) out.push(clearMessage(topic));
+  state[type] = { active: false };
+}
+
 function onSample(parts, sample, context) {
   const device = parts[2];
   const protocol = parts[4];
@@ -188,18 +200,18 @@ function onSample(parts, sample, context) {
   if (sample.access !== undefined || sample.meta !== undefined) {
     for (const [type, known] of Object.entries(state)) {
       if (!owns(known) || alarms.some((a) => a.type === type)) continue;
-      if (knownState(known.active) !== false) out.push(clearMessage(alarmTopic(type)));
-      delete state[type];
+      prune(state, type, alarmTopic(type), out);
     }
   }
 
   const readable = sample.quality === "good" && sample.value !== undefined;
   for (const alarm of alarms) {
     const topic = alarmTopic(alarm.type);
+    const known = state[alarm.type];
     // Another point declared this type on the device first: it keeps the alarm.
-    if (state[alarm.type] && !owns(state[alarm.type])) continue;
-    let was = knownState(state[alarm.type]?.active);
-    if (was === undefined) was = retainedState(context, topic);
+    if (known && known.point !== undefined && !owns(known)) continue;
+    let was = knownState(known?.active);
+    if (!known) was = retainedState(context, topic);
     let active = was;
     if (readable) {
       const holds = evaluate(alarm.when, sample.value, was);
@@ -242,9 +254,8 @@ function onLinkStatus(parts, status, context) {
   const state = context.script.get(key) || {};
   const out = [];
   for (const [type, known] of Object.entries(state)) {
-    if (known.protocol !== protocol || listed.has(known.point)) continue;
-    if (knownState(known.active) !== false) out.push(clearMessage(`te/device/${device}///a/${type}`));
-    delete state[type];
+    if (known.point === undefined || known.protocol !== protocol || listed.has(known.point)) continue;
+    prune(state, type, `te/device/${device}///a/${type}`, out);
   }
   context.script.set(key, state);
   return out;

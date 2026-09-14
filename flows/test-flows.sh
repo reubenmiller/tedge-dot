@@ -467,6 +467,22 @@ check_output "alarm: above and below each keep their own hysteresis band" ot-ala
 check_output "alarm: when two points declare one type, the first keeps it" ot-alarm "" \
   "$(lines "$(ot_sample t1 pump_state '"FAULT"' "$PUMP")" "$(ot_sample t2 other_pump '"RUNNING"' "$PUMP")")" \
   "$PUMP_RAISED"
+# The type passes to the next point from the clear this flow published, not from the retained
+# record: that still says "standing" (the raise came back from the broker, the clear has not yet),
+# and trusting it would leave the alarm cleared while the new point's condition holds.
+PUMP_RAISED_BY_NEW='[te/device/opc1///a/pump_fault] {"severity":"critical","text":"new_pump on opc1 is FAULT","time":"t3"}'
+check_output "alarm: a renamed point takes the alarm over from the clear, not a stale retained raise" ot-alarm "" \
+  "$(lines "$(ot_sample t1 pump_state '"FAULT"' "$PUMP")" \
+           "$PUMP_RETAINED" \
+           '[te/device/opc1/ot/opcua/status/link] {"status":"connected","points":["new_pump"]}' \
+           "$(ot_sample t3 new_pump '"FAULT"' "$PUMP")")" \
+  "$(lines "$PUMP_RAISED" "$PUMP_CLEARED" "$PUMP_RAISED_BY_NEW")"
+check_output "alarm: a declaration moved to another point takes the alarm over from the clear" ot-alarm "" \
+  "$(lines "$(ot_sample t1 pump_state '"FAULT"' "$PUMP")" \
+           "$PUMP_RETAINED" \
+           "$(ot_sample t2 pump_state '"FAULT"' '{"measurement":false}')" \
+           "$(ot_sample t3 new_pump '"FAULT"' "$PUMP")")" \
+  "$(lines "$PUMP_RAISED" "$PUMP_CLEARED" "$PUMP_RAISED_BY_NEW")"
 
 # --- ot-registration (link -> child-device registration; type from the connector, else protocol) ---
 check "registration: declared device type becomes the entity type" ot-registration \

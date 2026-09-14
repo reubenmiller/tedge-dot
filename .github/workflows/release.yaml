@@ -139,6 +139,9 @@ jobs:
             echo "$contents" | grep -q "/etc/tedge/mappers/c8y/flows/$flow/flow.toml"
             echo "$contents" | grep -q "/etc/tedge/mappers/c8y/flows/$flow/main.js"
           done
+          # ot-alarm's companion flow: without it a restart raises standing alarms again.
+          echo "$contents" | grep -q "/etc/tedge/mappers/c8y/flows/ot-alarm/alarm-state.toml"
+          echo "$contents" | grep -q "/etc/tedge/mappers/c8y/flows/ot-alarm/alarm-state.js"
           tar -tzf dist/tedge-dot-rs_Linux_x86_64.tar.gz | grep -q "flows/ot-measurement/main.js"
 
       - uses: actions/upload-artifact@v4
@@ -266,6 +269,9 @@ jobs:
             test -f "/etc/tedge/mappers/c8y/flows/$flow/flow.toml"
             test -f "/etc/tedge/mappers/c8y/flows/$flow/main.js"
           done
+          # ot-alarm's companion flow: without it a restart raises standing alarms again.
+          test -f /etc/tedge/mappers/c8y/flows/ot-alarm/alarm-state.toml
+          test -f /etc/tedge/mappers/c8y/flows/ot-alarm/alarm-state.js
 
       - uses: actions/upload-artifact@v4
         with:
