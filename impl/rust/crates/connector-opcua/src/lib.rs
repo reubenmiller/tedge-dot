@@ -18,8 +18,8 @@ pub use config::{NodeAddress, OpcuaConnection, OpcuaEndpoint};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 use tedge_dot_sdk::{
     Access, Capabilities, CommandRequest, CommandResult, ConfigError, Connector, ConnectorConfig,
     ConnectorError, DataType, DeviceId, LinkReport, LinkStatus, Mode, PointRef, Quality, Sample,
@@ -27,7 +27,11 @@ use tedge_dot_sdk::{
 };
 use time::OffsetDateTime;
 
-use opcua::client::{ClientBuilder, DataChangeCallback, IdentityToken, Session};
+use futures::StreamExt;
+use opcua::client::{
+    ClientBuilder, DataChangeCallback, IdentityToken, Session, SessionPollResult,
+    SubscriptionActivity,
+};
 use opcua::crypto::SecurityPolicy;
 use opcua::types::{
     AttributeId, DataValue, MessageSecurityMode, MonitoredItemCreateRequest, MonitoringMode,
@@ -59,16 +63,41 @@ struct DeviceModel {
     points: HashMap<String, OpcuaPoint>,
 }
 
-/// A live session and the background task driving its event loop.
+/// How long closing a session waits for the server to answer (see [`close_session`]).
+const CLOSE_SESSION_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// A live session, what its event loop last reported, and the task driving that loop.
 struct SessionHandle {
     session: Arc<Session>,
-    _event_loop: tokio::task::JoinHandle<StatusCode>,
+    health: Arc<Mutex<SessionHealth>>,
+    event_loop: tokio::task::JoinHandle<()>,
 }
 
-/// A live push subscription for one device: the server-side subscription id plus the forwarder
-/// task bridging data-change callbacks into the runtime's sample channel.
+/// What a session's event loop last reported, read back by `check_subscription`.
+///
+/// async-opcua hides an outage from its caller in two ways. It re-establishes a dropped session
+/// on its own only `session_retry_limit` times and then ends the event loop, silently; and it
+/// does not notice a server that stops answering at all (failed keep-alives are not counted by
+/// default). A device whose points are all pushed makes no reads that would fail instead, so
+/// without this record such a device goes quiet for good behind a `connected` link.
+struct SessionHealth {
+    /// A session is active: set on every (re)connect, cleared when the transport drops.
+    connected: bool,
+    /// Why the session is not usable, for the link status.
+    reason: Option<String>,
+    /// The last publish response (a notification or a keep-alive), or the last (re)connect. A
+    /// server with a live subscription answers at least once per keep-alive window.
+    last_publish: Instant,
+}
+
+fn lock_health(health: &Mutex<SessionHealth>) -> MutexGuard<'_, SessionHealth> {
+    health.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// A live push subscription for one device: how many monitored items it was created with, and
+/// the forwarder task bridging data-change callbacks into the runtime's sample channel.
 struct SubscriptionHandle {
-    subscription_id: u32,
+    items: usize,
     forwarder: tokio::task::JoinHandle<()>,
 }
 
@@ -394,13 +423,79 @@ impl Connector for OpcuaConnector {
                 }
             }
         });
-        self.subscriptions.insert(
+        // Start the keep-alive clock at the subscription rather than at a connect that may be long
+        // past: until the first publish response arrives, this is the last sign of life.
+        if let Some(handle) = self.sessions.get(device) {
+            lock_health(&handle.health).last_publish = Instant::now();
+        }
+        let replaced = self.subscriptions.insert(
             device.clone(),
             SubscriptionHandle {
-                subscription_id,
+                items: items.len(),
                 forwarder,
             },
         );
+        if let Some(old) = replaced {
+            old.forwarder.abort();
+        }
+        Ok(())
+    }
+
+    async fn check_subscription(&mut self, device: &DeviceId) -> Result<(), ConnectorError> {
+        let handle = self
+            .sessions
+            .get(device)
+            .ok_or_else(|| ConnectorError::NotConnected(device.clone()))?;
+        let expected = self
+            .subscriptions
+            .get(device)
+            .map(|sub| sub.items)
+            .ok_or_else(|| ConnectorError::Transport("no subscription armed".into()))?;
+        let (connected, reason, since_publish) = {
+            let health = lock_health(&handle.health);
+            (health.connected, health.reason.clone(), health.last_publish.elapsed())
+        };
+        if !connected {
+            return Err(ConnectorError::Transport(
+                reason.unwrap_or_else(|| "session is not connected".into()),
+            ));
+        }
+        // After reconnecting within its retry limit the client re-creates subscriptions itself,
+        // but it does not report a re-creation that failed: the subscription, or its monitored
+        // items, is then simply missing from the session. There is one subscription per session,
+        // so the first one is ours, whatever id a re-creation gave it.
+        let live = {
+            let state = handle.session.subscription_state.lock();
+            state
+                .subscription_ids()
+                .and_then(|ids| ids.first().and_then(|id| state.get(*id)))
+                .map(|s| {
+                    (
+                        s.monitored_items().count(),
+                        s.publishing_interval(),
+                        s.max_keep_alive_count(),
+                    )
+                })
+        };
+        let Some((monitored, publishing_interval, keep_alive_count)) = live else {
+            return Err(ConnectorError::Transport("subscription lost with the session".into()));
+        };
+        if monitored < expected {
+            return Err(ConnectorError::Transport(format!(
+                "subscription lost monitored items ({monitored} of {expected} left)"
+            )));
+        }
+        // A server answers a publish request at least once per keep-alive window (the revised
+        // one); allow one request timeout on top for that answer to arrive.
+        let window = publishing_interval.saturating_mul(keep_alive_count.max(1))
+            + Duration::from_secs(self.conn.request_timeout_s.max(1));
+        if since_publish > window {
+            return Err(ConnectorError::Transport(format!(
+                "no publish response for {}s (keep-alive window {}s); server not answering?",
+                since_publish.as_secs(),
+                window.as_secs()
+            )));
+        }
         Ok(())
     }
 
@@ -410,14 +505,14 @@ impl Connector for OpcuaConnector {
             .get(device)
             .map(|d| d.endpoint.clone())
             .ok_or_else(|| ConnectorError::Other(format!("unknown device '{device}'")))?;
-        // Tear down the dead session first. No graceful CloseSession: the transport is
-        // presumed gone, and a blocking farewell would stall the reconnect schedule; the
-        // server times the old session out.
+        // Tear down the old session first. It is not necessarily dead -- a reconnect also follows
+        // reads failing at application level, or a server that stopped publishing -- so it is
+        // closed on the server when that is still possible (see `close_session`).
         if let Some(sub) = self.subscriptions.remove(device) {
             sub.forwarder.abort();
         }
         if let Some(handle) = self.sessions.remove(device) {
-            handle._event_loop.abort();
+            close_session(handle).await;
         }
         match connect_device(&self.conn, &endpoint).await {
             Ok(handle) => {
@@ -502,18 +597,13 @@ impl Connector for OpcuaConnector {
     }
 
     async fn disconnect(&mut self) -> Result<(), ConnectorError> {
-        // Tear down push subscriptions first: abort the forwarder explicitly so no stale task
-        // keeps pushing into an old sink after a config reload re-subscribes, and delete the
-        // server-side subscription while the session is still alive.
-        for (device, sub) in self.subscriptions.drain() {
+        // Abort the forwarders first, so no stale task keeps pushing into an old sink after a
+        // config reload re-subscribes. Closing a session deletes its server-side subscription.
+        for (_, sub) in self.subscriptions.drain() {
             sub.forwarder.abort();
-            if let Some(handle) = self.sessions.get(&device) {
-                let _ = handle.session.delete_subscription(sub.subscription_id).await;
-            }
         }
         for (_, handle) in self.sessions.drain() {
-            let _ = handle.session.disconnect().await;
-            handle._event_loop.abort();
+            close_session(handle).await;
         }
         Ok(())
     }
@@ -597,13 +687,30 @@ async fn connect_device(
             .map_err(|e| format!("connect failed: {e}"))?
     };
 
-    let handle = event_loop.spawn();
+    let health = Arc::new(Mutex::new(SessionHealth {
+        connected: false,
+        reason: None,
+        last_publish: Instant::now(),
+    }));
+    let handle = tokio::spawn(drive_session(event_loop.enter(), health.clone()));
     let timeout = Duration::from_secs(conn.connect_timeout_s.max(1));
     match tokio::time::timeout(timeout, session.wait_for_connection()).await {
-        Ok(true) => Ok(SessionHandle {
-            session,
-            _event_loop: handle,
-        }),
+        Ok(true) => {
+            // The event loop reports the connect as well, but a check made right after this
+            // returns can run before that report is recorded. A loss recorded since keeps its
+            // reason, and wins.
+            {
+                let mut state = lock_health(&health);
+                if state.reason.is_none() {
+                    state.connected = true;
+                }
+            }
+            Ok(SessionHandle {
+                session,
+                health,
+                event_loop: handle,
+            })
+        }
         Ok(false) => {
             handle.abort();
             Err("session failed to connect".to_string())
@@ -613,6 +720,64 @@ async fn connect_device(
             Err(format!("timed out after {}s waiting for connection", timeout.as_secs()))
         }
     }
+}
+
+/// Drive a session's event loop until it ends, recording what it reports in `health`.
+async fn drive_session(
+    events: impl futures::Stream<Item = Result<SessionPollResult, StatusCode>>,
+    health: Arc<Mutex<SessionHealth>>,
+) {
+    futures::pin_mut!(events);
+    loop {
+        let event = events.next().await;
+        let mut state = lock_health(&health);
+        match event {
+            Some(Ok(SessionPollResult::Reconnected(_))) => {
+                state.connected = true;
+                state.reason = None;
+                state.last_publish = Instant::now();
+            }
+            Some(Ok(SessionPollResult::ConnectionLost(status))) => {
+                state.connected = false;
+                state.reason = Some(format!("connection lost: {status}"));
+            }
+            Some(Ok(SessionPollResult::ReconnectFailed(status))) => {
+                state.connected = false;
+                state.reason = Some(format!("reconnect failed: {status}"));
+            }
+            Some(Ok(SessionPollResult::Subscription(SubscriptionActivity::Publish))) => {
+                state.last_publish = Instant::now();
+            }
+            Some(Ok(_)) => {}
+            Some(Err(status)) => {
+                state.connected = false;
+                state.reason = Some(format!("session gave up reconnecting: {status}"));
+                return;
+            }
+            None => {
+                state.connected = false;
+                state.reason.get_or_insert_with(|| "session closed".into());
+                return;
+            }
+        }
+    }
+}
+
+/// End a session, closing it on the server first while that is still possible.
+///
+/// Servers cap concurrent sessions -- embedded PLC servers often at a handful -- and a session
+/// dropped without CloseSession keeps its slot until its timeout expires. Reconnects run on a
+/// backoff schedule also while the server is up (reads failing at application level, a
+/// subscription that stopped publishing), so abandoning each old session piles them up until
+/// the server refuses new ones (BadTooManySessions) and reconnecting fails until they expire.
+/// Bounded, and skipped when the transport is known to be down, so a dead server cannot stall
+/// the reconnect.
+async fn close_session(handle: SessionHandle) {
+    let connected = lock_health(&handle.health).connected;
+    if connected {
+        let _ = tokio::time::timeout(CLOSE_SESSION_TIMEOUT, handle.session.disconnect()).await;
+    }
+    handle.event_loop.abort();
 }
 
 fn parse_security_mode(mode: Option<&str>) -> MessageSecurityMode {
