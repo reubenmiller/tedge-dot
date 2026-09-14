@@ -3,6 +3,7 @@
 //! assert the pushed samples (values, quality, timestamps, teardown). This exercises the
 //! actual wire path (session, subscription, monitored items, data-change notifications).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,7 +17,9 @@ use tedge_dot_sdk::{
     Access, Connector, ConnectorConfig, DataType, Endianness, Mode, PointRef, Quality, Sample,
     Value, WordOrder,
 };
-use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 // Note: must differ from the application URI, which always becomes namespace index 1.
@@ -25,11 +28,17 @@ const NAMESPACE_URI: &str = "urn:tedge-dot-opcua-test:nodes";
 /// Start an anonymous, security-`None` OPC-UA server on an ephemeral port with two variables
 /// (`Temperature`: Double, `Counter`: UInt16) in a custom namespace.
 async fn start_server() -> (ServerHandle, Arc<SimpleNodeManager>, u16, u16) {
+    start_server_on(0).await
+}
+
+/// [`start_server`] on a given port (0 = ephemeral), so a test can bring a stopped server back
+/// where the connector expects it.
+async fn start_server_on(port: u16) -> (ServerHandle, Arc<SimpleNodeManager>, u16, u16) {
     // Opt-in wire logging for debugging: RUST_LOG=opcua_client=debug,opcua_server=debug
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
 
     let (server, handle) = ServerBuilder::new_anonymous("tedge-dot-test")
@@ -293,6 +302,221 @@ async fn subscribe_unknown_point_is_rejected() {
         )
         .await;
     assert!(err.is_err(), "unknown point must fail the subscribe call");
+
+    connector.disconnect().await.unwrap();
+    handle.cancel();
+}
+
+/// A one-device config with a single `temperature` point, for the recovery tests. The short
+/// request timeout keeps the keep-alive window (and so the silent-server test) short.
+fn recovery_config(port: u16, ns: u16) -> ConnectorConfig {
+    toml::from_str(&format!(
+        r#"
+        [connector]
+        protocol = "opcua"
+
+        [connection]
+        request_timeout_s = 1
+
+        [[device]]
+        name = "plc-1"
+        protocol_address = {{ endpoint = "opc.tcp://127.0.0.1:{port}" }}
+        default_mode = "typed"
+
+          [[device.point]]
+          id = "temperature"
+          datatype = "float64"
+          address = {{ namespace = {ns}, identifier = "Temperature" }}
+        "#
+    ))
+    .unwrap()
+}
+
+/// Poll `check_subscription` until it fails with a reason containing `expected`.
+async fn wait_for_check_failure(
+    connector: &mut OpcuaConnector,
+    device: &str,
+    expected: &str,
+    within: Duration,
+) -> String {
+    let deadline = tokio::time::Instant::now() + within;
+    let mut last = String::from("never checked");
+    while tokio::time::Instant::now() < deadline {
+        match connector.check_subscription(&device.to_string()).await {
+            Err(e) if e.to_string().contains(expected) => return e.to_string(),
+            Err(e) => last = e.to_string(),
+            Ok(()) => last = "live".into(),
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("check_subscription did not report '{expected}' within {within:?} (last: {last})");
+}
+
+/// Connect, subscribe the `temperature` point and wait for its initial value.
+async fn connect_and_subscribe(
+    connector: &mut OpcuaConnector,
+    tx: &mpsc::Sender<Sample>,
+    rx: &mut mpsc::Receiver<Sample>,
+) {
+    let reports = connector.connect().await.unwrap();
+    assert_eq!(reports[0].status.as_str(), "connected", "{:?}", reports[0].reason);
+    subscribe_temperature(connector, tx, rx).await;
+}
+
+async fn subscribe_temperature(
+    connector: &mut OpcuaConnector,
+    tx: &mpsc::Sender<Sample>,
+    rx: &mut mpsc::Receiver<Sample>,
+) {
+    let points = [pref("temperature", DataType::Float64, 100)];
+    connector
+        .subscribe(&"plc-1".to_string(), &points, tx.clone())
+        .await
+        .unwrap();
+    wait_for_sample(rx, "initial temperature value", |s| {
+        s.point == "temperature" && s.quality == Quality::Good
+    })
+    .await;
+    connector
+        .check_subscription(&"plc-1".to_string())
+        .await
+        .expect("a fresh subscription is live");
+}
+
+/// The reported failure. A device whose points are all pushed makes no reads, so a server outage
+/// longer than the client's own session retries went unnoticed: the client's event loop ended,
+/// the link stayed `connected` and the device never sent another sample. The check has to
+/// report the outage -- including once the client has given up, which is exactly where nothing
+/// noticed before -- and reconnecting and re-subscribing must bring push back.
+#[tokio::test]
+async fn check_subscription_reports_an_outage_and_reconnect_restores_push() {
+    let (handle, _nm, ns, port) = start_server().await;
+    let mut connector = OpcuaConnector::default();
+    connector.configure(&recovery_config(port, ns)).unwrap();
+    let (tx, mut rx) = mpsc::channel::<Sample>(64);
+    connect_and_subscribe(&mut connector, &tx, &mut rx).await;
+    let device = "plc-1".to_string();
+
+    handle.cancel();
+    wait_for_check_failure(&mut connector, &device, "", Duration::from_secs(10)).await;
+    // The client retries three times (1 s, 2 s, 4 s apart), then its event loop ends.
+    wait_for_check_failure(&mut connector, &device, "gave up", Duration::from_secs(30)).await;
+
+    let (handle, nm, ns, _) = start_server_on(port).await;
+    let report = connector.reconnect(&device).await.unwrap();
+    assert_eq!(report.status.as_str(), "connected", "{:?}", report.reason);
+    while rx.try_recv().is_ok() {}
+    subscribe_temperature(&mut connector, &tx, &mut rx).await;
+
+    // Push really flows again, beyond the initial value of a new monitored item.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    nm.set_value(
+        handle.subscriptions(),
+        &NodeId::new(ns, "Temperature"),
+        None,
+        DataValue::new_now(55.5f64),
+    )
+    .unwrap();
+    wait_for_sample(&mut rx, "temperature update after the restart", |s| {
+        s.point == "temperature" && s.value == Some(Value::Number(55.5))
+    })
+    .await;
+
+    connector.disconnect().await.unwrap();
+    handle.cancel();
+}
+
+/// A server that comes straight back, well inside the client's own session retries. async-opcua
+/// reconnects by itself, but push delivery does not resume: against this server no data change
+/// and no publish response arrives again (and against the e2e python-asyncua simulator, whose
+/// log shows the client re-creating the subscription, no data change arrived either). Nothing
+/// fails, so without the check a push-only device stays silent behind a `connected` link even
+/// though its session reconnected. The check must still report it -- here as missing publish
+/// responses -- which is what makes the runtime replace the session.
+#[tokio::test]
+async fn check_subscription_reports_push_the_client_did_not_restore() {
+    let (handle, _nm, ns, port) = start_server().await;
+    let mut connector = OpcuaConnector::default();
+    connector.configure(&recovery_config(port, ns)).unwrap();
+    let (tx, mut rx) = mpsc::channel::<Sample>(64);
+    connect_and_subscribe(&mut connector, &tx, &mut rx).await;
+    let device = "plc-1".to_string();
+
+    handle.cancel();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (handle, _nm, _, _) = start_server_on(port).await;
+
+    // No reconnect() here: only what the client does on its own.
+    wait_for_check_failure(&mut connector, &device, "no publish response", Duration::from_secs(40))
+        .await;
+
+    connector.disconnect().await.unwrap();
+    handle.cancel();
+}
+
+/// Forward bytes between two sockets, holding them while `stalled` is set.
+async fn forward(mut from: OwnedReadHalf, mut to: OwnedWriteHalf, stalled: Arc<AtomicBool>) {
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        let n = match from.read(&mut buf).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        while stalled.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        if to.write_all(&buf[..n]).await.is_err() {
+            return;
+        }
+    }
+}
+
+/// A TCP proxy in front of `upstream` that can stop forwarding while keeping every connection
+/// open: a server that is still there but answers nothing (a frozen process, a half-open link).
+/// Returns the proxy port and its stall switch.
+async fn start_stall_proxy(upstream: u16) -> (u16, Arc<AtomicBool>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let stalled = Arc::new(AtomicBool::new(false));
+    let flag = stalled.clone();
+    tokio::spawn(async move {
+        while let Ok((client, _)) = listener.accept().await {
+            let Ok(server) = TcpStream::connect(("127.0.0.1", upstream)).await else {
+                continue;
+            };
+            let (client_rx, client_tx) = client.into_split();
+            let (server_rx, server_tx) = server.into_split();
+            tokio::spawn(forward(client_rx, server_tx, flag.clone()));
+            tokio::spawn(forward(server_rx, client_tx, flag.clone()));
+        }
+    });
+    (port, stalled)
+}
+
+/// A server that stops answering but keeps the connection open raises no error in the client
+/// (failed keep-alives are not counted by default), and a push-only device makes no reads that
+/// could time out instead. The check has to notice that publish responses stopped.
+#[tokio::test]
+async fn check_subscription_reports_a_server_that_stops_answering() {
+    let (handle, _nm, ns, port) = start_server().await;
+    let (proxy_port, stalled) = start_stall_proxy(port).await;
+    let mut connector = OpcuaConnector::default();
+    connector.configure(&recovery_config(proxy_port, ns)).unwrap();
+    let (tx, mut rx) = mpsc::channel::<Sample>(64);
+    connect_and_subscribe(&mut connector, &tx, &mut rx).await;
+    let device = "plc-1".to_string();
+
+    stalled.store(true, Ordering::Relaxed);
+    // The window is the revised publishing interval x keep-alive count, plus the 1 s request
+    // timeout: a few seconds at the 100 ms interval requested here.
+    wait_for_check_failure(&mut connector, &device, "no publish response", Duration::from_secs(30))
+        .await;
+
+    stalled.store(false, Ordering::Relaxed);
+    let report = connector.reconnect(&device).await.unwrap();
+    assert_eq!(report.status.as_str(), "connected", "{:?}", report.reason);
+    while rx.try_recv().is_ok() {}
+    subscribe_temperature(&mut connector, &tx, &mut rx).await;
 
     connector.disconnect().await.unwrap();
     handle.cancel();

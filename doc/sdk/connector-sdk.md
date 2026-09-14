@@ -113,6 +113,15 @@ pub trait Connector: Send + Sync {
         Err(ConnectorError::Unsupported("subscribe"))
     }
 
+    /// OPTIONAL: report whether push delivery for `device` is still live. Asked on every
+    /// tick for each device with pushed points; an error is handled like a failed poll
+    /// batch (degraded link, reconnect with backoff, re-subscribe). Must be cheap: report
+    /// state the module already tracks. The default `Unsupported` leaves liveness to reads.
+    async fn check_subscription(&mut self, device: &DeviceId) -> Result<(), ConnectorError> {
+        let _ = device;
+        Err(ConnectorError::Unsupported("check_subscription"))
+    }
+
     /// OPTIONAL: execute a command verb (default supports nothing).
     /// The SDK routes `cmd/<verb>` requests here after validating the topic/payload.
     /// Implementations MUST honour point `access` and encode `typed` writes per datatype.
@@ -262,6 +271,19 @@ A module **should still bound its own requests** (see the Modbus module's
 `connection.request_timeout_s`): failing one request in a second keeps the poll cycle on
 schedule, whereas the runtime's bound is a backstop that fails the whole batch. Conformance
 check B5 (silent peer) exercises this with a peer that accepts and answers nothing.
+
+Pushed points need one more thing. They are off the polling schedule, so no failing read ever
+reveals that the session behind a subscription died — the device just goes quiet behind a
+`connected` link. A module that implements `subscribe` should therefore also implement
+`check_subscription`, which the runtime asks on every tick for each device with pushed points.
+Protocol stacks tend to hide exactly this: async-opcua, for one, re-establishes a dropped session
+only a few times and then ends its event loop without telling its caller, and does not notice a
+server that stops answering at all.
+
+The bound cancels a module call that outlives it, and cancelling drops the call's future where it
+stands. A task the module spawned inside that call is not cancelled with it: a dropped
+`JoinHandle` detaches its task. Tie such tasks to a handle that aborts them on drop, or a
+reconnect cut short leaves, say, a protocol session running that nothing will ever close.
 
 ### 4.1 CLI: direct read/write (no broker)
 

@@ -207,6 +207,24 @@ pub trait Connector: Send {
         Err(ConnectorError::Unsupported("subscribe".into()))
     }
 
+    /// OPTIONAL: report whether push delivery armed by [`Connector::subscribe`] for `device` is
+    /// still live.
+    ///
+    /// A subscribed point is off the polling schedule, so when the session behind a
+    /// subscription dies (the server went away for longer than the protocol stack retries, it
+    /// stopped answering, or it dropped the subscription) no failed read ever reveals it: the
+    /// device just goes quiet behind a `connected` link. The runtime therefore calls this on
+    /// every tick for each device with pushed points. `Ok` means push delivery is live; any
+    /// error is handled like a failed poll batch — the link degrades, the device is reconnected
+    /// with backoff, and its subscription re-armed. Must be cheap: report state the module
+    /// already tracks rather than making a protocol round trip.
+    ///
+    /// The default signals `Unsupported`, which leaves liveness to polled reads alone.
+    async fn check_subscription(&mut self, device: &DeviceId) -> Result<(), ConnectorError> {
+        let _ = device;
+        Err(ConnectorError::Unsupported("check_subscription".into()))
+    }
+
     /// OPTIONAL: re-establish the connection to a single device whose transport dropped.
     ///
     /// The runtime calls this with exponential backoff while a device's reads keep failing.

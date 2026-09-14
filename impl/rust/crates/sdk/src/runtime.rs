@@ -10,7 +10,7 @@ use crate::connector::{
 use crate::decode::{Endianness, WordOrder};
 use crate::model::{format_rfc3339_ms, Mode, Sample};
 use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, Packet, QoS};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -613,6 +613,8 @@ pub async fn run_until_reloadable(
     let mut seq_counters: HashMap<(String, String), u64> = HashMap::new();
     // Devices whose transport needs re-establishing, keyed by device name.
     let mut reconnects: HashMap<String, ReconnectEntry> = HashMap::new();
+    // Devices with polled points whose push delivery died (see `PushAction::Recover`).
+    let mut push_recovery: HashMap<String, ReconnectEntry> = HashMap::new();
 
     // 6. Main loop: poll due points on a tick, route commands from the MQTT event-loop task.
     let mut tick = tokio::time::interval(Duration::from_millis(200));
@@ -674,6 +676,40 @@ pub async fn run_until_reloadable(
                         }
                     }
                 }
+                // Pushed points are off the schedule above, so no failing read reveals a dead
+                // session behind them: ask the connector whether push delivery is still live.
+                let pushed = pushed_devices(&subscribed, &schedule);
+                for &(device_index, polled) in &pushed {
+                    let device = config.devices[device_index].name.clone();
+                    let result =
+                        bounded(limits, "check_subscription", connector.check_subscription(&device))
+                            .await;
+                    let reason = result.as_ref().err().map(|e| e.to_string());
+                    match push_action(&result, polled) {
+                        PushAction::Link { healthy: true } => {
+                            links.note_poll(&client, &device, true, None, &config).await;
+                            reconnects.remove(&device);
+                        }
+                        PushAction::Link { healthy: false } => {
+                            if !reconnects.contains_key(&device) {
+                                warn!(%device, "push delivery is down: {}", reason.as_deref().unwrap_or_default());
+                            }
+                            links.note_poll(&client, &device, false, reason, &config).await;
+                            reconnects.entry(device).or_insert_with(ReconnectEntry::new);
+                        }
+                        PushAction::Recover { dead: true } => {
+                            if !push_recovery.contains_key(&device) {
+                                warn!(%device, "push delivery is down: {}", reason.as_deref().unwrap_or_default());
+                            }
+                            push_recovery.entry(device).or_insert_with(ReconnectEntry::new);
+                        }
+                        PushAction::Recover { dead: false } => {
+                            push_recovery.remove(&device);
+                        }
+                        PushAction::Unknown => {}
+                    }
+                }
+                retain_pushed(&mut push_recovery, &config, &pushed);
                 // The loop completed an iteration: samples published, reconnects attempted.
                 // A supervisor watching this marker restarts the connector if it stops moving.
                 progress.mark();
@@ -681,8 +717,10 @@ pub async fn run_until_reloadable(
                 // until reads succeed: a transport that reconnects while the device still
                 // fails (application-level outage) keeps backing off instead of storming.
                 let now = Instant::now();
-                let due: Vec<String> = reconnects
+                // A device can be due in both maps; it is reconnected once.
+                let due: BTreeSet<String> = reconnects
                     .iter()
+                    .chain(push_recovery.iter())
                     .filter(|(_, entry)| entry.due <= now)
                     .map(|(device, _)| device.clone())
                     .collect();
@@ -692,8 +730,10 @@ pub async fn run_until_reloadable(
                             &mut connector, &client, &mut links, &device, limits, &config,
                         )
                             .await;
-                    if let Some(entry) = reconnects.get_mut(&device) {
-                        entry.re_arm();
+                    for pending in [&mut reconnects, &mut push_recovery] {
+                        if let Some(entry) = pending.get_mut(&device) {
+                            entry.re_arm();
+                        }
                     }
                     // A push subscription dies with the transport it was created on. Without
                     // re-arming it here the device's subscribed points stay OFF the polling
@@ -776,6 +816,7 @@ pub async fn run_until_reloadable(
             seq_counters.clear();
             // applying the configuration already reconnected every device
             reconnects.clear();
+            push_recovery.clear();
         }
     }
 
@@ -825,12 +866,13 @@ pub async fn run_stdout_until(
     }
 
     let (sample_tx, mut sample_rx) = tokio::sync::mpsc::channel::<Sample>(256);
-    let subscribed =
+    let mut subscribed =
         setup_subscriptions(&mut connector, &config, caps.subscribe, &sample_tx, limits).await;
     let mut schedule = build_schedule(&config, &subscribed);
     let meta_index = build_meta_index(&config);
     let mut seq_counters: HashMap<(String, String), u64> = HashMap::new();
     let mut reconnects: HashMap<String, ReconnectEntry> = HashMap::new();
+    let mut push_recovery: HashMap<String, ReconnectEntry> = HashMap::new();
 
     let mut tick = tokio::time::interval(Duration::from_millis(200));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -870,25 +912,80 @@ pub async fn run_stdout_until(
                         }
                     }
                 }
+                let pushed = pushed_devices(&subscribed, &schedule);
+                for &(device_index, polled) in &pushed {
+                    let device = config.devices[device_index].name.clone();
+                    let result =
+                        bounded(limits, "check_subscription", connector.check_subscription(&device))
+                            .await;
+                    // No link status here, so both kinds of verdict only drive recovery.
+                    let pending = if polled { &mut push_recovery } else { &mut reconnects };
+                    match push_action(&result, polled) {
+                        PushAction::Link { healthy: true } | PushAction::Recover { dead: false } => {
+                            pending.remove(&device);
+                        }
+                        PushAction::Link { healthy: false } | PushAction::Recover { dead: true } => {
+                            if !pending.contains_key(&device) {
+                                warn!(%device, "push delivery is down: {}", result.err().map(|e| e.to_string()).unwrap_or_default());
+                            }
+                            pending.entry(device).or_insert_with(ReconnectEntry::new);
+                        }
+                        PushAction::Unknown => {}
+                    }
+                }
+                retain_pushed(&mut push_recovery, &config, &pushed);
                 let now = Instant::now();
-                let due: Vec<String> = reconnects
+                let due: BTreeSet<String> = reconnects
                     .iter()
+                    .chain(push_recovery.iter())
                     .filter(|(_, entry)| entry.due <= now)
                     .map(|(device, _)| device.clone())
                     .collect();
                 for device in due {
                     debug!(%device, "attempting reconnect");
-                    match connector.reconnect(&device).await {
-                        Ok(_) => {}
+                    let restored = match bounded(limits, "reconnect", connector.reconnect(&device)).await {
+                        Ok(report) => report.status == LinkStatus::Connected,
                         Err(ConnectorError::Unsupported(_)) => {
-                            if let Err(e) = connector.connect().await {
-                                warn!(%device, "reconnect (full connect) failed: {e}");
+                            match bounded(limits, "connect", connector.connect()).await {
+                                Ok(reports) => reports.iter().any(|r| {
+                                    r.device == device && r.status == LinkStatus::Connected
+                                }),
+                                Err(e) => {
+                                    warn!(%device, "reconnect (full connect) failed: {e}");
+                                    false
+                                }
                             }
                         }
-                        Err(e) => warn!(%device, "reconnect failed: {e}"),
+                        Err(e) => {
+                            warn!(%device, "reconnect failed: {e}");
+                            false
+                        }
+                    };
+                    for pending in [&mut reconnects, &mut push_recovery] {
+                        if let Some(entry) = pending.get_mut(&device) {
+                            entry.re_arm();
+                        }
                     }
-                    if let Some(entry) = reconnects.get_mut(&device) {
-                        entry.re_arm();
+                    // As in the MQTT runtime: the subscription died with the old transport.
+                    if restored && caps.subscribe {
+                        if let Some((device_index, device_config)) = config
+                            .devices
+                            .iter()
+                            .enumerate()
+                            .find(|(_, d)| d.name == device)
+                        {
+                            subscribe_device(
+                                &mut connector,
+                                &config,
+                                device_index,
+                                device_config,
+                                &sample_tx,
+                                limits,
+                                &mut subscribed,
+                            )
+                            .await;
+                            schedule = build_schedule(&config, &subscribed);
+                        }
                     }
                 }
             }
@@ -952,6 +1049,56 @@ fn build_schedule(
         }
     }
     schedule
+}
+
+/// The devices with at least one pushed point, each with whether it also has polled points.
+fn pushed_devices(
+    subscribed: &HashSet<(usize, String)>,
+    schedule: &[ScheduleEntry],
+) -> Vec<(usize, bool)> {
+    let pushed: BTreeSet<usize> = subscribed.iter().map(|(device, _)| *device).collect();
+    pushed
+        .into_iter()
+        .map(|device| (device, schedule.iter().any(|e| e.device_index == device)))
+        .collect()
+}
+
+/// What the runtime does about one [`Connector::check_subscription`] result.
+#[derive(Debug, PartialEq)]
+enum PushAction {
+    /// The connector has no check: nothing to conclude.
+    Unknown,
+    /// A push-only device: the check is all that judges its link.
+    Link { healthy: bool },
+    /// A device that also has polled points. Its reads judge the link -- a live subscription
+    /// voting too would flap the link while every polled point is bad, and a dead one while the
+    /// reads succeed -- so a dead subscription is recovered on a backoff schedule of its own,
+    /// which healthy reads do not cancel.
+    Recover { dead: bool },
+}
+
+/// Forget push recovery for devices that no longer have pushed points. A device leaves
+/// [`pushed_devices`] when a re-subscribe fails and its points fall back to polling; nothing
+/// would clear its entry after that, so its healthy session would be torn down on every retry.
+fn retain_pushed(
+    pending: &mut HashMap<String, ReconnectEntry>,
+    config: &ConnectorConfig,
+    pushed: &[(usize, bool)],
+) {
+    pending.retain(|device, _| {
+        pushed
+            .iter()
+            .any(|(index, _)| config.devices.get(*index).is_some_and(|d| &d.name == device))
+    });
+}
+
+/// Pure so the decision is unit-testable.
+fn push_action(result: &Result<(), ConnectorError>, polled: bool) -> PushAction {
+    match (result, polled) {
+        (Err(ConnectorError::Unsupported(_)), _) => PushAction::Unknown,
+        (result, false) => PushAction::Link { healthy: result.is_ok() },
+        (result, true) => PushAction::Recover { dead: result.is_err() },
+    }
 }
 
 /// Ask a subscribe-capable connector for push delivery, device by device. Points configured
@@ -2491,6 +2638,60 @@ default_mode = "typed"
             1,
             "a point that lost its subscription must fall back to polling"
         );
+    }
+
+    /// Only devices with pushed points are asked about their subscription, and the check has to
+    /// know which of them also have polled points (those are judged by their reads).
+    #[test]
+    fn pushed_devices_are_those_with_subscribed_points() {
+        let config: ConnectorConfig = toml::from_str(BASE).unwrap();
+        assert!(pushed_devices(&HashSet::new(), &build_schedule(&config, &HashSet::new())).is_empty());
+
+        let mut subscribed = HashSet::new();
+        subscribed.insert((0usize, "temp".to_string()));
+        let schedule = build_schedule(&config, &subscribed);
+        assert_eq!(pushed_devices(&subscribed, &schedule), vec![(0, false)], "push-only device");
+
+        // The same device with a point still on the schedule.
+        let polled = build_schedule(&config, &HashSet::new());
+        assert_eq!(pushed_devices(&subscribed, &polled), vec![(0, true)]);
+    }
+
+    /// A dead subscription must always lead to recovery. Only on a push-only device does the
+    /// check judge the link: with polled points the reads do, and a dead subscription is
+    /// recovered apart (were it to vote, the link would flap between the two every tick, and a
+    /// healthy read would keep cancelling the reconnect). No check changes nothing.
+    #[test]
+    fn push_check_judges_the_link_only_of_push_only_devices() {
+        let dead = Err(ConnectorError::Transport("session lost".into()));
+        assert_eq!(push_action(&dead, false), PushAction::Link { healthy: false });
+        assert_eq!(push_action(&Ok(()), false), PushAction::Link { healthy: true });
+        assert_eq!(push_action(&dead, true), PushAction::Recover { dead: true });
+        assert_eq!(push_action(&Ok(()), true), PushAction::Recover { dead: false });
+        let unsupported = Err(ConnectorError::Unsupported("check_subscription".into()));
+        assert_eq!(push_action(&unsupported, false), PushAction::Unknown);
+        assert_eq!(push_action(&unsupported, true), PushAction::Unknown);
+    }
+
+    /// A device whose dead subscription was reconnected but could not be re-armed falls back to
+    /// polling and so stops being checked: its pending push recovery must go with it, or the
+    /// healthy device is reconnected on every retry (up to once a minute) indefinitely.
+    #[test]
+    fn push_recovery_ends_when_a_device_falls_back_to_polling() {
+        let config: ConnectorConfig = toml::from_str(BASE).unwrap();
+        let device = config.devices[0].name.clone();
+        let mut pending = HashMap::new();
+        pending.insert(device.clone(), ReconnectEntry::new());
+
+        // Still pushed (alongside polled points): the recovery stays.
+        retain_pushed(&mut pending, &config, &[(0, true)]);
+        assert!(pending.contains_key(&device));
+
+        // The re-subscribe failed, so the device is no longer among the pushed ones.
+        let subscribed = HashSet::new();
+        let pushed = pushed_devices(&subscribed, &build_schedule(&config, &subscribed));
+        retain_pushed(&mut pending, &config, &pushed);
+        assert!(pending.is_empty(), "a polled-only device keeps no push recovery");
     }
 
     #[test]

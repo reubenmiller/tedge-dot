@@ -679,6 +679,7 @@ version = "0.1.0"
 dependencies = [
  "async-opcua",
  "async-trait",
+ "futures",
  "serde",
  "serde_json",
  "tedge-dot-sdk",

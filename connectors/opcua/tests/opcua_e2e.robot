@@ -43,6 +43,13 @@ ${RECOVERY_TIMEOUT}     90
 # no longer delivering: operation_timeout (5s, see connector.toml) plus the subscription's
 # publishing_interval x max_keep_alive_count (1s x 20), with margin.
 ${SUBSCRIPTION_INACTIVITY_WAIT}     35s
+# A device whose only point is pushed (see connector.toml): no read of it can fail.
+${PUSH_ONLY_DEVICE}         opc2
+${PUSH_ONLY_SAMPLE_PREFIX}  te/device/${PUSH_ONLY_DEVICE}/ot/${PROTOCOL}/sample
+${PUSH_ONLY_LINK_TOPIC}     te/device/${PUSH_ONLY_DEVICE}/ot/${PROTOCOL}/status/link
+# Longer than async-opcua's own session retries (1s, 2s and 4s apart), after which the client's
+# event loop ends.
+${LONG_OUTAGE}              20s
 
 
 *** Test Cases ***
@@ -176,6 +183,8 @@ Push Delivery Recovers After The Server Restarts
     Restart Stack Service    simulator
     ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/ticks    timeout=${RECOVERY_TIMEOUT}
     Sample Should Be Good    ${payload}
+    ${payload}=    Wait For Sample    ${PUSH_ONLY_SAMPLE_PREFIX}/ticks    timeout=${RECOVERY_TIMEOUT}
+    Sample Should Be Good    ${payload}
 
 Push Delivery Recovers From A Silent Server
     [Documentation]    Freezing the server leaves the TCP connection ESTABLISHED and simply
@@ -190,16 +199,52 @@ Push Delivery Recovers From A Silent Server
     ...                transport. It does NOT cover a subscription that dies while the session
     ...                stays healthy — see the note in impl/c/README.md; that path is guarded
     ...                by explicit checks but cannot be provoked with this simulator.
+    ...
+    ...                The push-only device has no polled point to time out, so for it only the
+    ...                subscription's keep-alive window can reveal the silence: its link must
+    ...                drop within that window. Thawed within the subscription's lifetime, the
+    ...                server would otherwise resume the old subscription, so samples returning
+    ...                alone would not prove the silence was noticed.
     [Tags]    requires:subscribe
     Wait For Message Containing    ${SAMPLE_PREFIX}/ticks    "quality"    timeout=${SAMPLE_TIMEOUT}
+    Wait For Message Containing    ${PUSH_ONLY_SAMPLE_PREFIX}/ticks    "quality"    timeout=${SAMPLE_TIMEOUT}
+    ${mark}=    Get Message Mark
     Freeze Stack Service    simulator
-    # Long enough for the keep-alive window to lapse: the connector's operation_timeout plus
-    # publishing_interval x max_keep_alive_count (see connector.toml).
-    Sleep    ${SUBSCRIPTION_INACTIVITY_WAIT}
+    # The keep-alive window: the connector's operation_timeout plus publishing_interval x
+    # max_keep_alive_count (see connector.toml).
+    Wait For Fresh Message With Field    ${PUSH_ONLY_LINK_TOPIC}    status    degraded    disconnected
+    ...    timeout=${SUBSCRIPTION_INACTIVITY_WAIT}    since=${mark}
     Thaw Stack Service    simulator
     ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/ticks    timeout=${RECOVERY_TIMEOUT}
     Sample Should Be Good    ${payload}
+    ${payload}=    Wait For Sample    ${PUSH_ONLY_SAMPLE_PREFIX}/ticks    timeout=${RECOVERY_TIMEOUT}
+    Sample Should Be Good    ${payload}
     [Teardown]    Run Keyword And Ignore Error    Thaw Stack Service    simulator
+
+Push-Only Device Recovers After A Long Server Outage
+    [Documentation]    The reported failure. A device whose points are all pushed makes no
+    ...                reads, so only the session itself can reveal an outage. async-opcua
+    ...                re-establishes a dropped session a few times (1s, 2s, 4s apart) and then
+    ...                ends its event loop without telling anyone: an outage longer than that left
+    ...                the Rust connector silent for good behind a `connected` link. The link
+    ...                must drop, and push must come back once the server does.
+    [Tags]    requires:subscribe
+    Wait For Message Containing    ${PUSH_ONLY_SAMPLE_PREFIX}/ticks    "quality"    timeout=${SAMPLE_TIMEOUT}
+    # Marks are taken before each action: `docker stop` only returns once the simulator is gone
+    # (it ignores SIGTERM, so after the grace period), and a runtime may publish `connected`
+    # before the first pushed sample arrives.
+    ${mark}=    Get Message Mark
+    Stop Stack Service    simulator
+    Wait For Fresh Message With Field    ${PUSH_ONLY_LINK_TOPIC}    status    degraded    disconnected
+    ...    timeout=${SAMPLE_TIMEOUT}    since=${mark}
+    Sleep    ${LONG_OUTAGE}
+    ${mark}=    Get Message Mark
+    Start Stack Service    simulator
+    ${payload}=    Wait For Sample    ${PUSH_ONLY_SAMPLE_PREFIX}/ticks    timeout=${RECOVERY_TIMEOUT}
+    Sample Should Be Good    ${payload}
+    Wait For Fresh Message With Field    ${PUSH_ONLY_LINK_TOPIC}    status    connected
+    ...    timeout=${SAMPLE_TIMEOUT}    since=${mark}
+    [Teardown]    Run Keyword And Ignore Error    Start Stack Service    simulator
 
 Pushed Sample Echoes Point Meta
     [Documentation]    The point's free-form meta table (connector config) is echoed verbatim
