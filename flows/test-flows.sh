@@ -63,7 +63,7 @@ check_empty() {
 flow_with_params() {
   local src="$1" overrides="$2" tmp key
   tmp="$(mktemp -d)"
-  cp "$src"/*.js "$src"/flow.toml "$tmp"/
+  cp "$src"/*.js "$src"/*.toml "$tmp"/
   cp "$src/params.toml.template" "$tmp/params.toml"
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
@@ -103,7 +103,7 @@ check_multi() {
   tmp="$(mktemp -d)"
   for f in $flows; do
     mkdir -p "$tmp/$f"
-    cp "$f"/*.js "$f"/flow.toml "$tmp/$f/"
+    cp "$f"/*.js "$f"/*.toml "$tmp/$f/"
     cp "$f/params.toml.template" "$tmp/$f/params.toml"
   done
   out="$(printf '%s\n' "$input" | tedge flows test --flows-dir "$tmp" 2>/dev/null)"
@@ -437,6 +437,35 @@ check_output "alarm: a link status without a point list, or of another protocol,
   "$(lines "$(ot_sample t1 pump_state '"FAULT"' "$PUMP")" \
            '[te/device/opc1/ot/opcua/status/link] {"status":"connected"}' \
            '[te/device/opc1/ot/modbus/status/link] {"status":"connected","points":[]}')" \
+  "$PUMP_RAISED"
+# After a restart the broker replays the retained alarms, which the companion flow (alarm-state)
+# records: a still-standing alarm is not raised again (Cumulocity would count a new occurrence),
+# and one whose condition went away is cleared.
+PUMP_RETAINED='[te/device/opc1///a/pump_fault] {"severity":"critical","text":"pump_state on opc1 is FAULT","time":"t0"}'
+check_output "alarm: a retained alarm still standing after a restart is not raised again" ot-alarm "" \
+  "$(lines "$PUMP_RETAINED" \
+           "$(ot_sample t1 pump_state '"FAULT"' "$PUMP")" \
+           "$(ot_sample t2 pump_state '"RUNNING"' "$PUMP")")" \
+  "$PUMP_CLEARED"
+check_output "alarm: a retained alarm whose condition went away is cleared by the first reading" ot-alarm "" \
+  "$(lines "$PUMP_RETAINED" "$(ot_sample t1 pump_state '"RUNNING"' "$PUMP")")" \
+  "$PUMP_CLEARED"
+check_output "alarm: a clear seen on the alarm topic is known, so a normal reading publishes nothing" ot-alarm "" \
+  "$(lines '[te/device/opc1///a/pump_fault] ' "$(ot_sample t1 pump_state '"RUNNING"' "$PUMP")")" \
+  ''
+check_output "alarm: a retained measurement alarm still standing is not raised again" ot-alarm 'series = "temp_u16"' \
+  "$(lines '[te/device/plc1///a/ot_overrange] {"severity":"major","text":"OT value high (80 >= 70)","time":"t0"}' \
+           '[te/device/plc1///m/modbus] {"modbus":{"temp_u16":85},"time":"t1"}')" \
+  ''
+# Raised by the low limit, a value back inside the range clears it even though it is inside the
+# high limit's hysteresis band.
+RANGE='{"alarm":{"type":"out_of_range","when":{"above":80,"below":20,"hysteresis":5}}}'
+check_output "alarm: above and below each keep their own hysteresis band" ot-alarm "" \
+  "$(lines "$(ot_sample t1 level 10 "$RANGE")" "$(ot_sample t2 level 78 "$RANGE")" "$(ot_sample t3 level 50 "$RANGE")")" \
+  "$(lines '[te/device/opc1///a/out_of_range] {"severity":"major","text":"level is 10","time":"t1"}' \
+           '[te/device/opc1///a/out_of_range] ')"
+check_output "alarm: when two points declare one type, the first keeps it" ot-alarm "" \
+  "$(lines "$(ot_sample t1 pump_state '"FAULT"' "$PUMP")" "$(ot_sample t2 other_pump '"RUNNING"' "$PUMP")")" \
   "$PUMP_RAISED"
 
 # --- ot-registration (link -> child-device registration; type from the connector, else protocol) ---

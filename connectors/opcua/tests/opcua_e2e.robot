@@ -368,18 +368,31 @@ Alarm And Event Declared On A Point Follow Its Value
     [Tags]    flows
     ${alarm_topic}=    Set Variable    te/device/${DEVICE}///a/running_alarm
     ${event_topic}=    Set Variable    te/device/${DEVICE}///e/running_changed
-    Publish Message    ${CMD_PREFIX}/alarm-on    {"status":"init","point":"running","value":true}    retain=True
-    Wait For Message Containing    ${CMD_PREFIX}/alarm-on    "status":"successful"    timeout=${SAMPLE_TIMEOUT}
-    ${alarm}=    Wait For Message Containing    ${alarm_topic}    "severity":"minor"    timeout=${FLOWS_TIMEOUT}
-    Should Contain    ${alarm}    running is true
-    # The flow has now seen the value true, so writing false is a change it must report.
-    Publish Message    ${CMD_PREFIX}/alarm-off    {"status":"init","point":"running","value":false}    retain=True
-    Wait For Message Containing    ${CMD_PREFIX}/alarm-off    "status":"successful"    timeout=${SAMPLE_TIMEOUT}
+    # Earlier tests leave running (and so this alarm) in either state, and the client keeps every
+    # message it has seen: start from false, and only ever look at the LATEST message of a topic.
+    Write Running    alarm-0    false
     Wait Until Keyword Succeeds    ${FLOWS_TIMEOUT}s    1s    Latest Message Should Be Empty    ${alarm_topic}
-    Wait For Message Containing    ${event_topic}    Running changed to false    timeout=${FLOWS_TIMEOUT}
+    Write Running    alarm-1    true
+    Wait Until Keyword Succeeds    ${FLOWS_TIMEOUT}s    1s    Latest Message Should Contain    ${alarm_topic}    "severity":"minor"
+    Latest Message Should Contain    ${alarm_topic}    running is true
+    Wait Until Keyword Succeeds    ${FLOWS_TIMEOUT}s    1s    Latest Message Should Contain    ${event_topic}    Running changed to true
+    Write Running    alarm-2    false
+    Wait Until Keyword Succeeds    ${FLOWS_TIMEOUT}s    1s    Latest Message Should Be Empty    ${alarm_topic}
+    Wait Until Keyword Succeeds    ${FLOWS_TIMEOUT}s    1s    Latest Message Should Contain    ${event_topic}    Running changed to false
 
 
 *** Keywords ***
+Write Running
+    [Documentation]    Write the running point through a connector write command and wait for it.
+    [Arguments]    ${id}    ${value}
+    Publish Message    ${CMD_PREFIX}/${id}    {"status":"init","point":"running","value":${value}}    retain=True
+    Wait For Message Containing    ${CMD_PREFIX}/${id}    "status":"successful"    timeout=${SAMPLE_TIMEOUT}
+
+Latest Message Should Contain
+    [Arguments]    ${topic}    ${substring}
+    ${payload}=    Get Message    ${topic}
+    Should Contain    ${payload}    ${substring}
+
 Latest Message Should Be Empty
     [Documentation]    An empty payload is how a retained alarm is cleared.
     [Arguments]    ${topic}

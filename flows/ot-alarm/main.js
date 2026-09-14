@@ -14,7 +14,8 @@
 //   meta = { alarm = { type = "pump_fault", severity = "critical", when = { equals = "FAULT" } } }
 //
 //   type        alarm type, a single topic level; default "<point>_alarm". Unique per device:
-//               two points declaring one type share (and fight over) one alarm.
+//               when two points declare one type, the first to declare it keeps it, and the
+//               other declaration is ignored until the first point stops declaring it.
 //   severity    "critical" | "major" | "minor" | "warning"; default "major"
 //   text        {point}, {value}, {unit} and {device} are filled in; default "{point} is {value}"
 //   when        what the alarm is raised for; it stands while ANY of these holds:
@@ -22,9 +23,9 @@
 //                 not_equals  the value is neither this value nor any of this list
 //                 above       the value is a number greater than this
 //                 below       the value is a number less than this
-//               hysteresis   with above/below: once raised, the alarm only clears at the limit
-//                            moved back by this much (<= above - hysteresis, >= below +
-//                            hysteresis), so a value hovering at the limit does not flap it
+//               hysteresis   with above/below: once a limit raised the alarm, it only clears at
+//                            that limit moved back by this much (<= above - hysteresis, >= below
+//                            + hysteresis), so a value hovering at the limit does not flap it
 //               Without `when`, the alarm stands while the value is `true` (a coil, a flag).
 //
 // `alarm` may also be a list of such tables. An entry the flow cannot use — a type that is not a
@@ -35,22 +36,30 @@
 // hysteresis — the original mode, kept for existing deployments. It is off while `series` is
 // empty, which is what lets the flow ship active: without params it only acts on declarations.
 //
-// Alarms are retained, so they outlive this flow's in-memory state: after a mapper restart the
-// flow cannot know whether an alarm it raised before is still standing. An alarm's state
-// therefore starts out UNKNOWN and the first reading settles it by publishing it, raised OR
-// cleared — an alarm whose condition went away while the mapper was down is cleared rather than
-// left standing. After that only changes are published. A reading inside a hysteresis band
-// settles nothing: it is consistent with both.
+// Alarms are retained, so they outlive this flow's in-memory state. After a mapper restart an
+// alarm's state is first taken from its retained message, which the companion flow
+// alarm-state.js records: an alarm still standing is not raised again (Cumulocity counts every
+// repeat of an active alarm as a new occurrence). An alarm with no retained message is UNKNOWN —
+// a cleared alarm leaves none — and the first reading settles it by publishing it, raised OR
+// cleared, so an alarm whose condition went away while the mapper was down is cleared rather than
+// left standing; a cleared alarm thus gets one more, harmless, clear after a restart. After that
+// only changes are published. A reading inside a hysteresis band settles nothing: it is
+// consistent with both. (A sample handled before the broker's retained alarm raises the alarm
+// again, as if the companion flow were not there.)
 //
 // A declared alarm is also cleared when its declaration goes away: when its point's sample no
 // longer declares it (the meta changed) or the link status no longer lists the point (it was
 // removed from the configuration). That relies on the flow having seen the declaration since it
-// started; a declaration removed while the mapper was down leaves its alarm standing.
+// started: a declaration removed while the mapper was down, or a whole device removed (no link
+// status of it is published any more), leaves its alarm standing.
 //
-// State (context.script):
-//   "alarms:<device>"        -> { <type>: { point, protocol, active } } per declared alarm;
-//                               active is true / false, absent while unknown
-//   "<alarm topic>:active"   -> true / false for the measurement alarm
+// State:
+//   context.script "alarms:<device>"        -> { <type>: { point, protocol, active } } per
+//                                              declared alarm; active is what the condition held
+//                                              by ("equals", "above", ...), false, or absent
+//                                              while unknown
+//   context.script "<alarm topic>:active"   -> true / false for the measurement alarm
+//   context.mapper "ot-alarm-retained:<alarm topic>" -> true / false, from alarm-state.js
 
 const decoder = new TextDecoder();
 
@@ -72,6 +81,18 @@ function knownBool(v) {
   return typeof v === "boolean" ? v : undefined;
 }
 
+// A stored condition state — what it held by, true (held, for a reason not known), false — or
+// undefined when unknown.
+function knownState(v) {
+  return typeof v === "string" || typeof v === "boolean" ? v : undefined;
+}
+
+// Whether the retained alarm on `topic` is standing, as alarm-state.js saw it: undefined when it
+// has seen nothing for the topic.
+function retainedState(context, topic) {
+  return knownBool(context.mapper.get(`ot-alarm-retained:${topic}`));
+}
+
 // Parse a `when` table into a condition, or null when it names no condition this flow knows.
 // Kept identical in ot-event/main.js: flows cannot share modules.
 function conditionOf(when) {
@@ -86,27 +107,32 @@ function conditionOf(when) {
   return usable ? c : null;
 }
 
-// Whether condition `c` holds for `value`: true, false, or undefined when the value is inside a
-// hysteresis band and the previous state (`was`: true / false / undefined) is unknown.
+// Whether condition `c` holds for `value`, and by what: "equals", "not_equals", "above" or "below"
+// when it holds, false when it does not, undefined when the value is inside a hysteresis band and
+// the previous state is unknown. `was` is the previous result, or true when the condition held
+// for a reason not known. A band only keeps the condition holding when its own limit (or an
+// unknown reason) raised it: a value recovering from below the low limit is not held by the high
+// limit's band.
 // Kept identical in ot-event/main.js: flows cannot share modules.
 function evaluate(c, value, was) {
   const listed = (list) => list.some((v) => v === value);
-  if (c.equals && listed(c.equals)) return true;
-  if (c.not_equals && !listed(c.not_equals)) return true;
+  if (c.equals && listed(c.equals)) return "equals";
+  if (c.not_equals && !listed(c.not_equals)) return "not_equals";
   let unknown = false;
   if (typeof value === "number" && isFinite(value)) {
-    // Beyond the limit it holds; inside the band it keeps whatever state it had.
-    const band = (beyond, inBand) => {
-      if (beyond) return true;
-      if (inBand && was === true) return true;
+    const limit = (side, beyond, inBand) => {
+      if (beyond) return side;
+      if (inBand && (was === side || was === true)) return side;
       if (inBand && was === undefined) unknown = true;
       return false;
     };
-    if (c.above !== undefined && band(value > c.above, value > c.above - c.hysteresis)) {
-      return true;
+    if (c.above !== undefined) {
+      const held = limit("above", value > c.above, value > c.above - c.hysteresis);
+      if (held) return held;
     }
-    if (c.below !== undefined && band(value < c.below, value < c.below + c.hysteresis)) {
-      return true;
+    if (c.below !== undefined) {
+      const held = limit("below", value < c.below, value < c.below + c.hysteresis);
+      if (held) return held;
     }
   }
   return unknown ? undefined : false;
@@ -150,6 +176,9 @@ function onSample(parts, sample, context) {
   const key = `alarms:${device}`;
   const state = context.script.get(key) || {};
   const alarms = alarmsOf(sample, point);
+  const owns = (known) => known.point === point && known.protocol === protocol;
+  // Most points declare no alarm: leave the state alone for them.
+  if (!alarms.length && !Object.values(state).some(owns)) return [];
   const out = [];
 
   // A sample is the authority on which alarms its point declares now, so one it declared before
@@ -158,34 +187,40 @@ function onSample(parts, sample, context) {
   // nothing about its declarations.
   if (sample.access !== undefined || sample.meta !== undefined) {
     for (const [type, known] of Object.entries(state)) {
-      if (known.point !== point || known.protocol !== protocol) continue;
-      if (alarms.some((a) => a.type === type)) continue;
-      if (knownBool(known.active) !== false) out.push(clearMessage(alarmTopic(type)));
+      if (!owns(known) || alarms.some((a) => a.type === type)) continue;
+      if (knownState(known.active) !== false) out.push(clearMessage(alarmTopic(type)));
       delete state[type];
     }
   }
 
   const readable = sample.quality === "good" && sample.value !== undefined;
   for (const alarm of alarms) {
-    const was = knownBool(state[alarm.type]?.active);
+    const topic = alarmTopic(alarm.type);
+    // Another point declared this type on the device first: it keeps the alarm.
+    if (state[alarm.type] && !owns(state[alarm.type])) continue;
+    let was = knownState(state[alarm.type]?.active);
+    if (was === undefined) was = retainedState(context, topic);
     let active = was;
     if (readable) {
       const holds = evaluate(alarm.when, sample.value, was);
-      if (holds !== undefined && holds !== was) {
+      if (holds !== undefined) {
+        // Published on a change, and whenever the state was unknown: this reading settles it.
+        if (was === undefined || Boolean(holds) !== Boolean(was)) {
+          out.push(
+            holds
+              ? {
+                  topic,
+                  payload: JSON.stringify({
+                    severity: alarm.severity,
+                    text: render(alarm.text, sample, point, device),
+                    time: sample.ts,
+                  }),
+                  mqtt: { retain: true, qos: 1 },
+                }
+              : clearMessage(topic)
+          );
+        }
         active = holds;
-        out.push(
-          holds
-            ? {
-                topic: alarmTopic(alarm.type),
-                payload: JSON.stringify({
-                  severity: alarm.severity,
-                  text: render(alarm.text, sample, point, device),
-                  time: sample.ts,
-                }),
-                mqtt: { retain: true, qos: 1 },
-              }
-            : clearMessage(alarmTopic(alarm.type))
-        );
       }
     }
     state[alarm.type] = active === undefined ? { point, protocol } : { point, protocol, active };
@@ -208,7 +243,7 @@ function onLinkStatus(parts, status, context) {
   const out = [];
   for (const [type, known] of Object.entries(state)) {
     if (known.protocol !== protocol || listed.has(known.point)) continue;
-    if (knownBool(known.active) !== false) out.push(clearMessage(`te/device/${device}///a/${type}`));
+    if (knownState(known.active) !== false) out.push(clearMessage(`te/device/${device}///a/${type}`));
     delete state[type];
   }
   context.script.set(key, state);
@@ -242,12 +277,14 @@ function onMeasurement(message, payload, context) {
 
   const clearBelow = threshold - hysteresis;
   const key = `${alarmTopic}:active`;
-  // Unknown until the first reading after a (re)start settles it, see the header.
-  const active = knownBool(context.script.get(key));
+  // Unknown until the retained alarm or the first reading after a (re)start settles it, see the
+  // header.
+  let active = knownBool(context.script.get(key));
+  if (active === undefined) active = retainedState(context, alarmTopic);
 
   if (value >= threshold) {
-    if (active === true) return []; // already raised; no redundant publish
     context.script.set(key, true);
+    if (active === true) return []; // already raised; no redundant publish
     return [{
       topic: alarmTopic,
       payload: JSON.stringify({
@@ -260,8 +297,8 @@ function onMeasurement(message, payload, context) {
   }
 
   if (value < clearBelow) {
-    if (active === false) return []; // already clear
     context.script.set(key, false);
+    if (active === false) return []; // already clear
     return [clearMessage(alarmTopic)];
   }
 

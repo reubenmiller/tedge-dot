@@ -6,6 +6,8 @@
 #     active;
 #   * one measurement series with a threshold and hysteresis (the config below). Off while
 #     params.series is empty.
+# The companion flow alarm-state.toml records which alarms are standing, so a restart does not
+# raise a still-retained alarm again.
 input.mqtt.topics = [
   "te/+/+/ot/+/sample/+",
   # Retained, and republished on every configuration change: clears the alarms of removed points.

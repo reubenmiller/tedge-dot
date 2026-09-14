@@ -47,6 +47,12 @@ function listOf(v) {
   return Array.isArray(v) ? v : [v];
 }
 
+// A stored condition state — what it held by, true (held, for a reason not known), false — or
+// undefined when unknown.
+function knownState(v) {
+  return typeof v === "string" || typeof v === "boolean" ? v : undefined;
+}
+
 // Parse a `when` table into a condition, or null when it names no condition this flow knows.
 // Kept identical in ot-alarm/main.js: flows cannot share modules.
 function conditionOf(when) {
@@ -61,27 +67,32 @@ function conditionOf(when) {
   return usable ? c : null;
 }
 
-// Whether condition `c` holds for `value`: true, false, or undefined when the value is inside a
-// hysteresis band and the previous state (`was`: true / false / undefined) is unknown.
+// Whether condition `c` holds for `value`, and by what: "equals", "not_equals", "above" or "below"
+// when it holds, false when it does not, undefined when the value is inside a hysteresis band and
+// the previous state is unknown. `was` is the previous result, or true when the condition held
+// for a reason not known. A band only keeps the condition holding when its own limit (or an
+// unknown reason) raised it: a value recovering from below the low limit is not held by the high
+// limit's band.
 // Kept identical in ot-alarm/main.js: flows cannot share modules.
 function evaluate(c, value, was) {
   const listed = (list) => list.some((v) => v === value);
-  if (c.equals && listed(c.equals)) return true;
-  if (c.not_equals && !listed(c.not_equals)) return true;
+  if (c.equals && listed(c.equals)) return "equals";
+  if (c.not_equals && !listed(c.not_equals)) return "not_equals";
   let unknown = false;
   if (typeof value === "number" && isFinite(value)) {
-    // Beyond the limit it holds; inside the band it keeps whatever state it had.
-    const band = (beyond, inBand) => {
-      if (beyond) return true;
-      if (inBand && was === true) return true;
+    const limit = (side, beyond, inBand) => {
+      if (beyond) return side;
+      if (inBand && (was === side || was === true)) return side;
       if (inBand && was === undefined) unknown = true;
       return false;
     };
-    if (c.above !== undefined && band(value > c.above, value > c.above - c.hysteresis)) {
-      return true;
+    if (c.above !== undefined) {
+      const held = limit("above", value > c.above, value > c.above - c.hysteresis);
+      if (held) return held;
     }
-    if (c.below !== undefined && band(value < c.below, value < c.below + c.hysteresis)) {
-      return true;
+    if (c.below !== undefined) {
+      const held = limit("below", value < c.below, value < c.below + c.hysteresis);
+      if (held) return held;
     }
   }
   return unknown ? undefined : false;
@@ -127,10 +138,10 @@ function onSample(parts, sample, context) {
     const seen = context.script.get(key);
     let raise;
     if (event.when) {
-      const was = typeof seen?.holds === "boolean" ? seen.holds : undefined;
+      const was = knownState(seen?.holds);
       const holds = evaluate(event.when, sample.value, was);
       if (holds === undefined) continue; // inside a hysteresis band with no baseline yet
-      raise = was === false && holds;
+      raise = was === false && Boolean(holds);
       context.script.set(key, { holds });
     } else {
       const known = !!seen && typeof seen === "object" && Object.prototype.hasOwnProperty.call(seen, "value");

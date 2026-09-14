@@ -105,10 +105,14 @@ a list of values, `above` / `below` a number with an optional `hysteresis`; with
 the value is `true` — and clears it with an empty retained message. `ot-event` raises an event on
 every change of the value or, with `when`, each time the condition starts to hold. `alarm` and
 `event` may each be a list; the header of each flow's `main.js` documents every key. The alarm
-is retained but the flows' memory is not, so the first reading after a mapper restart settles
-each alarm by publishing it, raised or cleared: an alarm whose condition went away in the
-meantime does not stay active. An alarm is also cleared when its point stops declaring it or is
-removed from the configuration (seen while the mapper runs). An event, by contrast, takes the
+is retained but the flows' memory is not. After a mapper restart `ot-alarm` learns from the
+retained alarms which ones are still standing (through its companion flow,
+`ot-alarm/alarm-state.toml`), so it does not raise them again — Cumulocity would count a repeat
+as a new occurrence. Any other alarm is settled by its first reading, which publishes it raised
+or cleared, so an alarm whose condition went away in the meantime does not stay active. An alarm
+is also cleared when its point stops declaring it or is removed from the configuration (seen
+while the mapper runs; removing a whole device leaves its alarms standing). An alarm type is
+unique per device: when two points declare the same one, the first keeps it. An event, by contrast, takes the
 first reading after a restart as its baseline, so a restart never reports a change that did not
 happen — and a change made while the mapper was down is not reported.
 
@@ -191,8 +195,11 @@ sudo -u tedge $EDITOR /etc/tedge/mappers/c8y/flows/ot-alarm/params.toml
 ```
 
 Earlier packages shipped these two inert in `/usr/share/tedge-dot/flows/`. A copy enabled from
-there by hand is replaced by the packaged flow on upgrade and the `params.toml` next to it is
-kept, so a measurement alarm or event set up that way keeps working.
+there by hand is replaced by the packaged flow on upgrade, and the `params.toml` next to it is
+kept. Its measurement mode keeps working only if that `params.toml` sets `series`: the packaged
+template no longer names one, so a copy that ran on the template's example series (`temp_u16`
+for `ot-alarm`, `value` for `ot-event`) or on the flow's old built-in default (`value`) goes
+quiet until `series` is set.
 
 Either way the mapper picks the change up and hot-reloads — no restart. Only the flow logic
 (`flow.toml`, `main.js`) and the `params.toml.template` are packaged; the `params.toml` you write
