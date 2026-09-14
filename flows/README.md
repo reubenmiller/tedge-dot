@@ -71,10 +71,12 @@ point's `access`) and from acknowledged writes. A point can name its own key in 
 id       = "firmwareVersion"
 datatype = "string"
 address  = { node_id = "ns=1;s=FirmwareVersion" }
-meta     = { parameter = { set = "firmware", key = "version" }, measurement = false }
+meta     = { parameter = { key = "firmware.version" }, measurement = false }
 ```
 
-publishes `te/device/<device>///twin/firmware` as `{"version": "..."}`. `ot-command-forward` turns
+publishes `te/device/<device>///twin/firmware` as `{"version": "..."}`: a key `<set>.<key>` names
+the set and the key at once, while a key without a dot (`key = "version"`) stays in the point's
+usual set. `ot-command-forward` turns
 an edit of that key back into a write of `firmwareVersion`. The mapping comes from the connector's
 retained capability descriptor (`parameter_keys`) as well as the point's samples, so it holds right
 after a mapper restart and for write-only points too; `tedge-dot describe` refuses two points of a

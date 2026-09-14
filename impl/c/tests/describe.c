@@ -321,13 +321,13 @@ static const char *KEYED =
     "  datatype = \"uint16\"\n"
     "  name = \"Firmware name\"\n"
     "  address = { table = \"holding\", address = 1, count = 1 }\n"
-    "  meta = { parameter = { set = \"firmware\", key = \"name\" } }\n"
+    "  meta = { parameter = { key = \"firmware.name\" } }\n"
     "\n"
     "  [[device.point]]\n"
     "  id = \"firmwareVersion\"\n"
     "  datatype = \"uint16\"\n"
     "  address = { table = \"holding\", address = 2, count = 1 }\n"
-    "  meta = { parameter = { set = \"firmware\", key = \"version\" } }\n"
+    "  meta = { parameter = { key = \"firmware.version\" } }\n"
     "\n"
     "  [[device.point]]\n"
     "  id = \"Tank.Level\"\n"
@@ -336,27 +336,40 @@ static const char *KEYED =
     "  meta = { parameter = { key = \"tank_level\" } }\n";
 
 /* Appended to KEYED: a second point with the key `name` in `firmware`, a key on
- * a write-only point, and an unusable key. */
+ * a write-only point (allowed), an unusable key, and the two option
+ * combinations a key refuses. */
 static const char *KEYED_CONFLICTS =
     "\n"
     "  [[device.point]]\n"
     "  id = \"bootName\"\n"
     "  datatype = \"uint16\"\n"
     "  address = { table = \"holding\", address = 3, count = 1 }\n"
-    "  meta = { parameter = { set = \"firmware\", key = \"name\" } }\n"
+    "  meta = { parameter = { key = \"firmware.name\" } }\n"
     "\n"
     "  [[device.point]]\n"
     "  id = \"update_cmd\"\n"
     "  datatype = \"uint16\"\n"
     "  access = \"write\"\n"
     "  address = { table = \"holding\", address = 4, count = 1 }\n"
-    "  meta = { parameter = { set = \"firmware\", key = \"update\" } }\n"
+    "  meta = { parameter = { key = \"firmware.update\" } }\n"
     "\n"
     "  [[device.point]]\n"
     "  id = \"level\"\n"
     "  datatype = \"uint16\"\n"
     "  address = { table = \"holding\", address = 6, count = 1 }\n"
-    "  meta = { parameter = { key = \"lev.el\" } }\n";
+    "  meta = { parameter = { key = \"a.b.c\" } }\n"
+    "\n"
+    "  [[device.point]]\n"
+    "  id = \"mixed_set\"\n"
+    "  datatype = \"uint16\"\n"
+    "  address = { table = \"holding\", address = 7, count = 1 }\n"
+    "  meta = { parameter = { set = \"firmware\", key = \"mixed\" } }\n"
+    "\n"
+    "  [[device.point]]\n"
+    "  id = \"mixed_group\"\n"
+    "  datatype = \"uint16\"\n"
+    "  address = { table = \"holding\", address = 8, count = 1 }\n"
+    "  meta = { parameter = { group = \"control\", key = \"info.mixed\" } }\n";
 
 static void check_parameter_keys(void) {
     char err[256];
@@ -403,7 +416,7 @@ static void check_parameter_keys(void) {
     CHECK(cfg != NULL, "conflicting keyed config did not load: %s", err);
     if (cfg) {
         char *bad = tdot_param_invalid_keys(cfg, NULL);
-        CHECK(bad && strcmp(bad, "parameter key 'lev.el' of point 'level'") == 0,
+        CHECK(bad && strcmp(bad, "parameter key 'a.b.c' of point 'level'") == 0,
               "an unusable key must be reported, got: %s", bad ? bad : "<none>");
         free(bad);
         char *conflicts = tdot_param_key_conflicts(cfg, NULL);
@@ -412,7 +425,10 @@ static void check_parameter_keys(void) {
         CHECK(conflicts &&
                   strcmp(conflicts,
                          "key 'name' of points 'firmwareName' and 'bootName' in set "
-                         "'firmware' on device 'plc1'") == 0,
+                         "'firmware' on device 'plc1', point 'mixed_set' on device "
+                         "'plc1' combines \"set\" with \"key\": write the key as "
+                         "'<set>.<key>', point 'mixed_group' on device 'plc1' combines "
+                         "\"group\" with a key that names its set") == 0,
               "conflicts = %s", conflicts ? conflicts : "<none>");
         free(conflicts);
         tdot_config_free(cfg);

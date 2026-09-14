@@ -499,7 +499,10 @@ cloud-specific tooling (`tedge-dot describe`) renders the same sets as cloud-sid
 A read-only point can opt in with `meta.parameter = true`, a writable point can opt out with
 `meta.parameter = false`. A parameter's key inside its fragment is its point id, or
 `meta.parameter.key` when the point names one — so a point can keep an id that is unique on the
-device (`firmwareVersion`) and still be `version` in its `firmware` set. Keys SHOULD be plain
+device (`firmwareVersion`) and still be `version` in its `firmware` set with
+`meta.parameter = { key = "firmware.version" }`: a key `<set>.<key>` names its set too (absolutely,
+so it cannot be combined with `set` or `group`), while a key without a dot stays in the point's usual
+set (and cannot be combined with `set`). Keys SHOULD be plain
 identifiers (`[A-Za-z0-9_]`) and unique per set on a device. The capability descriptor lists
 every point that names a key (`parameter_keys`, §7), so consumers know the keys before any sample:
 after a restart, since samples are not retained, and for a write-only point, which never samples.

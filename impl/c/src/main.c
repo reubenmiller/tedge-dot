@@ -604,11 +604,11 @@ static int cmd_describe(const args_t *a) {
         free(bad);
         goto out;
     }
-    /* A fragment holds one value per key. */
+    /* A fragment holds one value per key, and a key naming its set leaves no
+     * room for `set` or `group`. */
     char *conflicts = tdot_param_key_conflicts_across(view, npaths, forced);
     if (conflicts) {
-        fprintf(stderr, "error: parameter keys must be unique in a set: %s\n",
-                conflicts);
+        fprintf(stderr, "error: conflicting parameter keys: %s\n", conflicts);
         free(conflicts);
         goto out;
     }

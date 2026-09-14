@@ -25,7 +25,9 @@
 //
 // Inside a set, a point's value is published under its *key*: the point id, or
 // meta.parameter.key when the point names one — so a point can keep an id that is unique on the
-// device (`firmwareVersion`) and still be `version` in its `firmware` fragment. The key comes from
+// device (`firmwareVersion`) and still be `version` in its `firmware` fragment:
+// `key = "firmware.version"` names the set and the key at once, and a key without a dot stays in the
+// point's usual set. The key comes from
 // the connector's retained capability descriptor (parameter_keys, contract §7), so it is known
 // before the point samples — right after a mapper restart, and for a write-only point, which
 // never samples — and from the point's samples. This flow records which point each key of a set
@@ -153,6 +155,10 @@ function namesOf(value, validate) {
 // can appear on several operator screens and its value reaches each of their fragments.
 // `set` is absolute and wins over `group`. Mirrors SetNaming::sets_of in both SDKs.
 function setsOf(options, names) {
+  // A key that names its set (`key = "<set>.<key>"`) is absolute, like `set`, and wins; an
+  // unusable set in it falls back like an unusable `set` does.
+  const dotted = dottedKey(options.key);
+  if (dotted && isValidSet(dotted.set)) return [dotted.set];
   // An absolute name is used verbatim, so it is the one that has to be checked; a group name
   // is folded into a derived name and cannot produce anything but [A-Za-z0-9_].
   const absolute = namesOf(options.set, true);
@@ -180,13 +186,32 @@ function setsFromSample(sample, names) {
   return [setFor(names)]; // `true`, or any other scalar
 }
 
+// A key that names its set too, `<set>.<key>`: both halves, split at its only dot, or null for a
+// plain key — and for one with more dots or an empty half. A dot can only be this separator:
+// neither a set name nor a key may contain one. Mirrors descriptor.rs::dotted_key.
+function dottedKey(key) {
+  if (typeof key !== "string") return null;
+  const dot = key.indexOf(".");
+  if (dot <= 0 || dot === key.length - 1 || key.indexOf(".", dot + 1) !== -1) return null;
+  return { set: key.slice(0, dot), key: key.slice(dot + 1) };
+}
+
+// The key a `key` option publishes under — its part after the set, for a key naming its set — or
+// null when it is unusable. A key is a fragment key, so a set name's rule applies.
+function keyName(key) {
+  if (typeof key !== "string") return null;
+  const dotted = dottedKey(key);
+  const name = dotted ? dotted.key : key;
+  return isValidSet(name) ? name : null;
+}
+
 // The key a sampled point is published under: meta.parameter.key when it names a usable one,
-// else the point id. A key is a fragment key, so a set name's rule applies; an unusable key
-// falls back to the id rather than inventing one, and `tedge-dot describe` refuses it.
+// else the point id. An unusable key falls back to the id rather than inventing one, and
+// `tedge-dot describe` refuses it.
 function keyFromSample(sample, point) {
   const mp = sample.meta?.parameter;
-  const key = mp && typeof mp === "object" && !Array.isArray(mp) ? mp.key : undefined;
-  return typeof key === "string" && isValidSet(key) ? key : point;
+  const key = mp && typeof mp === "object" && !Array.isArray(mp) ? keyName(mp.key) : null;
+  return key ?? point;
 }
 
 // The key a point was last seen under: its id until a sample or its declaration names another.
@@ -307,9 +332,12 @@ function placePoint(context, device, point, sets, key, changed) {
 // contract §7). Re-applied when the link status reports the device type, which names the sets.
 function applyDeclarations(context, device, protocol, changed) {
   const names = naming(context, device, protocol);
-  const entries = (context.mapper.get(`ot-parameter-declared:${device}:${protocol}`) || []).filter(
-    (e) => typeof e?.point === "string" && e.point && typeof e.key === "string" && isValidSet(e.key)
-  );
+  const entries = [];
+  for (const e of context.mapper.get(`ot-parameter-declared:${device}:${protocol}`) || []) {
+    const key = keyName(e?.key);
+    if (typeof e?.point !== "string" || !e.point || !key) continue;
+    entries.push({ point: e.point, key, options: { set: e.set, group: e.group, key: e.key } });
+  }
   // Two passes: every point whose key changed lets go of what it holds first, so keys swapped
   // between points by one reload are free by the time they are claimed again.
   for (const { point, key } of entries) {
@@ -319,8 +347,7 @@ function applyDeclarations(context, device, protocol, changed) {
     }
   }
   for (const entry of entries) {
-    const sets = setsOf({ set: entry.set, group: entry.group }, names);
-    placePoint(context, device, entry.point, sets, entry.key, changed);
+    placePoint(context, device, entry.point, setsOf(entry.options, names), entry.key, changed);
   }
 }
 
@@ -395,7 +422,7 @@ function pruneRemovedPoints(context, device, changed) {
 // is not undone.
 function releaseDeclaration(context, device, entry, changed) {
   const point = entry.point;
-  if (keyOf(context, device, point) !== entry.key) return;
+  if (keyOf(context, device, point) !== keyName(entry.key)) return;
   for (const [set, held] of claimsOf(context, device, point)) {
     dropValue(context, device, point, held, [set], changed);
   }

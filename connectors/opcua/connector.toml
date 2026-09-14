@@ -113,4 +113,4 @@ default_mode     = "typed"
   subscribe = false
   datatype = "uint32"
   address  = { node_id = "ns=2;s=Count" }
-  meta     = { parameter = { set = "counters", key = "count" }, measurement = false }
+  meta     = { parameter = { key = "counters.count" }, measurement = false }

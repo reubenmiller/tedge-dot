@@ -2838,7 +2838,7 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id 
   id = "firmwareVersion"
   datatype = "uint16"
   address = { table = "holding", address = 1, count = 1 }
-  meta = { parameter = { set = "firmware", key = "version" } }
+  meta = { parameter = { key = "firmware.version" } }
 "#,
         )
         .unwrap();
@@ -2847,7 +2847,7 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id 
         assert_eq!(
             payload["parameter_keys"],
             serde_json::json!([
-                { "device": "plc1", "point": "firmwareVersion", "key": "version", "set": "firmware" }
+                { "device": "plc1", "point": "firmwareVersion", "key": "firmware.version" }
             ])
         );
         let plain: ConnectorConfig = toml::from_str(BASE).unwrap();

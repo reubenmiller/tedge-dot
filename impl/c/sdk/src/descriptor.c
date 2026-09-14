@@ -124,11 +124,33 @@ static char **names_of(const cJSON *options, const char *key, size_t *n) {
     return names;
 }
 
-/* Every set the options put the point in. `set` is absolute (used verbatim) and
- * wins over `group`; each accepts a string or a list.
- * Mirrors descriptor.rs::SetNaming::sets_of. */
+/* The dot of a key that names its set too, `<set>.<key>`: its only dot, with
+ * both halves non-empty. NULL for a plain key -- and for one with more dots or
+ * an empty half, which stays a plain key and is refused by
+ * tdot_param_invalid_keys. Mirrors descriptor.rs::dotted_key. */
+static const char *dotted_key_dot(const cJSON *options) {
+    const cJSON *key = cJSON_GetObjectItemCaseSensitive(options, "key");
+    if (!cJSON_IsString(key))
+        return NULL;
+    const char *dot = strchr(key->valuestring, '.');
+    if (!dot || dot == key->valuestring || !dot[1] || strchr(dot + 1, '.'))
+        return NULL;
+    return dot;
+}
+
+/* Every set the options put the point in. A key naming its set is absolute and
+ * wins; then `set` is absolute (used verbatim) and wins over `group`; each
+ * accepts a string or a list. Mirrors descriptor.rs::SetNaming::sets_of. */
 static char **sets_of(const cJSON *options, const tdot_set_naming_t *naming,
                       size_t *n) {
+    const char *dot = dotted_key_dot(options);
+    if (dot) {
+        const char *key = cJSON_GetObjectItemCaseSensitive(options, "key")->valuestring;
+        char **dotted = NULL;
+        *n = 0;
+        push_name(&dotted, n, strndup(key, (size_t)(dot - key)));
+        return dotted;
+    }
     char **sets = names_of(options, "set", n);
     if (*n)
         return sets; /* absolute */
@@ -212,11 +234,15 @@ char *tdot_param_invalid_keys(const tdot_config_t *cfg, const char *forced) {
 }
 
 /* The key a parameter has inside its sets: `meta.parameter.key` when it is a
- * string, else the point id. An unusable string is kept, so
- * tdot_param_invalid_keys reports it. Mirrors descriptor.rs::parameters_of. */
+ * string -- its part after the set, for a key naming its set -- else the point
+ * id. An unusable string is kept, so tdot_param_invalid_keys reports it.
+ * Mirrors descriptor.rs::parameters_of. */
 static const char *param_key(const tdot_point_t *point, const cJSON *options) {
     const cJSON *key = cJSON_GetObjectItemCaseSensitive(options, "key");
-    return cJSON_IsString(key) ? key->valuestring : point->id;
+    if (!cJSON_IsString(key))
+        return point->id;
+    const char *dot = dotted_key_dot(options);
+    return dot ? dot + 1 : key->valuestring;
 }
 
 char *tdot_param_invalid_keys_across(const tdot_config_t *const *cfgs,
@@ -281,6 +307,21 @@ char *tdot_param_key_conflicts_across(const tdot_config_t *const *cfgs,
                 size_t nsets = 0;
                 char **sets = sets_of(options, &naming, &nsets);
                 const char *key = param_key(pt, options);
+                /* A key names its set itself (`<set>.<key>`): no room for `set`,
+                 * and no room for `group` once it does. */
+                if (nsets && cJSON_IsString(cJSON_GetObjectItemCaseSensitive(options, "key"))) {
+                    if (cJSON_GetObjectItemCaseSensitive(options, "set"))
+                        append_fmt(&buf, &len,
+                                   "point '%s' on device '%s' combines \"set\" with "
+                                   "\"key\": write the key as '<set>.<key>'",
+                                   pt->id, dev->name);
+                    else if (dotted_key_dot(options) &&
+                             cJSON_GetObjectItemCaseSensitive(options, "group"))
+                        append_fmt(&buf, &len,
+                                   "point '%s' on device '%s' combines \"group\" with a "
+                                   "key that names its set",
+                                   pt->id, dev->name);
+                }
                 for (size_t k = 0; k < nsets; k++) {
                     cJSON *keys = cJSON_GetObjectItemCaseSensitive(seen, sets[k]);
                     if (!keys)

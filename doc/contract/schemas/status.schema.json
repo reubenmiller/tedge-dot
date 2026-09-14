@@ -117,7 +117,7 @@
               "point": { "type": "string", "minLength": 1 },
               "key": {
                 "type": "string",
-                "description": "As configured; a consumer ignores one that is not a plain identifier."
+                "description": "As configured: `<key>`, or `<set>.<key>` naming the set too. A consumer ignores a key it cannot use."
               },
               "set": { "description": "meta.parameter.set as configured: a set name or a list of them." },
               "group": { "description": "meta.parameter.group as configured: a group name or a list of them." }

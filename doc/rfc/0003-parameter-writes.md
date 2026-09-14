@@ -76,7 +76,8 @@ name was `<protocol>_parameters`, which collides across device types;
 `<device type, else protocol>_<group>_parameters` and is the current rule. Datatype →
 JSON-schema type and integer bounds are automatic;
 `meta.parameter.{title, description, min, max, enum, default, order}` enrich the schema. The keys of a set are the point ids, unless a point names its own with
-`meta.parameter.key` (so `firmwareVersion` can be `version` in a `firmware` set); keys must be plain
+`meta.parameter.key` (so `firmwareVersion` can be `version` in a `firmware` set:
+`key = "firmware.version"` names the set and the key at once); keys must be plain
 identifiers (`[A-Za-z0-9_]`; Cumulocity rejects dots in keys) and unique per set on a device —
 `describe` refuses both. The connector's retained capability descriptor lists the keyed points
 (`parameter_keys`), so the flows know a key before the point samples: after a mapper restart, and

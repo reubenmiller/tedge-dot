@@ -79,11 +79,14 @@ char *tdot_param_invalid_keys(const tdot_config_t *cfg, const char *forced);
 char *tdot_param_invalid_keys_across(const tdot_config_t *const *cfgs,
                                      size_t ncfgs, const char *forced);
 
-/* Parameter keys (`meta.parameter.key`, else the point id) shared by two points
- * of one device in one set, joined with ", " ("key 'name' of points 'a' and 'b'
- * in set 'firmware' on device 'plc1'"): a fragment holds one value per key.
- * NULL when there are none. Caller frees. Same text as the Rust build's
- * key_conflicts(). */
+/* Parameter keys (`meta.parameter.key`, else the point id) that cannot be
+ * rendered, joined with ", "; NULL when there are none. Caller frees. Same text
+ * as the Rust build's key_conflicts():
+ *  - two points of one device with the same key in one set ("key 'name' of
+ *    points 'a' and 'b' in set 'firmware' on device 'plc1'");
+ *  - a point combining `set` with `key` -- a key names its set itself
+ *    (`<set>.<key>`);
+ *  - a point combining `group` with a key that names its set. */
 char *tdot_param_key_conflicts(const tdot_config_t *cfg, const char *forced);
 char *tdot_param_key_conflicts_across(const tdot_config_t *const *cfgs,
                                       size_t ncfgs, const char *forced);

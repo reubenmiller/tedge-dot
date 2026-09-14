@@ -389,8 +389,7 @@ Capability Descriptor Declares The Parameter Keys
     Length Should Be    ${keys}    1
     Should Be Equal    ${keys}[0][device]    ${DEVICE}
     Should Be Equal    ${keys}[0][point]    cycle_count
-    Should Be Equal    ${keys}[0][key]    count
-    Should Be Equal    ${keys}[0][set]    counters
+    Should Be Equal    ${keys}[0][key]    counters.count
 
 Parameter Twin Publishes A Point Under Its Key
     [Documentation]    (flows) ot-parameter-state publishes the keyed point under its key, not its id.
