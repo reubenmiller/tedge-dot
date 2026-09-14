@@ -450,6 +450,11 @@ check_output "alarm: a retained alarm still standing after a restart is not rais
 check_output "alarm: a retained alarm whose condition went away is cleared by the first reading" ot-alarm "" \
   "$(lines "$PUMP_RETAINED" "$(ot_sample t1 pump_state '"RUNNING"' "$PUMP")")" \
   "$PUMP_CLEARED"
+# A first reading that settles nothing (a failed read) may come before the broker's replay: the
+# retained record must still count once it arrives.
+check_output "alarm: a reading that settles nothing before the retained replay does not re-raise" ot-alarm "" \
+  "$(lines "$(ot_bad t0 pump_state "$PUMP")" "$PUMP_RETAINED" "$(ot_sample t1 pump_state '"FAULT"' "$PUMP")")" \
+  ''
 check_output "alarm: a clear seen on the alarm topic is known, so a normal reading publishes nothing" ot-alarm "" \
   "$(lines '[te/device/opc1///a/pump_fault] ' "$(ot_sample t1 pump_state '"RUNNING"' "$PUMP")")" \
   ''

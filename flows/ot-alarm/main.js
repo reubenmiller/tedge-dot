@@ -210,8 +210,10 @@ function onSample(parts, sample, context) {
     const known = state[alarm.type];
     // Another point declared this type on the device first: it keeps the alarm.
     if (known && known.point !== undefined && !owns(known)) continue;
+    // Unknown means this flow has neither published nor pruned the alarm since it started (a
+    // pruned alarm is kept as cleared), so the retained record cannot be behind it yet.
     let was = knownState(known?.active);
-    if (!known) was = retainedState(context, topic);
+    if (was === undefined) was = retainedState(context, topic);
     let active = was;
     if (readable) {
       const holds = evaluate(alarm.when, sample.value, was);
