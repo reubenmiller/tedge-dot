@@ -24,8 +24,8 @@
 # The points map onto the nodes exposed by connectors/opcua/sim/server.py
 # (namespace index 2):
 #
-#   ns=2;s=Temperature   -> float64 21.5
-#   ns=2;s=Count         -> uint32  617001
+#   ns=2;s=Temperature   -> float64 21.5    (drifts +/- 2.5 with OPCUA_SIM_DYNAMIC=1, as in the demo stacks)
+#   ns=2;s=Count         -> uint32  617001  (increments every second with OPCUA_SIM_DYNAMIC=1)
 #   ns=2;s=Setpoint      -> int32   0      (read/write round-trip)
 #   ns=2;s=Running       -> bool    false  (read/write round-trip)
 #   ns=2;s=DoesNotExist  -> read returns a Bad status -> quality "bad"

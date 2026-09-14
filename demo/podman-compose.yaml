@@ -85,6 +85,9 @@ services:
     image: ${SIM_IMAGE_REPO:-ghcr.io/reubenmiller/tedge-dot}/opcua-sim:${SIM_IMAGE_TAG:-latest}
     environment:
       OPCUA_ENDPOINT_HOST: "0.0.0.0"
+      # Temperature/Count change every second, so subscribed points keep delivering
+      # (a subscription only notifies on change; static values leave the device silent).
+      OPCUA_SIM_DYNAMIC: "1"
     ports:
       - "4840:4840"
     restart: unless-stopped

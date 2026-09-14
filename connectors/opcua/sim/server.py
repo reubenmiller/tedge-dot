@@ -13,15 +13,26 @@ Reading ns=2;s=DoesNotExist yields a Bad status, exercising bad-quality handling
 
 The endpoint host is taken from OPCUA_ENDPOINT_HOST so the advertised endpoint URL
 matches the docker service name (avoids OPC-UA hostname-rewrite connection failures).
+
+OPCUA_SIM_DYNAMIC=1 makes Temperature drift (21.5 +/- 2.5 over a 5 minute cycle) and
+Count increment every second. The demo stacks enable it: a subscription only notifies
+on change, so with static values a push-delivered device goes silent after its first
+notification and the cloud marks it unavailable. Off by default because the e2e and
+smoke tests assert the static values above.
 """
 
 import asyncio
+import math
 import os
 
 from asyncua import Server, ua
 
 ENDPOINT_HOST = os.environ.get("OPCUA_ENDPOINT_HOST", "0.0.0.0")
+DYNAMIC = os.environ.get("OPCUA_SIM_DYNAMIC", "").strip().lower() in ("1", "true", "yes", "on")
 NS_URI = "urn:tedge:opcua-sim"
+
+TEMPERATURE = 21.5
+COUNT = 617001
 
 
 async def main():
@@ -36,13 +47,13 @@ async def main():
         ua.NodeId("Plc", idx), ua.QualifiedName("Plc", idx)
     )
 
-    await plc.add_variable(
-        ua.NodeId("Temperature", idx), ua.QualifiedName("Temperature", idx), 21.5
+    temperature = await plc.add_variable(
+        ua.NodeId("Temperature", idx), ua.QualifiedName("Temperature", idx), TEMPERATURE
     )
-    await plc.add_variable(
+    count = await plc.add_variable(
         ua.NodeId("Count", idx),
         ua.QualifiedName("Count", idx),
-        ua.Variant(617001, ua.VariantType.UInt32),
+        ua.Variant(COUNT, ua.VariantType.UInt32),
     )
     setpoint = await plc.add_variable(
         ua.NodeId("Setpoint", idx),
@@ -64,7 +75,8 @@ async def main():
     )
 
     print(
-        f"OPC-UA simulator listening on opc.tcp://{ENDPOINT_HOST}:4840/ (namespace idx={idx})",
+        f"OPC-UA simulator listening on opc.tcp://{ENDPOINT_HOST}:4840/ "
+        f"(namespace idx={idx}, dynamic={DYNAMIC})",
         flush=True,
     )
     async with server:
@@ -73,6 +85,12 @@ async def main():
             await asyncio.sleep(1)
             n += 1
             await ticks.write_value(ua.Variant(n, ua.VariantType.UInt32))
+            if DYNAMIC:
+                drift = 2.5 * math.sin(2 * math.pi * n / 300)
+                await temperature.write_value(round(TEMPERATURE + drift, 2))
+                await count.write_value(
+                    ua.Variant((COUNT + n) & 0xFFFFFFFF, ua.VariantType.UInt32)
+                )
 
 
 if __name__ == "__main__":
