@@ -289,13 +289,15 @@ function dropValue(context, device, point, key, sets, changed) {
 // key of every set; then it claims its key in each of its sets — before any value arrives, so an
 // edit of the fragment can already reach it. `sets` is false for a point that is not a parameter.
 function placePoint(context, device, point, sets, key, changed) {
-  const setsKey = `ot-parameter-set:${device}:${point}`;
-  const previous = recordedSets(context.mapper.get(setsKey));
-  context.mapper.set(setsKey, sets);
+  context.mapper.set(`ot-parameter-set:${device}:${point}`, sets);
   const current = sets || [];
-  const previousKey = keyOf(context, device, point);
-  const leaving = previousKey === key ? previous.filter((s) => !current.includes(s)) : previous;
-  dropValue(context, device, point, previousKey, leaving, changed);
+  // What the point leaves is worked out from what it HOLDS — its claims — not from its recorded
+  // sets: those can be unknown (a write-only point written without origin.set landed in the
+  // default set), and a key the point no longer has must leave every set it is in.
+  for (const [set, held] of claimsOf(context, device, point)) {
+    if (held === key && current.includes(set)) continue;
+    dropValue(context, device, point, held, [set], changed);
+  }
   context.mapper.set(`ot-parameter-key:${device}:${point}`, key);
   for (const set of current) claim(context, device, set, key, point);
 }
@@ -304,11 +306,20 @@ function placePoint(context, device, point, sets, key, changed) {
 // contract §7). Re-applied when the link status reports the device type, which names the sets.
 function applyDeclarations(context, device, protocol, changed) {
   const names = naming(context, device, protocol);
-  for (const entry of context.mapper.get(`ot-parameter-declared:${device}:${protocol}`) || []) {
-    const point = entry?.point;
-    const key = entry?.key;
-    if (typeof point !== "string" || !point || typeof key !== "string" || !isValidSet(key)) continue;
-    placePoint(context, device, point, setsOf({ set: entry.set, group: entry.group }, names), key, changed);
+  const entries = (context.mapper.get(`ot-parameter-declared:${device}:${protocol}`) || []).filter(
+    (e) => typeof e?.point === "string" && e.point && typeof e.key === "string" && isValidSet(e.key)
+  );
+  // Two passes: every point whose key changed lets go of what it holds first, so keys swapped
+  // between points by one reload are free by the time they are claimed again.
+  for (const { point, key } of entries) {
+    if (keyOf(context, device, point) === key) continue;
+    for (const [set, held] of claimsOf(context, device, point)) {
+      dropValue(context, device, point, held, [set], changed);
+    }
+  }
+  for (const entry of entries) {
+    const sets = setsOf({ set: entry.set, group: entry.group }, names);
+    placePoint(context, device, entry.point, sets, entry.key, changed);
   }
 }
 
@@ -379,9 +390,14 @@ function pruneRemovedPoints(context, device, changed) {
 // A point its descriptor no longer declares a key for goes back to its id: its key leaves every
 // set it was in, and its recorded sets are forgotten, so its next sample places it again — or, for
 // a write-only point, which never samples, the request that writes it, else the default set.
-function releaseDeclaration(context, device, point, changed) {
-  const sets = recordedSets(context.mapper.get(`ot-parameter-set:${device}:${point}`));
-  dropValue(context, device, point, keyOf(context, device, point), sets, changed);
+// Only while the point still has the key that was declared: a sample that already placed it again
+// is not undone.
+function releaseDeclaration(context, device, entry, changed) {
+  const point = entry.point;
+  if (keyOf(context, device, point) !== entry.key) return;
+  for (const [set, held] of claimsOf(context, device, point)) {
+    dropValue(context, device, point, held, [set], changed);
+  }
   forgetPoint(context, device, point);
 }
 
@@ -408,7 +424,7 @@ function onCapabilities(context, service, caps) {
     for (const entry of context.mapper.get(`ot-parameter-declared:${device}:${protocol}`) || []) {
       const point = entry?.point;
       if (typeof point !== "string" || !point || declared.some((e) => e.point === point)) continue;
-      releaseDeclaration(context, device, point, changed);
+      releaseDeclaration(context, device, entry, changed);
     }
     context.mapper.set(`ot-parameter-declared:${device}:${protocol}`, declared);
     applyDeclarations(context, device, protocol, changed);

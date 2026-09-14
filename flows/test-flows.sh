@@ -814,6 +814,29 @@ check_empty "parameter-state: a descriptor alone publishes nothing" ot-parameter
 check "parameter-state: a key the descriptor no longer declares goes back to the point id" ot-parameter-state \
   '[te/device/plc1/ot/modbus/status/link] {"status":"connected","type":"acme-boiler-v2","points":["valve_cmd"]}'$'\n'"[te/device/main/service/tedge-dot-modbus/ot/capabilities] $CAPSWO"$'\n''[te/device/plc1/ot/modbus/cmd/write-batch/ot--1] {"status":"successful","results":[{"point":"valve_cmd","status":"successful","value":true}]}'$'\n''[te/device/main/service/tedge-dot-modbus/ot/capabilities] {"protocol":"modbus"}'$'\n''[te/device/plc1/ot/modbus/cmd/write-batch/ot--2] {"status":"successful","results":[{"point":"valve_cmd","status":"successful","value":false}]}' \
   $'[te/device/plc1///twin/acme_boiler_v2_commissioning_parameters] \n[te/device/plc1///twin/acme_boiler_v2_control_parameters] {"valve_cmd":false}'
+# The reverse: a key ADDED to a write-only point that was written without origin.set (so it sits
+# in the default set under its id, with no recorded sets). What it leaves comes from what it holds,
+# so the default set is cleared and the next acknowledged write lands under the key.
+check "parameter-state: a key added to a write-only point clears its id from the default set" ot-parameter-state \
+  '[te/device/plc1/ot/modbus/status/link] {"status":"connected","type":"acme-boiler-v2","points":["valve_cmd"]}'$'\n''[te/device/plc1/ot/modbus/cmd/write/w1] {"status":"successful","point":"valve_cmd","value":true}'$'\n'"[te/device/main/service/tedge-dot-modbus/ot/capabilities] $CAPSWO"$'\n''[te/device/plc1/ot/modbus/cmd/write-batch/ot--2] {"status":"successful","results":[{"point":"valve_cmd","status":"successful","value":false}]}' \
+  $'[te/device/plc1///twin/acme_boiler_v2_control_parameters] \n[te/device/plc1///twin/acme_boiler_v2_commissioning_parameters] {"valve":false}'
+# A readable point released by the descriptor is placed again by its next sample, under its id.
+SKEYEDX='{"device":"opc1","type":"zephyr","protocol":"opcua","point":"setpointValue","mode":"typed","datatype":"int32","value":3,"value_repr":"number","quality":"good","addr":{},"access":"read_write","meta":{"parameter":{"key":"target"}}}'
+SUNKEYED='{"device":"opc1","type":"zephyr","protocol":"opcua","point":"setpointValue","mode":"typed","datatype":"int32","value":3,"value_repr":"number","quality":"good","addr":{},"access":"read_write"}'
+check "parameter-state: a released readable point is placed again by its next sample" ot-parameter-state \
+  '[te/device/opc1/ot/opcua/status/link] {"status":"connected","type":"zephyr","points":["setpointValue"]}'$'\n'"[te/device/main/service/tedge-dot/ot/capabilities] $CAPS"$'\n'"[te/device/opc1/ot/opcua/sample/setpointValue] $SKEYEDX"$'\n''[te/device/main/service/tedge-dot/ot/capabilities] {"protocol":"opcua"}'$'\n'"[te/device/opc1/ot/opcua/sample/setpointValue] $SUNKEYED" \
+  $'[te/device/opc1///twin/zephyr_control_parameters] \n[te/device/opc1///twin/zephyr_control_parameters] {"setpointValue":3}'
+# Keys swapped between two points by one reload: both are free before either is claimed again, so
+# an edit of a key reaches the point that has it now.
+CAPSAB='{"protocol":"opcua","parameter_keys":[{"device":"opc1","point":"a","key":"x"},{"device":"opc1","point":"b","key":"y"}]}'
+CAPSBA='{"protocol":"opcua","parameter_keys":[{"device":"opc1","point":"a","key":"y"},{"device":"opc1","point":"b","key":"x"}]}'
+SWAP="[te/device/opc1/ot/opcua/status/link] {\"status\":\"connected\",\"type\":\"zephyr\",\"points\":[\"a\",\"b\"]}
+[te/device/main/service/tedge-dot/ot/capabilities] $CAPSAB
+[te/device/main/service/tedge-dot/ot/capabilities] $CAPSBA
+[te/device/opc1///cmd/parameter_update/sw] {\"status\":\"init\",\"set\":\"zephyr_control_parameters\",\"parameters\":{\"x\":1,\"y\":2}}"
+check_multi "parameter key: keys swapped between points by one reload map to their new points" \
+  "ot-parameter-state ot-command-forward" "$SWAP" \
+  '"writes":[{"point":"b","value":1},{"point":"a","value":2}]'
 
 # --- ot-command-forward: parameter_update -> write-batch ---
 C8YOP='{"status":"init","operation":{"deviceId":"123","c8y_ParameterUpdate":{},"c8y_ParameterUpdate_acme_boiler_v2_control_parameters":{},"acme_boiler_v2_control_parameters":{"temp_u16":4242,"coil_rw":true}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}'
