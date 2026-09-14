@@ -63,7 +63,7 @@ check_empty() {
 flow_with_params() {
   local src="$1" overrides="$2" tmp key
   tmp="$(mktemp -d)"
-  cp "$src"/*.js "$src"/flow.toml "$tmp"/
+  cp "$src"/*.js "$src"/*.toml "$tmp"/
   cp "$src/params.toml.template" "$tmp/params.toml"
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
@@ -103,7 +103,7 @@ check_multi() {
   tmp="$(mktemp -d)"
   for f in $flows; do
     mkdir -p "$tmp/$f"
-    cp "$f"/*.js "$f"/flow.toml "$tmp/$f/"
+    cp "$f"/*.js "$f"/*.toml "$tmp/$f/"
     cp "$f/params.toml.template" "$tmp/$f/params.toml"
   done
   out="$(printf '%s\n' "$input" | tedge flows test --flows-dir "$tmp" 2>/dev/null)"
@@ -255,27 +255,239 @@ check_params "measurement: combine leaves an opted-out signal out" ot-measuremen
   '[te/device/plc1///m/modbus] {"modbus":{"temp_u16":17001},"time"' \
   --final-on-interval
 
-# --- ot-event (measurement -> event on value change) ---
-check "event: emits on first value" ot-event \
+# check_output <name> <flow-src> <params> <stdin> <expected-output>
+# Asserts the flow's WHOLE output, so a message published once too often, or not at all, fails —
+# which is what an alarm or event transition needs. <params> are overrides as for check_params
+# (empty = the flow's template). An empty retained message (an alarm clear) prints as "[topic] ".
+check_output() {
+  local name="$1" src="$2" params="$3" input="$4" expect="$5"
+  local tmp out
+  tmp="$(flow_with_params "$src" "$params")"
+  out="$(printf '%s\n' "$input" | tedge flows test --flows-dir "$tmp" 2>/dev/null)"
+  rm -rf "$tmp"
+  if [[ "$out" == "$expect" ]]; then
+    echo "ok   - $name"
+    pass=$((pass + 1))
+  else
+    echo "FAIL - $name"
+    echo "       expected: $expect"
+    echo "       got:      $out"
+    fail=$((fail + 1))
+  fi
+}
+
+# One message per argument, newline-separated.
+lines() { printf '%s\n' "$@"; }
+
+# ot_sample <ts> <point> <value (JSON)> <meta (JSON)>: a good opcua sample of device opc1.
+ot_sample() {
+  printf '[te/device/opc1/ot/opcua/sample/%s] {"ts":"%s","device":"opc1","protocol":"opcua","point":"%s","quality":"good","access":"read","value":%s,"meta":%s}' \
+    "$2" "$1" "$2" "$3" "$4"
+}
+# ot_bad <ts> <point> <meta (JSON)>: a failed read of the same point (no value).
+ot_bad() {
+  printf '[te/device/opc1/ot/opcua/sample/%s] {"ts":"%s","device":"opc1","protocol":"opcua","point":"%s","quality":"bad","error":"timeout","access":"read","meta":%s}' \
+    "$2" "$1" "$2" "$3"
+}
+
+# --- ot-event: measurement mode (one series from the params; off without one) ---
+# The template sets no series, which is what lets the flow ship active.
+check_empty "event: measurement mode is off without a series" ot-event \
+  '[te/device/plc1///m/modbus] {"modbus":{"value":5},"time":"2026-05-30T10:00:00.000Z"}'
+check_params "event: emits on first value" ot-event 'series = "value"' \
   '[te/device/plc1///m/modbus] {"modbus":{"value":5},"time":"2026-05-30T10:00:00.000Z"}' \
   '[te/device/plc1///e/ot_event] {"text":"OT value changed","time":"2026-05-30T10:00:00.000Z"}'
-check "event: opcua measurement raises (generic)" ot-event \
+check_params "event: opcua measurement raises (generic)" ot-event 'series = "value"' \
   '[te/device/opc1///m/opcua] {"opcua":{"value":9},"time":"2026-05-30T10:00:00.000Z"}' \
   '[te/device/opc1///e/ot_event]'
 # Same value twice -> a single event (the second is suppressed as unchanged).
-check "event: change-detection fires once for repeats" ot-event \
-  "$(printf '[te/device/plc1///m/modbus] {"modbus":{"value":5},"time":"t1"}\n[te/device/plc1///m/modbus] {"modbus":{"value":5},"time":"t2"}')" \
-  '"time":"t1"'
+check_output "event: change-detection fires once for repeats" ot-event 'series = "value"' \
+  "$(lines '[te/device/plc1///m/modbus] {"modbus":{"value":5},"time":"t1"}' \
+           '[te/device/plc1///m/modbus] {"modbus":{"value":5},"time":"t2"}')" \
+  '[te/device/plc1///e/ot_event] {"text":"OT value changed","time":"t1"}'
 
-# --- ot-alarm (measurement -> alarm, hysteresis; group taken from topic) ---
-check "alarm: modbus measurement raises" ot-alarm \
+# --- ot-event: per-signal events declared on the point (meta.event), from samples ---
+FW='{"measurement":false,"event":{"type":"firmware_changed","text":"Firmware changed to {value}"}}'
+check_output "event: a changed string raises an event; the first reading is only the baseline" ot-event "" \
+  "$(lines "$(ot_sample t1 version '"1.2.0"' "$FW")" \
+           "$(ot_sample t2 version '"1.2.0"' "$FW")" \
+           "$(ot_sample t3 version '"1.3.0"' "$FW")")" \
+  '[te/device/opc1///e/firmware_changed] {"text":"Firmware changed to 1.3.0","time":"t3"}'
+check_output "event: default type and text" ot-event "" \
+  "$(lines "$(ot_sample t1 count 1 '{"event":{}}')" "$(ot_sample t2 count 2 '{"event":{}}')")" \
+  '[te/device/opc1///e/count_event] {"text":"count changed to 2","time":"t2"}'
+STOP='{"event":{"type":"pump_stopped","when":{"equals":"STOPPED"}}}'
+check_output "event: with when, raised each time the condition starts to hold" ot-event "" \
+  "$(lines "$(ot_sample t1 pump '"STOPPED"' "$STOP")" \
+           "$(ot_sample t2 pump '"RUNNING"' "$STOP")" \
+           "$(ot_sample t3 pump '"STOPPED"' "$STOP")" \
+           "$(ot_sample t4 pump '"STOPPED"' "$STOP")" \
+           "$(ot_sample t5 pump '"RUNNING"' "$STOP")" \
+           "$(ot_sample t6 pump '"STOPPED"' "$STOP")")" \
+  "$(lines '[te/device/opc1///e/pump_stopped] {"text":"pump is STOPPED","time":"t3"}' \
+           '[te/device/opc1///e/pump_stopped] {"text":"pump is STOPPED","time":"t6"}')"
+HOT='{"event":{"type":"hot","when":{"above":70,"hysteresis":5}}}'
+check_output "event: hysteresis keeps a value hovering at the limit from raising again" ot-event "" \
+  "$(lines "$(ot_sample t1 temp 80 "$HOT")" \
+           "$(ot_sample t2 temp 67 "$HOT")" \
+           "$(ot_sample t3 temp 72 "$HOT")" \
+           "$(ot_sample t4 temp 64 "$HOT")" \
+           "$(ot_sample t5 temp 72 "$HOT")")" \
+  '[te/device/opc1///e/hot] {"text":"temp is 72","time":"t5"}'
+check_output "event: a failed read raises nothing and keeps the baseline" ot-event "" \
+  "$(lines "$(ot_sample t1 version '"1.2.0"' "$FW")" \
+           "$(ot_bad t2 version "$FW")" \
+           "$(ot_sample t3 version '"1.2.0"' "$FW")")" \
+  ''
+FWS='{"event":[{"type":"a+b"},{"type":"no_condition","when":{}},{"type":"firmware_changed"},{"type":"beta_firmware","when":{"equals":"2.0.0-beta"}}]}'
+check_output "event: several events on one point; unusable entries are skipped" ot-event "" \
+  "$(lines "$(ot_sample t1 version '"1.2.0"' "$FWS")" "$(ot_sample t2 version '"2.0.0-beta"' "$FWS")")" \
+  "$(lines '[te/device/opc1///e/firmware_changed] {"text":"version changed to 2.0.0-beta","time":"t2"}' \
+           '[te/device/opc1///e/beta_firmware] {"text":"version is 2.0.0-beta","time":"t2"}')"
+
+# --- ot-alarm: measurement mode (one series from the params, hysteresis; off without one) ---
+check_empty "alarm: measurement mode is off without a series" ot-alarm \
+  '[te/device/plc1///m/modbus] {"modbus":{"temp_u16":80},"time":"2026-05-30T10:00:00.000Z"}'
+check_params "alarm: modbus measurement raises" ot-alarm 'series = "temp_u16"' \
   '[te/device/plc1///m/modbus] {"modbus":{"temp_u16":80},"time":"2026-05-30T10:00:00.000Z"}' \
   '[te/device/plc1///a/ot_overrange] {"severity":"major"'
-check "alarm: opcua measurement raises (generic)" ot-alarm \
+check_params "alarm: opcua measurement raises (generic)" ot-alarm 'series = "temp_u16"' \
   '[te/device/opc1///m/opcua] {"opcua":{"temp_u16":80},"time":"2026-05-30T10:00:00.000Z"}' \
   '[te/device/opc1///a/ot_overrange] {"severity":"major"'
-check_empty "alarm: below threshold, never raised" ot-alarm \
-  '[te/device/plc1///m/modbus] {"modbus":{"temp_u16":60},"time":"2026-05-30T10:00:00.000Z"}'
+check_output "alarm: measurement alarm raised and cleared once each, held inside the band" ot-alarm 'series = "temp_u16"' \
+  "$(lines '[te/device/plc1///m/modbus] {"modbus":{"temp_u16":80},"time":"t1"}' \
+           '[te/device/plc1///m/modbus] {"modbus":{"temp_u16":81},"time":"t2"}' \
+           '[te/device/plc1///m/modbus] {"modbus":{"temp_u16":67},"time":"t3"}' \
+           '[te/device/plc1///m/modbus] {"modbus":{"temp_u16":60},"time":"t4"}' \
+           '[te/device/plc1///m/modbus] {"modbus":{"temp_u16":50},"time":"t5"}')" \
+  "$(lines '[te/device/plc1///a/ot_overrange] {"severity":"major","text":"OT value high (80 >= 70)","time":"t1"}' \
+           '[te/device/plc1///a/ot_overrange] ')"
+# The alarm is retained but the flow's memory is not: after a mapper restart the first reading
+# settles the alarm either way, so one whose value recovered in the meantime is cleared.
+check_output "alarm: below the clear threshold, a fresh state is settled with a clear" ot-alarm 'series = "temp_u16"' \
+  '[te/device/plc1///m/modbus] {"modbus":{"temp_u16":60},"time":"t1"}' \
+  '[te/device/plc1///a/ot_overrange] '
+
+# --- ot-alarm: per-signal alarms declared on the point (meta.alarm), from samples ---
+PUMP='{"measurement":false,"alarm":{"type":"pump_fault","severity":"critical","text":"{point} on {device} is {value}","when":{"equals":["FAULT","TRIP"]}}}'
+PUMP_RAISED='[te/device/opc1///a/pump_fault] {"severity":"critical","text":"pump_state on opc1 is FAULT","time":"t1"}'
+PUMP_CLEARED='[te/device/opc1///a/pump_fault] '
+check_output "alarm: a string condition raises a retained alarm, held while the value still matches" ot-alarm "" \
+  "$(lines "$(ot_sample t1 pump_state '"FAULT"' "$PUMP")" "$(ot_sample t2 pump_state '"TRIP"' "$PUMP")")" \
+  "$PUMP_RAISED"
+check_output "alarm: the value leaving the condition clears it, once" ot-alarm "" \
+  "$(lines "$(ot_sample t1 pump_state '"FAULT"' "$PUMP")" \
+           "$(ot_sample t2 pump_state '"RUNNING"' "$PUMP")" \
+           "$(ot_sample t3 pump_state '"RUNNING"' "$PUMP")")" \
+  "$(lines "$PUMP_RAISED" "$PUMP_CLEARED")"
+check_output "alarm: the first reading after a (re)start clears an alarm left standing" ot-alarm "" \
+  "$(ot_sample t1 pump_state '"RUNNING"' "$PUMP")" \
+  "$PUMP_CLEARED"
+check_output "alarm: a failed read changes no alarm" ot-alarm "" \
+  "$(lines "$(ot_bad t0 pump_state "$PUMP")" \
+           "$(ot_sample t1 pump_state '"FAULT"' "$PUMP")" \
+           "$(ot_bad t2 pump_state "$PUMP")")" \
+  "$PUMP_RAISED"
+TEMP='{"alarm":{"when":{"above":70,"hysteresis":5}}}'
+check_output "alarm: above with hysteresis holds inside the band and clears at its edge" ot-alarm "" \
+  "$(lines "$(ot_sample t1 temp 72 "$TEMP")" \
+           "$(ot_sample t2 temp 66 "$TEMP")" \
+           "$(ot_sample t3 temp 65 "$TEMP")" \
+           "$(ot_sample t4 temp 64 "$TEMP")")" \
+  "$(lines '[te/device/opc1///a/temp_alarm] {"severity":"major","text":"temp is 72","time":"t1"}' \
+           '[te/device/opc1///a/temp_alarm] ')"
+check_output "alarm: a reading inside the band settles nothing while the state is unknown" ot-alarm "" \
+  "$(ot_sample t1 temp 67 "$TEMP")" \
+  ''
+check_output "alarm: below, with the unit in the text" ot-alarm "" \
+  '[te/device/opc1/ot/opcua/sample/pressure] {"ts":"t1","point":"pressure","quality":"good","access":"read","value":0.5,"unit":"bar","meta":{"alarm":{"type":"low_pressure","severity":"minor","text":"Pressure low: {value} {unit}","when":{"below":1}}}}' \
+  '[te/device/opc1///a/low_pressure] {"severity":"minor","text":"Pressure low: 0.5 bar","time":"t1"}'
+check_output "alarm: without when, it stands while the value is true" ot-alarm "" \
+  "$(lines "$(ot_sample t1 door true '{"alarm":{}}')" "$(ot_sample t2 door false '{"alarm":{}}')")" \
+  "$(lines '[te/device/opc1///a/door_alarm] {"severity":"major","text":"door is true","time":"t1"}' \
+           '[te/device/opc1///a/door_alarm] ')"
+NOT_OK='{"alarm":{"type":"pump_state","when":{"not_equals":["RUNNING","IDLE"]}}}'
+check_output "alarm: not_equals raises for any value outside the list" ot-alarm "" \
+  "$(lines "$(ot_sample t1 pump '"IDLE"' "$NOT_OK")" "$(ot_sample t2 pump '"STOPPED"' "$NOT_OK")")" \
+  "$(lines '[te/device/opc1///a/pump_state] ' \
+           '[te/device/opc1///a/pump_state] {"severity":"major","text":"pump is STOPPED","time":"t2"}')"
+check_output "alarm: a number never matches a string" ot-alarm "" \
+  "$(ot_sample t1 mode '"1"' '{"alarm":{"when":{"equals":1}}}')" \
+  '[te/device/opc1///a/mode_alarm] '
+# A limit given as a string is not a number: that entry names no condition and is skipped.
+LEVELS='{"alarm":[{"type":"a/b"},{"type":"bad_severity","severity":"fatal"},{"type":"string_limit","when":{"above":"70"}},{"type":"high","when":{"above":80}},{"type":"high_high","severity":"critical","when":{"above":90}}]}'
+check_output "alarm: several alarms on one point; unusable entries are skipped" ot-alarm "" \
+  "$(ot_sample t1 temp 95 "$LEVELS")" \
+  "$(lines '[te/device/opc1///a/high] {"severity":"major","text":"temp is 95","time":"t1"}' \
+           '[te/device/opc1///a/high_high] {"severity":"critical","text":"temp is 95","time":"t1"}')"
+check_output "alarm: a point that stops declaring the alarm clears it" ot-alarm "" \
+  "$(lines "$(ot_sample t1 pump_state '"FAULT"' "$PUMP")" "$(ot_sample t2 pump_state '"FAULT"' '{"measurement":false}')")" \
+  "$(lines "$PUMP_RAISED" "$PUMP_CLEARED")"
+# A sample without access or meta comes from a connector outside the SDKs: it says nothing about
+# the point's declarations, so they are neither evaluated nor dropped.
+check_output "alarm: a sample that does not describe the point keeps its alarms" ot-alarm "" \
+  "$(lines "$(ot_sample t1 pump_state '"FAULT"' "$PUMP")" \
+           '[te/device/opc1/ot/opcua/sample/pump_state] {"ts":"t2","point":"pump_state","quality":"good","value":"RUNNING"}')" \
+  "$PUMP_RAISED"
+check_output "alarm: a point removed from the configuration clears its alarms" ot-alarm "" \
+  "$(lines "$(ot_sample t1 pump_state '"FAULT"' "$PUMP")" \
+           '[te/device/opc1/ot/opcua/status/link] {"status":"connected","points":["temp"]}')" \
+  "$(lines "$PUMP_RAISED" "$PUMP_CLEARED")"
+check_output "alarm: a link status without a point list, or of another protocol, clears nothing" ot-alarm "" \
+  "$(lines "$(ot_sample t1 pump_state '"FAULT"' "$PUMP")" \
+           '[te/device/opc1/ot/opcua/status/link] {"status":"connected"}' \
+           '[te/device/opc1/ot/modbus/status/link] {"status":"connected","points":[]}')" \
+  "$PUMP_RAISED"
+# After a restart the broker replays the retained alarms, which the companion flow (alarm-state)
+# records: a still-standing alarm is not raised again (Cumulocity would count a new occurrence),
+# and one whose condition went away is cleared.
+PUMP_RETAINED='[te/device/opc1///a/pump_fault] {"severity":"critical","text":"pump_state on opc1 is FAULT","time":"t0"}'
+check_output "alarm: a retained alarm still standing after a restart is not raised again" ot-alarm "" \
+  "$(lines "$PUMP_RETAINED" \
+           "$(ot_sample t1 pump_state '"FAULT"' "$PUMP")" \
+           "$(ot_sample t2 pump_state '"RUNNING"' "$PUMP")")" \
+  "$PUMP_CLEARED"
+check_output "alarm: a retained alarm whose condition went away is cleared by the first reading" ot-alarm "" \
+  "$(lines "$PUMP_RETAINED" "$(ot_sample t1 pump_state '"RUNNING"' "$PUMP")")" \
+  "$PUMP_CLEARED"
+# A first reading that settles nothing (a failed read) may come before the broker's replay: the
+# retained record must still count once it arrives.
+check_output "alarm: a reading that settles nothing before the retained replay does not re-raise" ot-alarm "" \
+  "$(lines "$(ot_bad t0 pump_state "$PUMP")" "$PUMP_RETAINED" "$(ot_sample t1 pump_state '"FAULT"' "$PUMP")")" \
+  ''
+check_output "alarm: a clear seen on the alarm topic is known, so a normal reading publishes nothing" ot-alarm "" \
+  "$(lines '[te/device/opc1///a/pump_fault] ' "$(ot_sample t1 pump_state '"RUNNING"' "$PUMP")")" \
+  ''
+check_output "alarm: a retained measurement alarm still standing is not raised again" ot-alarm 'series = "temp_u16"' \
+  "$(lines '[te/device/plc1///a/ot_overrange] {"severity":"major","text":"OT value high (80 >= 70)","time":"t0"}' \
+           '[te/device/plc1///m/modbus] {"modbus":{"temp_u16":85},"time":"t1"}')" \
+  ''
+# Raised by the low limit, a value back inside the range clears it even though it is inside the
+# high limit's hysteresis band.
+RANGE='{"alarm":{"type":"out_of_range","when":{"above":80,"below":20,"hysteresis":5}}}'
+check_output "alarm: above and below each keep their own hysteresis band" ot-alarm "" \
+  "$(lines "$(ot_sample t1 level 10 "$RANGE")" "$(ot_sample t2 level 78 "$RANGE")" "$(ot_sample t3 level 50 "$RANGE")")" \
+  "$(lines '[te/device/opc1///a/out_of_range] {"severity":"major","text":"level is 10","time":"t1"}' \
+           '[te/device/opc1///a/out_of_range] ')"
+check_output "alarm: when two points declare one type, the first keeps it" ot-alarm "" \
+  "$(lines "$(ot_sample t1 pump_state '"FAULT"' "$PUMP")" "$(ot_sample t2 other_pump '"RUNNING"' "$PUMP")")" \
+  "$PUMP_RAISED"
+# The type passes to the next point from the clear this flow published, not from the retained
+# record: that still says "standing" (the raise came back from the broker, the clear has not yet),
+# and trusting it would leave the alarm cleared while the new point's condition holds.
+PUMP_RAISED_BY_NEW='[te/device/opc1///a/pump_fault] {"severity":"critical","text":"new_pump on opc1 is FAULT","time":"t3"}'
+check_output "alarm: a renamed point takes the alarm over from the clear, not a stale retained raise" ot-alarm "" \
+  "$(lines "$(ot_sample t1 pump_state '"FAULT"' "$PUMP")" \
+           "$PUMP_RETAINED" \
+           '[te/device/opc1/ot/opcua/status/link] {"status":"connected","points":["new_pump"]}' \
+           "$(ot_sample t3 new_pump '"FAULT"' "$PUMP")")" \
+  "$(lines "$PUMP_RAISED" "$PUMP_CLEARED" "$PUMP_RAISED_BY_NEW")"
+check_output "alarm: a declaration moved to another point takes the alarm over from the clear" ot-alarm "" \
+  "$(lines "$(ot_sample t1 pump_state '"FAULT"' "$PUMP")" \
+           "$PUMP_RETAINED" \
+           "$(ot_sample t2 pump_state '"FAULT"' '{"measurement":false}')" \
+           "$(ot_sample t3 new_pump '"FAULT"' "$PUMP")")" \
+  "$(lines "$PUMP_RAISED" "$PUMP_CLEARED" "$PUMP_RAISED_BY_NEW")"
 
 # --- ot-registration (link -> child-device registration; type from the connector, else protocol) ---
 check "registration: declared device type becomes the entity type" ot-registration \

@@ -1,7 +1,20 @@
-# Measurement series to monitor: payload[group][series].
+# Per-signal alarms need no settings here: declare them on the connector point, next to the
+# signal's address. They work for numbers, booleans and strings alike, e.g.
+#   [[device.point]]
+#   id   = "pump_state"
+#   meta = { alarm = { type = "pump_fault", severity = "critical", when = { equals = "FAULT" } } }
+# or, for a number, with hysteresis:
+#   meta = { alarm = { type = "overheat", when = { above = 70, hysteresis = 5 } } }
+# main.js documents every key (type, severity, text, when: equals / not_equals / above / below /
+# hysteresis).
+#
+# The settings below are the measurement alarm: ONE measurement series watched with a threshold
+# and hysteresis. It is off while `series` is empty.
+
+# Measurement series to monitor: payload[group][series], e.g. series = "temp_u16". Empty = off.
 # Empty group -> taken from the m/<group> segment of the source topic (any protocol).
 group = ""
-series = "temp_u16"
+series = ""
 
 # Raise the alarm at or above `threshold`; clear only once the value drops below
 # (threshold - hysteresis). Hysteresis prevents rapid toggling near the limit.

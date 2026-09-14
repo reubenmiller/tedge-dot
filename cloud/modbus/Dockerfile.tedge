@@ -67,16 +67,15 @@ COPY packaging/tedge-dot.service /lib/systemd/system/tedge-dot.service
 RUN chmod 0755 /usr/bin/tedge-dot \
     && chmod 0644 /lib/systemd/system/tedge-dot.service \
     && install -d -o tedge -g tedge -m 0755 /etc/tedge/plugins/ot
-# The flows the package deploys: the core pipeline active in the c8y mapper, the opt-in
-# alarm/event flows parked in /usr/share for the operator. Same split as nfpm.yaml.
+# The flows the package deploys, all active in the c8y mapper. Same layout as nfpm.yaml.
 COPY flows/ot-measurement       /etc/tedge/mappers/c8y/flows/ot-measurement
 COPY flows/ot-registration      /etc/tedge/mappers/c8y/flows/ot-registration
 COPY flows/ot-command-forward   /etc/tedge/mappers/c8y/flows/ot-command-forward
 COPY flows/ot-command-result    /etc/tedge/mappers/c8y/flows/ot-command-result
 COPY flows/ot-parameter-state   /etc/tedge/mappers/c8y/flows/ot-parameter-state
-COPY flows/ot-alarm             /usr/share/tedge-dot/flows/ot-alarm
-COPY flows/ot-event             /usr/share/tedge-dot/flows/ot-event
-RUN chown -R tedge:tedge /etc/tedge/mappers/c8y/flows /usr/share/tedge-dot/flows
+COPY flows/ot-alarm             /etc/tedge/mappers/c8y/flows/ot-alarm
+COPY flows/ot-event             /etc/tedge/mappers/c8y/flows/ot-event
+RUN chown -R tedge:tedge /etc/tedge/mappers/c8y/flows
 
 # --- everything below is shared by both implementations ------------------------------------
 FROM connector-${IMPL}
@@ -101,12 +100,7 @@ RUN rm -f /etc/tedge/plugins/ot/canbus.toml /etc/tedge/plugins/ot/canopen.toml \
 # exactly as they reach a real device. So this suite also tests the packaging: if the package
 # stopped shipping a flow, registration/measurements/operations would fail here.
 #
-# What is left are the steps a real operator performs. First the opt-in flows, which ship inert
-# in /usr/share/tedge-dot/flows/ because they need a per-signal threshold or event type:
-RUN cp -Ra /usr/share/tedge-dot/flows/ot-alarm /usr/share/tedge-dot/flows/ot-event \
-        /etc/tedge/mappers/c8y/flows/
-
-# ...then the flow settings. Enable the c8y_ModbusDevice twin fragment on registration (the
+# What is left is the step a real operator performs: the flow settings. Enable the c8y_ModbusDevice twin fragment on registration (the
 # packaged params.toml.template next to it documents the rest).
 COPY cloud/modbus/params/ot-registration.params.toml /etc/tedge/mappers/c8y/flows/ot-registration/params.toml
 

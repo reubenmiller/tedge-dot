@@ -48,8 +48,6 @@
       tenant-side actor — a device cannot own or delete the UI-created managed object).
 * [ ] Conformance suite implementation (`doc/conformance/conformance-suite.md` is spec'd,
       harness not built yet).
-* [ ] Per-point `meta` support for the remaining flows: `ot-alarm` should read thresholds
-      from `sample.meta`/measurement context so alarm limits can live next to the signal.
 * [ ] File the upstream async-opcua issues (drafts ready in
       `doc/upstream/async-opcua-stranded-sample.md` and
       `doc/upstream/async-opcua-null-session-nonce.md`); drop `vendor/async-opcua-crypto`

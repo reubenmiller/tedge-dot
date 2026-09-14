@@ -31,10 +31,14 @@ export function onMessage(message, context) {
 
   const clearBelow = Number(threshold) - Number(hysteresis);
   const key = `${alarmTopic}:active`;
-  const active = context.script.get(key) ?? false;
+  // Unknown until the first reading after a (re)start: the alarm is retained but this state is
+  // not, so that reading settles it either way — an alarm whose value recovered while the mapper
+  // was down is cleared rather than left standing.
+  const stored = context.script.get(key);
+  const active = typeof stored === "boolean" ? stored : undefined;
 
   if (value >= Number(threshold)) {
-    if (active) return []; // already raised; no redundant publish
+    if (active === true) return []; // already raised; no redundant publish
     context.script.set(key, true);
     return [{
       topic: alarmTopic,
@@ -48,7 +52,7 @@ export function onMessage(message, context) {
   }
 
   if (value < clearBelow) {
-    if (!active) return []; // already clear
+    if (active === false) return []; // already clear
     context.script.set(key, false);
     return [{
       topic: alarmTopic,

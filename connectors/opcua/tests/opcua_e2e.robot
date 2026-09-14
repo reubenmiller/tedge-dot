@@ -359,8 +359,46 @@ Generic Write Command Is Bridged By The Flows
     ${result}=    Wait For Message Containing    te/device/${DEVICE}///cmd/ot_write/w-1    "status":"successful"    timeout=${FLOWS_TIMEOUT}
     ${twin}=    Wait For Message Containing    ${PARAM_TWIN}    "setpoint":17001    timeout=${FLOWS_TIMEOUT}
 
+Alarm And Event Declared On A Point Follow Its Value
+    [Documentation]    (flows) ot-alarm and ot-event act on the alarm and the event the running
+    ...                point declares in its meta (connector.toml), from its samples alone — no
+    ...                measurement or flow params involved. The alarm is retained: raised while
+    ...                the value is true, cleared with an empty retained message once it is false.
+    ...                The event is raised on a change of the value.
+    [Tags]    flows
+    ${alarm_topic}=    Set Variable    te/device/${DEVICE}///a/running_alarm
+    ${event_topic}=    Set Variable    te/device/${DEVICE}///e/running_changed
+    # Earlier tests leave running (and so this alarm) in either state, and the client keeps every
+    # message it has seen: start from false, and only ever look at the LATEST message of a topic.
+    Write Running    alarm-0    false
+    Wait Until Keyword Succeeds    ${FLOWS_TIMEOUT}s    1s    Latest Message Should Be Empty    ${alarm_topic}
+    Write Running    alarm-1    true
+    Wait Until Keyword Succeeds    ${FLOWS_TIMEOUT}s    1s    Latest Message Should Contain    ${alarm_topic}    "severity":"minor"
+    Latest Message Should Contain    ${alarm_topic}    running is true
+    Wait Until Keyword Succeeds    ${FLOWS_TIMEOUT}s    1s    Latest Message Should Contain    ${event_topic}    Running changed to true
+    Write Running    alarm-2    false
+    Wait Until Keyword Succeeds    ${FLOWS_TIMEOUT}s    1s    Latest Message Should Be Empty    ${alarm_topic}
+    Wait Until Keyword Succeeds    ${FLOWS_TIMEOUT}s    1s    Latest Message Should Contain    ${event_topic}    Running changed to false
+
 
 *** Keywords ***
+Write Running
+    [Documentation]    Write the running point through a connector write command and wait for it.
+    [Arguments]    ${id}    ${value}
+    Publish Message    ${CMD_PREFIX}/${id}    {"status":"init","point":"running","value":${value}}    retain=True
+    Wait For Message Containing    ${CMD_PREFIX}/${id}    "status":"successful"    timeout=${SAMPLE_TIMEOUT}
+
+Latest Message Should Contain
+    [Arguments]    ${topic}    ${substring}
+    ${payload}=    Get Message    ${topic}
+    Should Contain    ${payload}    ${substring}
+
+Latest Message Should Be Empty
+    [Documentation]    An empty payload is how a retained alarm is cleared.
+    [Arguments]    ${topic}
+    ${payload}=    Get Message    ${topic}
+    Should Be Empty    ${payload}
+
 Sample Should Be Good
     [Arguments]    ${payload}
     ${quality}=    Get Json Field    ${payload}    quality

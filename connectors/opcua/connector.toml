@@ -59,13 +59,16 @@ default_mode     = "typed"
   access   = "read_write"
   address  = { node_id = "ns=2;s=Setpoint" }
 
-  # Boolean used for the boolean write round-trip.
+  # Boolean used for the boolean write round-trip. It also declares an alarm (standing while the
+  # value is true: no `when`) and an event (on every change), which the ot-alarm / ot-event flows
+  # raise from its samples alone.
   [[device.point]]
   id       = "running"
   subscribe = false
   datatype = "bool"
   access   = "read_write"
   address  = { node_id = "ns=2;s=Running" }
+  meta     = { alarm = { type = "running_alarm", severity = "minor", text = "{point} is {value}" }, event = { type = "running_changed", text = "Running changed to {value}" } }
 
   # Reading this node returns a Bad status -> quality "bad".
   [[device.point]]

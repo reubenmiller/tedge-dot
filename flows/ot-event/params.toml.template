@@ -1,7 +1,19 @@
-# Measurement series to monitor for changes: payload[group][series].
-# Empty group -> taken from the m/<group> segment of the source topic (any protocol).
+# Per-signal events need no settings here: declare them on the connector point, next to the
+# signal's address. They work for numbers, booleans and strings alike, e.g. on every change:
+#   [[device.point]]
+#   id   = "version"
+#   meta = { event = { type = "firmware_changed", text = "Firmware changed to {value}" } }
+# or each time a condition starts to hold:
+#   meta = { event = { type = "pump_stopped", when = { equals = "STOPPED" } } }
+# main.js documents every key (type, text, when).
+#
+# The settings below are the measurement event: ONE measurement series, an event each time its
+# value changes. It is off while `series` is empty.
+
+# Measurement series to monitor for changes: payload[group][series], e.g. series = "value".
+# Empty = off. Empty group -> taken from the m/<group> segment of the source topic (any protocol).
 group = ""
-series = "value"
+series = ""
 
 # Event metadata. `event_type` becomes the topic suffix: te/device/<device>///e/<event_type>.
 # An event is raised every time the monitored value changes (mirrors the legacy eventmapping).
