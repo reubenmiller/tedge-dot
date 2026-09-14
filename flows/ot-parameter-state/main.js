@@ -4,7 +4,7 @@
 //   in:  te/device/<device>/ot/<protocol>/sample/<point>         (reads of parameter points)
 //        te/device/<device>/ot/<protocol>/cmd/write/<id>         (single write results)
 //        te/device/<device>/ot/<protocol>/cmd/write-batch/<id>   (batch write results)
-//        te/device/<device>/ot/<protocol>/status/link            (retained: the device type)
+//        te/device/<device>/ot/<protocol>/status/link            (retained: type and point list)
 //   out: te/device/<device>///twin/<set>                         (retained: { <point>: value })
 //
 // A *parameter* is a point whose `access` (echoed in every sample) permits writes, or that opts
@@ -32,14 +32,34 @@
 //   * read/write parameters are also updated optimistically from a successful write, then
 //     confirmed/corrected by the next sample.
 //
+// Where values go away — a fragment carrying a point the device no longer has is not just
+// untidy: Cumulocity sends the whole fragment back with an operator's edit, so one stale key
+// fails every parameter update of that set:
+//   * a point removed from the configuration: the link status lists the device's configured
+//     points (contract §8) and is republished whenever the configuration changes, so every
+//     point missing from it is dropped from each set, and a retained write result replayed for
+//     it afterwards is ignored. The lists are kept per protocol and a point stays while any of
+//     them has it; while one protocol serving the device has not listed its points (a
+//     connector that predates the list), nothing is dropped for that device at all;
+//   * a point that left a set (its group, its type or its access changed): its next sample names
+//     the sets it is in now, and it is dropped from the others;
+//   * a set left with no points is cleared (an empty retained message) rather than published
+//     as `{}`, which removes the fragment instead of keeping an empty one.
+//
 // Shared state (context.mapper):
 //   "ot-protocol:<device>"                -> protocol segment seen for the device
 //                                            (read by ot-command-forward)
 //   "ot-device-type:<device>"             -> declared device type, when the connector reports one
 //   "ot-parameter-values:<device>:<set>"  -> { <point>: value }
+//   "ot-parameter-sets:<device>"          -> [set names] this flow has put values in
 //   "ot-parameter-set:<device>:<point>"   -> [set names], or false for opted-out points
 //                                            (from the point's samples, else from the
 //                                            parameter_update request that wrote it)
+//   "ot-parameter-protocols:<device>"     -> [protocols] whose connector sampled or reported the
+//                                            device (a device name is only unique per connector)
+//   "ot-parameter-points:<device>:<protocol>" -> [point ids] that protocol's connector has
+//                                            configured on the device, from its link status;
+//                                            null while it has not listed them
 
 const decoder = new TextDecoder();
 
@@ -137,6 +157,13 @@ function setsFromSample(sample, names) {
   return [setFor(names)]; // `true`, or any other scalar
 }
 
+// The recorded sets of a point as a list. Tolerates the pre-list shape (a bare set name) in case
+// state outlives a flow upgrade; `false` (opted out) and unknown are both no sets.
+function recordedSets(known) {
+  if (typeof known === "string") return [known];
+  return Array.isArray(known) ? known : [];
+}
+
 // The points a write/write-batch message names — the `writes` of a request, the `results` of a
 // terminal transition, or the single `point` of a `write` in any of its states.
 function writtenPoints(verb, payload) {
@@ -148,10 +175,9 @@ function writtenPoints(verb, payload) {
   return [];
 }
 
-// Apply {point: value} updates for a device; returns the twin messages of the changed sets.
+// Apply {point: value} updates for a device, adding every set it changed to `changed`.
 // A point in several sets updates each of them, so the groups never disagree about its value.
-function applyValues(context, device, updates, resolveSets) {
-  const changed = new Set();
+function applyValues(context, device, updates, resolveSets, changed) {
   for (const [point, value] of Object.entries(updates)) {
     if (value === undefined) continue;
     const sets = resolveSets(point);
@@ -163,13 +189,66 @@ function applyValues(context, device, updates, resolveSets) {
       values[point] = value;
       context.mapper.set(key, values);
       changed.add(set);
+      const known = context.mapper.get(`ot-parameter-sets:${device}`) || [];
+      if (!known.includes(set)) context.mapper.set(`ot-parameter-sets:${device}`, [...known, set]);
     }
   }
-  return [...changed].map((set) => ({
-    topic: `te/device/${device}///twin/${set}`,
-    payload: JSON.stringify(context.mapper.get(`ot-parameter-values:${device}:${set}`) || {}),
-    mqtt: { retain: true, qos: 1 },
-  }));
+}
+
+// Remove `point` from each of `sets` that holds it, adding every set it changed to `changed`.
+function dropValue(context, device, point, sets, changed) {
+  for (const set of sets) {
+    const key = `ot-parameter-values:${device}:${set}`;
+    const values = context.mapper.get(key);
+    if (!values || !Object.prototype.hasOwnProperty.call(values, point)) continue;
+    delete values[point];
+    context.mapper.set(key, values);
+    changed.add(set);
+  }
+}
+
+// The twin messages of the changed sets. A set with nothing left in it is cleared with an empty
+// retained message, which removes the fragment, rather than published as an empty object.
+function twinMessages(context, device, changed) {
+  return [...changed].map((set) => {
+    const values = context.mapper.get(`ot-parameter-values:${device}:${set}`) || {};
+    return {
+      topic: `te/device/${device}///twin/${set}`,
+      payload: Object.keys(values).length ? JSON.stringify(values) : "",
+      mqtt: { retain: true, qos: 1 },
+    };
+  });
+}
+
+// Every point configured on the device, across the protocols serving it — or null while one of
+// them has not listed its points, since a point of that connector cannot be told from a removed
+// one.
+function configuredPoints(context, device) {
+  const configured = [];
+  for (const protocol of context.mapper.get(`ot-parameter-protocols:${device}`) || []) {
+    const points = context.mapper.get(`ot-parameter-points:${device}:${protocol}`);
+    if (!Array.isArray(points)) return null;
+    configured.push(...points);
+  }
+  return configured;
+}
+
+// Drop every point the device no longer has from every set, and forget the sets recorded for
+// it, so a point later added back under the same id starts from its own samples again.
+function pruneRemovedPoints(context, device) {
+  const listed = configuredPoints(context, device);
+  if (!listed) return [];
+  const configured = new Set(listed); // a device can have thousands of points
+  const changed = new Set();
+  for (const set of context.mapper.get(`ot-parameter-sets:${device}`) || []) {
+    const values = context.mapper.get(`ot-parameter-values:${device}:${set}`) || {};
+    for (const point of Object.keys(values)) {
+      if (configured.has(point)) continue;
+      dropValue(context, device, point, [set], changed);
+      context.mapper.set(`ot-parameter-set:${device}:${point}`, null);
+    }
+  }
+  return twinMessages(context, device, changed);
 }
 
 export function onMessage(message, context) {
@@ -185,6 +264,14 @@ export function onMessage(message, context) {
   }
   if (!payload || typeof payload !== "object") return [];
   context.mapper.set(`ot-protocol:${device}`, protocol);
+  // Only from what a connector publishes on its own: a command request can name any protocol,
+  // and one no connector serves would never list its points and so stop all pruning.
+  if (kind === "sample" || kind === "status") {
+    const protocols = context.mapper.get(`ot-parameter-protocols:${device}`) || [];
+    if (!protocols.includes(protocol)) {
+      context.mapper.set(`ot-parameter-protocols:${device}`, [...protocols, protocol]);
+    }
+  }
   // The device type qualifies every set name below. It arrives on the retained link status
   // (before any sample) and on every sample, so a device with only write-only points — which
   // never samples — still gets its sets named after its type.
@@ -200,16 +287,42 @@ export function onMessage(message, context) {
     // runtime has no configuration entry for.
     context.mapper.set(`ot-device-type:${device}`, "");
   }
-  if (kind === "status") return [];
+  if (kind === "status") {
+    // The configured points, for the same reason: republished with every configuration
+    // change, so a point missing from the list has been removed. A status without a list is
+    // from a connector that does not report one, which says nothing about any point — so
+    // nothing is dropped, and nothing is refused until a list arrives.
+    // Kept per protocol: a device name is unique only within one connector, so a device served
+    // by two protocols has two lists, and a point stays while either of them has it.
+    const listed = Array.isArray(payload.points)
+      ? payload.points.filter((p) => typeof p === "string")
+      : null;
+    context.mapper.set(`ot-parameter-points:${device}:${protocol}`, listed);
+    return pruneRemovedPoints(context, device);
+  }
   const names = naming(context, device, protocol);
 
   if (kind === "sample") {
     const point = payload.point || parts[6];
     // Remember the point's sets (or opt-out) so write results can be attributed later.
+    const key = `ot-parameter-set:${device}:${point}`;
+    const previous = recordedSets(context.mapper.get(key));
     const sets = setsFromSample(payload, names);
-    context.mapper.set(`ot-parameter-set:${device}:${point}`, sets);
-    if (!sets || payload.quality !== "good" || payload.value === undefined) return [];
-    return applyValues(context, device, { [point]: payload.value }, () => sets);
+    // A sample is the authority on where its point belongs now: it leaves every set it was in
+    // before and is not in any more (its group, type or access changed), whatever the quality.
+    // Only a sample that describes the point, though: one without `access` or `meta` (from a
+    // connector outside the SDKs, which always echo `access`) says nothing about its sets, so
+    // neither the recorded sets nor the values are touched.
+    const changed = new Set();
+    if (payload.access !== undefined || payload.meta !== undefined) {
+      context.mapper.set(key, sets);
+      const current = sets || [];
+      dropValue(context, device, point, previous.filter((s) => !current.includes(s)), changed);
+    }
+    if (sets && payload.quality === "good" && payload.value !== undefined) {
+      applyValues(context, device, { [point]: payload.value }, () => sets, changed);
+    }
+    return twinMessages(context, device, changed);
   }
 
   // A parameter_update names the set it edited (origin.set), and for a write-only point —
@@ -245,15 +358,23 @@ export function onMessage(message, context) {
         }
       }
     }
+    // A write result is retained, so a mapper restart replays the last one of every command —
+    // including writes to a point removed since. Once the connector has listed its points,
+    // only those are taken; the others would put the removed point back on the twin.
+    // Samples need no such check: the connector only samples the points it has, in the order
+    // it publishes the link status that lists them.
+    const configured = context.mapper.get(`ot-parameter-points:${device}:${protocol}`);
     // A point that was written is writable by definition: the sets learned from its samples or
     // from the request that wrote it, else the default one.
     const resolveSets = (point) => {
+      if (Array.isArray(configured) && !configured.includes(point)) return false;
       const known = context.mapper.get(`ot-parameter-set:${device}:${point}`);
       if (known === undefined || known === null) return [setFor(names)];
-      // Tolerate the pre-list shape (a bare set name) in case state outlives a flow upgrade.
-      return typeof known === "string" ? [known] : known;
+      return known === false ? false : recordedSets(known);
     };
-    return applyValues(context, device, updates, resolveSets);
+    const changed = new Set();
+    applyValues(context, device, updates, resolveSets, changed);
+    return twinMessages(context, device, changed);
   }
   return [];
 }

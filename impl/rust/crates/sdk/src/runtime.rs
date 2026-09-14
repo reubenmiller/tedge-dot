@@ -222,6 +222,14 @@ impl LinkTracker {
     }
 }
 
+/// Largest MQTT packet the connector sends or accepts. rumqttc's default of 10 KiB is smaller
+/// than the retained state messages legitimately get: the link status lists every point of its
+/// device (§8), which passes 10 KiB at a few hundred points, and the capability descriptor
+/// carries the point labels (§7). An oversized publish is not an error where it is made — the
+/// event loop drops the connection instead, and the republish on reconnect fails the same way,
+/// so the connector would never stay connected. The C runtime (libmosquitto) has no such limit.
+const MQTT_MAX_PACKET_SIZE: usize = 1024 * 1024;
+
 /// Reconnect backoff bounds: first retry after one second, doubling to a one-minute cap.
 const RECONNECT_INITIAL: Duration = Duration::from_secs(1);
 const RECONNECT_MAX: Duration = Duration::from_secs(60);
@@ -486,6 +494,7 @@ pub async fn run_until_reloadable(
         config.mqtt.port,
     );
     opts.set_keep_alive(Duration::from_secs(30));
+    opts.set_max_packet_size(MQTT_MAX_PACKET_SIZE, MQTT_MAX_PACKET_SIZE);
     let down_payload = serde_json::json!({
         "status": "down",
         "time": format_rfc3339_ms(OffsetDateTime::now_utc())
@@ -1658,7 +1667,15 @@ async fn commit_config(
     let _ = bounded(limits, "disconnect", connector.disconnect()).await;
     match bounded(limits, "connect", connector.connect()).await {
         Ok(reports) => links.publish_reports(client, &reports, config).await?,
-        Err(e) => warn!("reconnect after reconfigure failed: {e}"),
+        Err(e) => {
+            warn!("reconnect after reconfigure failed: {e}");
+            // The retained link status must still describe the configuration now running — its
+            // type and point list (§8) — and nothing else republishes it until a device changes
+            // status: otherwise the twin keeps the points this reload removed. The recorded
+            // statuses are republished as they are, with a fresh `since`; a device the failed
+            // connect left unreachable is corrected by its next poll.
+            links.republish(client, config).await?;
+        }
     }
     Ok(())
 }
@@ -2023,6 +2040,18 @@ fn link_payload(
             "type".into(),
             serde_json::Value::String(device_type.to_string()),
         );
+    }
+    // Every point configured on the device, so a consumer keeping per-point state (the
+    // parameter twin) can drop the ones a reload removed — a write-only point never samples, so
+    // the absence of samples cannot tell it. Omitted for a device the configuration does not
+    // know, which is "not listed" rather than "no points".
+    if let Some(device) = config.devices.iter().find(|d| d.name == report.device) {
+        let points = device
+            .points
+            .iter()
+            .map(|p| serde_json::Value::String(p.id.clone()))
+            .collect();
+        obj.insert("points".into(), serde_json::Value::Array(points));
     }
     if report.status == LinkStatus::Connected {
         obj.insert("since".into(), serde_json::Value::String(format_rfc3339_ms(now)));
@@ -2552,6 +2581,78 @@ protocol_address = { host = "127.0.0.1" }
             link_payload(&new_device, &added, now)["type"],
             serde_json::json!("acme-boiler-v2")
         );
+    }
+
+    /// The retained link status lists the device's configured points, from the configuration
+    /// running *now*, so a reload that removes a parameter lets the twin flow drop it. The
+    /// regression this pins: the flow kept a removed writable point in its twin fragment, and
+    /// Cumulocity sends the whole fragment back with every edit, so every update of that
+    /// parameter set failed on the point the connector no longer had.
+    #[test]
+    fn link_payload_lists_the_points_of_the_live_config() {
+        const CONFIG: &str = r#"
+[connector]
+protocol = "modbus"
+
+[[device]]
+name = "plc-1"
+protocol_address = { host = "127.0.0.1" }
+
+  [[device.point]]
+  id = "setpoint"
+  datatype = "uint16"
+  access = "read_write"
+  address = { table = "holding", address = 1, count = 1 }
+
+  [[device.point]]
+  id = "temp"
+  datatype = "float32"
+  address = { table = "holding", address = 7, count = 2 }
+"#;
+        let mut config: ConnectorConfig = toml::from_str(CONFIG).unwrap();
+        let report = LinkReport::new("plc-1".to_string(), LinkStatus::Connected, None);
+        let now = OffsetDateTime::UNIX_EPOCH;
+
+        // Every point, readable or not, in configuration order.
+        assert_eq!(
+            link_payload(&report, &config, now)["points"],
+            serde_json::json!(["setpoint", "temp"])
+        );
+
+        // What a reload does: the list follows the configuration it installed.
+        config.devices[0].points.remove(0);
+        assert_eq!(
+            link_payload(&report, &config, now)["points"],
+            serde_json::json!(["temp"])
+        );
+
+        // A device the configuration does not know is "not listed", never "no points": a
+        // consumer would otherwise drop everything it holds for it.
+        let unknown = LinkReport::new("plc-9".to_string(), LinkStatus::Connected, None);
+        assert!(link_payload(&unknown, &config, now).get("points").is_none());
+    }
+
+    /// The point list makes the link status grow with its device. rumqttc refuses a publish
+    /// over its 10 KiB default by dropping the connection, so a device of a few hundred points
+    /// would have kept the whole connector disconnected: the limit is raised, and this pins that
+    /// a large device still fits it.
+    #[test]
+    fn a_large_device_link_status_fits_the_mqtt_packet_limit() {
+        let mut toml = String::from(
+            "[connector]\nprotocol = \"modbus\"\n\n[[device]]\nname = \"plc-1\"\nprotocol_address = { host = \"127.0.0.1\" }\n",
+        );
+        for i in 0..2000 {
+            toml.push_str(&format!(
+                "[[device.point]]\nid = \"holding_register_{i:04}_value\"\ndatatype = \"uint16\"\naddress = {{ table = \"holding\", address = {i}, count = 1 }}\n"
+            ));
+        }
+        let config: ConnectorConfig = toml::from_str(&toml).unwrap();
+        let report = LinkReport::new("plc-1".to_string(), LinkStatus::Connected, None);
+        let size = link_payload(&report, &config, OffsetDateTime::UNIX_EPOCH)
+            .to_string()
+            .len();
+        assert!(size > 10 * 1024, "the case must exceed rumqttc's default: {size}");
+        assert!(size < MQTT_MAX_PACKET_SIZE, "{size} bytes");
     }
 
     #[test]

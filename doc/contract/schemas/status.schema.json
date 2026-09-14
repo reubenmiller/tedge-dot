@@ -32,6 +32,11 @@
           "minLength": 1,
           "description": "The device's declared type (§3.1), when it has one — so the registration flow can use it as the thin-edge entity type, and a consumer can name the device's parameter sets before any sample arrives."
         },
+        "points": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "The id of every point configured on the device, in configuration order. Republished with the status whenever the configuration changes, so a consumer keeping state per point (the parameter twin) can tell a point that was removed from one that is merely not sampled — a write-only point never is."
+        },
         "since": { "type": "string", "format": "date-time" },
         "reason": { "type": "string" },
         "info": {

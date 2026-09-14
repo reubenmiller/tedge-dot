@@ -435,6 +435,63 @@ check "parameter-state: an unusable meta.parameter.set falls back to the derived
   "[te/device/plc1/ot/modbus/sample/p] $SBADSET" \
   '[te/device/plc1///twin/modbus_control_parameters] {"p":1}'
 
+# A point removed from the configuration must leave the twin. Cumulocity sends the WHOLE fragment
+# back with an operator's edit, so one stale key fails every update of that set. The link status
+# lists the configured points and is republished with every configuration change (§8).
+SOLD='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"old_rw","mode":"typed","datatype":"uint16","value":5,"value_repr":"number","raw":"0005","quality":"good","addr":{},"access":"read_write"}'
+SNEW='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"new_rw","mode":"typed","datatype":"uint16","value":3,"value_repr":"number","raw":"0003","quality":"good","addr":{},"access":"read_write"}'
+# The reported bug: old_rw removed and new_rw added by one reload.
+check_absent "parameter-state: a point removed on reload is not published with the one added" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/old_rw] $SOLD"$'\n''[te/device/plc1/ot/modbus/status/link] {"status":"connected","points":["new_rw"]}'$'\n'"[te/device/plc1/ot/modbus/sample/new_rw] $SNEW" \
+  '[te/device/plc1///twin/modbus_control_parameters] {"new_rw":3}' \
+  '{"old_rw":5,"new_rw":3}'
+check "parameter-state: the link status drops a removed point and keeps the rest" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/old_rw] $SOLD"$'\n'"[te/device/plc1/ot/modbus/sample/temp_u16] $ST"$'\n''[te/device/plc1/ot/modbus/status/link] {"status":"connected","points":["temp_u16","level_f32"]}' \
+  '[te/device/plc1///twin/modbus_control_parameters] {"temp_u16":17001}'
+# An empty retained message removes the fragment; `{}` would keep an empty one in the cloud.
+check "parameter-state: a set left with no points is cleared, not published empty" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/old_rw] $SOLD"$'\n''[te/device/plc1/ot/modbus/status/link] {"status":"connected","points":["level_f32"]}'$'\n''[te/device/plc1/ot/modbus/status/link] {"status":"connected","points":["level_f32"]}' \
+  '[te/device/plc1///twin/modbus_control_parameters] '
+check_absent "parameter-state: ...exactly once, and never as an empty object" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/old_rw] $SOLD"$'\n''[te/device/plc1/ot/modbus/status/link] {"status":"connected","points":["level_f32"]}'$'\n''[te/device/plc1/ot/modbus/status/link] {"status":"connected","points":["level_f32"]}' \
+  '{"old_rw":5}' \
+  '{}'
+# A mapper restart replays the retained result of every command, including a write to a point
+# removed since — which would put it straight back.
+check_empty "parameter-state: a replayed write to a removed write-only point is ignored" ot-parameter-state \
+  '[te/device/plc1/ot/modbus/status/link] {"status":"connected","points":["temp_u16"]}'$'\n''[te/device/plc1/ot/modbus/cmd/write-batch/ot--1] {"status":"successful","results":[{"point":"valve_cmd","status":"successful","value":true}]}'
+check "parameter-state: a write to a listed write-only point is still taken" ot-parameter-state \
+  '[te/device/plc1/ot/modbus/status/link] {"status":"connected","points":["valve_cmd"]}'$'\n''[te/device/plc1/ot/modbus/cmd/write-batch/ot--1] {"status":"successful","results":[{"point":"valve_cmd","status":"successful","value":true}]}' \
+  '[te/device/plc1///twin/modbus_control_parameters] {"valve_cmd":true}'
+# A connector that does not list its points says nothing about them: nothing is dropped or refused.
+check "parameter-state: a link status without a point list drops nothing" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/temp_u16] $ST"$'\n''[te/device/plc1/ot/modbus/status/link] {"status":"connected"}'$'\n''[te/device/plc1/ot/modbus/cmd/write-batch/ot--1] {"status":"successful","results":[{"point":"valve_cmd","status":"successful","value":true}]}' \
+  '[te/device/plc1///twin/modbus_control_parameters] {"temp_u16":17001,"valve_cmd":true}'
+# A point that stays configured but leaves a set — another group, or no longer writable — is
+# dropped from that set by its next sample, which names the sets it is in now.
+SREGROUPED='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","type":"acme-boiler-v2","protocol":"modbus","point":"temp_u16","mode":"typed","datatype":"uint16","value":17001,"value_repr":"number","raw":"4269","quality":"good","addr":{},"access":"read_write","meta":{"parameter":{"group":"commissioning"}}}'
+check "parameter-state: a point moved to another group leaves the set it was in" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/temp_u16] $STYPED"$'\n'"[te/device/plc1/ot/modbus/sample/temp_u16] $SREGROUPED" \
+  $'[te/device/plc1///twin/acme_boiler_v2_control_parameters] \n[te/device/plc1///twin/acme_boiler_v2_commissioning_parameters] {"temp_u16":17001}'
+# A device name is unique only within one connector: one served by two protocols gets a point list
+# from each, and neither may drop the other's points.
+SMB='{"device":"plc1","protocol":"modbus","point":"mb_rw","mode":"typed","datatype":"uint16","value":1,"value_repr":"number","raw":"0001","quality":"good","addr":{},"access":"read_write"}'
+SUA='{"device":"plc1","protocol":"opcua","point":"ua_rw","mode":"typed","datatype":"uint16","value":2,"value_repr":"number","raw":"0002","quality":"good","addr":{},"access":"read_write"}'
+check_absent "parameter-state: two protocols on one device keep each other's points" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/mb_rw] $SMB"$'\n'"[te/device/plc1/ot/opcua/sample/ua_rw] $SUA"$'\n''[te/device/plc1/ot/modbus/status/link] {"status":"connected","points":["mb_rw"]}'$'\n''[te/device/plc1/ot/opcua/status/link] {"status":"connected","points":["ua_rw"]}'$'\n''[te/device/plc1/ot/modbus/cmd/write/w1] {"status":"successful","point":"mb_rw","value":7}' \
+  '[te/device/plc1///twin/modbus_control_parameters] {"mb_rw":7}' \
+  $'] \n'
+# A sample without `access` or `meta` (a connector outside the SDKs) says nothing about the sets.
+SNOACCESS='{"device":"plc1","protocol":"modbus","point":"temp_u16","mode":"typed","datatype":"uint16","quality":"bad","error":"timeout","addr":{}}'
+check_absent "parameter-state: a sample that does not describe its point moves it nowhere" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/temp_u16] $ST"$'\n'"[te/device/plc1/ot/modbus/sample/temp_u16] $SNOACCESS"$'\n''[te/device/plc1/ot/modbus/cmd/write/w1] {"status":"successful","point":"temp_u16","value":4242}' \
+  '[te/device/plc1///twin/modbus_control_parameters] {"temp_u16":4242}' \
+  $'] \n'
+SREADONLY='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"old_rw","mode":"typed","datatype":"uint16","value":5,"value_repr":"number","raw":"0005","quality":"good","addr":{},"access":"read"}'
+check "parameter-state: a point made read-only leaves the twin" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/temp_u16] $ST"$'\n'"[te/device/plc1/ot/modbus/sample/old_rw] $SOLD"$'\n'"[te/device/plc1/ot/modbus/sample/old_rw] $SREADONLY" \
+  '[te/device/plc1///twin/modbus_control_parameters] {"temp_u16":17001}'
+
 # --- ot-command-forward: parameter_update -> write-batch ---
 C8YOP='{"status":"init","operation":{"deviceId":"123","c8y_ParameterUpdate":{},"c8y_ParameterUpdate_acme_boiler_v2_control_parameters":{},"acme_boiler_v2_control_parameters":{"temp_u16":4242,"coil_rw":true}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}'
 check "command-forward: c8y parameter update -> one write-batch with origin + mapper metadata" ot-command-forward \
