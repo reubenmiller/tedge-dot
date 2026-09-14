@@ -280,6 +280,11 @@ Protocol stacks tend to hide exactly this: async-opcua, for one, re-establishes 
 only a few times and then ends its event loop without telling its caller, and does not notice a
 server that stops answering at all.
 
+The bound cancels a module call that outlives it, and cancelling drops the call's future where it
+stands. A task the module spawned inside that call is not cancelled with it: a dropped
+`JoinHandle` detaches its task. Tie such tasks to a handle that aborts them on drop, or a
+reconnect cut short leaves, say, a protocol session running that nothing will ever close.
+
 ### 4.1 CLI: direct read/write (no broker)
 
 The binary also exposes `read` and `write` subcommands that drive the **same** `Connector` code

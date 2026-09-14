@@ -70,7 +70,25 @@ const CLOSE_SESSION_TIMEOUT: Duration = Duration::from_secs(2);
 struct SessionHandle {
     session: Arc<Session>,
     health: Arc<Mutex<SessionHealth>>,
-    event_loop: tokio::task::JoinHandle<()>,
+    event_loop: AbortOnDrop,
+}
+
+/// A spawned task aborted when its handle is dropped. The runtime cancels a module call that
+/// outlives `operation_timeout`; a plain `JoinHandle` dropped with the cancelled future would
+/// leave the session's event loop running, free to activate an orphaned session on a server
+/// that answers later and to keep it alive there.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl AbortOnDrop {
+    fn abort(&self) {
+        self.0.abort();
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// What a session's event loop last reported, read back by `check_subscription`.
@@ -486,8 +504,10 @@ impl Connector for OpcuaConnector {
             )));
         }
         // A server answers a publish request at least once per keep-alive window (the revised
-        // one); allow one request timeout on top for that answer to arrive.
+        // one). On top, allow one publishing interval for the client's own request schedule and
+        // one request timeout for the answer to arrive.
         let window = publishing_interval.saturating_mul(keep_alive_count.max(1))
+            + publishing_interval
             + Duration::from_secs(self.conn.request_timeout_s.max(1));
         if since_publish > window {
             return Err(ConnectorError::Transport(format!(
@@ -692,7 +712,7 @@ async fn connect_device(
         reason: None,
         last_publish: Instant::now(),
     }));
-    let handle = tokio::spawn(drive_session(event_loop.enter(), health.clone()));
+    let handle = AbortOnDrop(tokio::spawn(drive_session(event_loop.enter(), health.clone())));
     let timeout = Duration::from_secs(conn.connect_timeout_s.max(1));
     match tokio::time::timeout(timeout, session.wait_for_connection()).await {
         Ok(true) => {

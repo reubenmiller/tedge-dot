@@ -678,7 +678,8 @@ pub async fn run_until_reloadable(
                 }
                 // Pushed points are off the schedule above, so no failing read reveals a dead
                 // session behind them: ask the connector whether push delivery is still live.
-                for (device_index, polled) in pushed_devices(&subscribed, &schedule) {
+                let pushed = pushed_devices(&subscribed, &schedule);
+                for &(device_index, polled) in &pushed {
                     let device = config.devices[device_index].name.clone();
                     let result =
                         bounded(limits, "check_subscription", connector.check_subscription(&device))
@@ -708,6 +709,7 @@ pub async fn run_until_reloadable(
                         PushAction::Unknown => {}
                     }
                 }
+                retain_pushed(&mut push_recovery, &config, &pushed);
                 // The loop completed an iteration: samples published, reconnects attempted.
                 // A supervisor watching this marker restarts the connector if it stops moving.
                 progress.mark();
@@ -910,7 +912,8 @@ pub async fn run_stdout_until(
                         }
                     }
                 }
-                for (device_index, polled) in pushed_devices(&subscribed, &schedule) {
+                let pushed = pushed_devices(&subscribed, &schedule);
+                for &(device_index, polled) in &pushed {
                     let device = config.devices[device_index].name.clone();
                     let result =
                         bounded(limits, "check_subscription", connector.check_subscription(&device))
@@ -930,6 +933,7 @@ pub async fn run_stdout_until(
                         PushAction::Unknown => {}
                     }
                 }
+                retain_pushed(&mut push_recovery, &config, &pushed);
                 let now = Instant::now();
                 let due: BTreeSet<String> = reconnects
                     .iter()
@@ -1071,6 +1075,21 @@ enum PushAction {
     /// reads succeed -- so a dead subscription is recovered on a backoff schedule of its own,
     /// which healthy reads do not cancel.
     Recover { dead: bool },
+}
+
+/// Forget push recovery for devices that no longer have pushed points. A device leaves
+/// [`pushed_devices`] when a re-subscribe fails and its points fall back to polling; nothing
+/// would clear its entry after that, so its healthy session would be torn down on every retry.
+fn retain_pushed(
+    pending: &mut HashMap<String, ReconnectEntry>,
+    config: &ConnectorConfig,
+    pushed: &[(usize, bool)],
+) {
+    pending.retain(|device, _| {
+        pushed
+            .iter()
+            .any(|(index, _)| config.devices.get(*index).is_some_and(|d| &d.name == device))
+    });
 }
 
 /// Pure so the decision is unit-testable.
@@ -2652,6 +2671,27 @@ default_mode = "typed"
         let unsupported = Err(ConnectorError::Unsupported("check_subscription".into()));
         assert_eq!(push_action(&unsupported, false), PushAction::Unknown);
         assert_eq!(push_action(&unsupported, true), PushAction::Unknown);
+    }
+
+    /// A device whose dead subscription was reconnected but could not be re-armed falls back to
+    /// polling and so stops being checked: its pending push recovery must go with it, or the
+    /// healthy device is reconnected on every retry (up to once a minute) indefinitely.
+    #[test]
+    fn push_recovery_ends_when_a_device_falls_back_to_polling() {
+        let config: ConnectorConfig = toml::from_str(BASE).unwrap();
+        let device = config.devices[0].name.clone();
+        let mut pending = HashMap::new();
+        pending.insert(device.clone(), ReconnectEntry::new());
+
+        // Still pushed (alongside polled points): the recovery stays.
+        retain_pushed(&mut pending, &config, &[(0, true)]);
+        assert!(pending.contains_key(&device));
+
+        // The re-subscribe failed, so the device is no longer among the pushed ones.
+        let subscribed = HashSet::new();
+        let pushed = pushed_devices(&subscribed, &build_schedule(&config, &subscribed));
+        retain_pushed(&mut pending, &config, &pushed);
+        assert!(pending.is_empty(), "a polled-only device keeps no push recovery");
     }
 
     #[test]
