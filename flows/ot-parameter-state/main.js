@@ -338,16 +338,23 @@ function applyDeclarations(context, device, protocol, changed) {
     if (typeof e?.point !== "string" || !e.point || !key) continue;
     entries.push({ point: e.point, key, options: { set: e.set, group: e.group, key: e.key } });
   }
-  // Two passes: every point whose key changed lets go of what it holds first, so keys swapped
-  // between points by one reload are free by the time they are claimed again.
-  for (const { point, key } of entries) {
-    if (keyOf(context, device, point) === key) continue;
+  for (const entry of entries) entry.sets = setsOf(entry.options, names);
+  // Two passes: first every point gives up the claims another declared point is to take, so keys
+  // and sets swapped between points by one reload (`firmware.version` <-> `boot.version`) are free
+  // by the time they are claimed again. Only those: a point keeps whatever nobody else wants, so
+  // re-applying an unchanged declaration drops no value.
+  const wanted = new Map();
+  for (const entry of entries) {
+    for (const set of entry.sets) wanted.set(`${set}:${entry.key}`, entry.point);
+  }
+  for (const { point } of entries) {
     for (const [set, held] of claimsOf(context, device, point)) {
-      dropValue(context, device, point, held, [set], changed);
+      const taker = wanted.get(`${set}:${held}`);
+      if (taker !== undefined && taker !== point) dropValue(context, device, point, held, [set], changed);
     }
   }
   for (const entry of entries) {
-    placePoint(context, device, entry.point, setsOf(entry.options, names), entry.key, changed);
+    placePoint(context, device, entry.point, entry.sets, entry.key, changed);
   }
 }
 

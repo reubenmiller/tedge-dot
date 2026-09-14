@@ -827,6 +827,32 @@ check_multi "parameter key: a declared dotted key maps an edit of its set before
   "[te/device/main/service/tedge-dot/ot/capabilities] $CAPSDOT
 [te/device/opc1///cmd/parameter_update/d1] {\"status\":\"init\",\"set\":\"firmware\",\"parameters\":{\"version\":\"1.0.0\"}}" \
   '"writes":[{"point":"fwVersion","value":"1.0.0"}]'
+# The dot moves a point between sets by what reads like a key edit: two points swapping sets under
+# the same key name in one reload are both free before either is claimed again, so an edit reaches
+# the point that has the set now — without waiting for the next link status.
+CAPSSETS1='{"protocol":"opcua","parameter_keys":[{"device":"opc1","point":"a","key":"firmware.version"},{"device":"opc1","point":"b","key":"boot.version"}]}'
+CAPSSETS2='{"protocol":"opcua","parameter_keys":[{"device":"opc1","point":"a","key":"boot.version"},{"device":"opc1","point":"b","key":"firmware.version"}]}'
+check_multi "parameter key: sets swapped between points under one key name map to their new points" \
+  "ot-parameter-state ot-command-forward" \
+  "[te/device/opc1/ot/opcua/status/link] {\"status\":\"connected\",\"type\":\"zephyr\",\"points\":[\"a\",\"b\"]}
+[te/device/main/service/tedge-dot/ot/capabilities] $CAPSSETS1
+[te/device/main/service/tedge-dot/ot/capabilities] $CAPSSETS2
+[te/device/opc1///cmd/parameter_update/ss] {\"status\":\"init\",\"set\":\"boot\",\"parameters\":{\"version\":1}}" \
+  '"writes":[{"point":"a","value":1}]'
+# A plain key made dotted by a reload moves the point to the named set and frees its old one.
+CAPSPLAIN='{"protocol":"opcua","parameter_keys":[{"device":"opc1","point":"fw","key":"version"}]}'
+CAPSDOTTED='{"protocol":"opcua","parameter_keys":[{"device":"opc1","point":"fw","key":"firmware.version"}]}'
+PLAIN2DOT="[te/device/opc1/ot/opcua/status/link] {\"status\":\"connected\",\"type\":\"zephyr\",\"points\":[\"fw\"]}
+[te/device/main/service/tedge-dot/ot/capabilities] $CAPSPLAIN
+[te/device/main/service/tedge-dot/ot/capabilities] $CAPSDOTTED
+[te/device/opc1///cmd/parameter_update/p2d] {\"status\":\"init\",\"set\":\"firmware\",\"parameters\":{\"version\":1}}
+[te/device/opc1///cmd/parameter_update/p2d-old] {\"status\":\"init\",\"set\":\"zephyr_control_parameters\",\"parameters\":{\"version\":2}}"
+check_multi "parameter key: a plain key made dotted moves the point to the named set" \
+  "ot-parameter-state ot-command-forward" "$PLAIN2DOT" \
+  '[te/device/opc1/ot/opcua/cmd/write-batch/ot--p2d] {"status":"init","writes":[{"point":"fw","value":1}]'
+check_multi "parameter key: ...and its old set no longer maps the key to it" \
+  "ot-parameter-state ot-command-forward" "$PLAIN2DOT" \
+  '[te/device/opc1/ot/opcua/cmd/write-batch/ot--p2d-old] {"status":"init","writes":[{"point":"version","value":2}]'
 check_empty "parameter-state: a descriptor alone publishes nothing" ot-parameter-state \
   "[te/device/main/service/tedge-dot/ot/capabilities] $CAPS"
 # A reload that removes the key (here: the device is gone from parameter_keys) must undo it. A

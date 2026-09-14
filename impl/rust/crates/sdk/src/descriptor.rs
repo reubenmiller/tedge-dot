@@ -962,6 +962,27 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id 
             .all(|b| b.contains("parameter set")));
     }
 
+    /// A dot can only separate a set from a key, and only one dot with both halves non-empty
+    /// does: anything else stays a plain key, which `invalid_keys` refuses.
+    #[test]
+    fn a_dotted_key_names_its_set() {
+        assert_eq!(dotted_key("firmware.version"), Some(("firmware", "version")));
+        for plain in ["version", "a.", ".b", "a..b", "a.b.c", ".", ""] {
+            assert_eq!(dotted_key(plain), None, "{plain:?}");
+        }
+        let naming = SetNaming::of(&cfg().devices[0], "modbus", Some("forced_set"));
+        let point: PointConfig = toml::from_str(
+            "id = \"p\"\ndatatype = \"uint16\"\naccess = \"read_write\"\n\
+             address = { table = \"holding\", address = 1, count = 1 }\n\
+             meta = { parameter = { key = \"firmware.version\", set = [\"other\"] } }",
+        )
+        .unwrap();
+        // The set it names is absolute: it wins over `set` and over the forced set.
+        let params = parameters_of(&point, &naming);
+        assert_eq!(params.len(), 1);
+        assert_eq!((params[0].set.as_str(), params[0].key.as_str()), ("firmware", "version"));
+    }
+
     /// `meta.parameter.key` names the key a point has inside its sets, so a point keeps an id
     /// that is unique on the device and still carries a conventional key. The definition is
     /// keyed by it (a point without a label is titled by it), a usable key frees the id from the
