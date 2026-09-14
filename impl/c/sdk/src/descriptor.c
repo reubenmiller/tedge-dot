@@ -190,6 +190,14 @@ char *tdot_param_invalid_keys(const tdot_config_t *cfg, const char *forced) {
     return tdot_param_invalid_keys_across(&cfg, 1, forced);
 }
 
+/* The key a parameter has inside its sets: `meta.parameter.key` when it is a
+ * string, else the point id. An unusable string is kept, so
+ * tdot_param_invalid_keys reports it. Mirrors descriptor.rs::parameters_of. */
+static const char *param_key(const tdot_point_t *point, const cJSON *options) {
+    const cJSON *key = cJSON_GetObjectItemCaseSensitive(options, "key");
+    return cJSON_IsString(key) ? key->valuestring : point->id;
+}
+
 char *tdot_param_invalid_keys_across(const tdot_config_t *const *cfgs,
                                      size_t ncfgs, const char *forced) {
     char *buf = NULL;
@@ -202,12 +210,22 @@ char *tdot_param_invalid_keys_across(const tdot_config_t *const *cfgs,
                 tdot_param_naming(dev, cfg->protocol, forced);
             for (size_t j = 0; j < dev->npoints; j++) {
                 const tdot_point_t *pt = &dev->points[j];
-                size_t nsets = 0;
-                char **sets = tdot_param_sets(pt, &naming, &nsets);
-                if (!sets)
+                cJSON *options = parameter_options(pt);
+                if (!options)
                     continue;
+                size_t nsets = 0;
+                char **sets = sets_of(options, &naming, &nsets);
+                const char *key = param_key(pt, options);
                 char item[256];
-                if (!tdot_param_key_valid(pt->id)) {
+                /* A point that names its key is published under the key, so
+                 * only the key has to be usable -- not the id. */
+                if (strcmp(key, pt->id) != 0) {
+                    if (!tdot_param_key_valid(key)) {
+                        snprintf(item, sizeof item,
+                                 "parameter key '%s' of point '%s'", key, pt->id);
+                        append(&buf, &len, ", ", item);
+                    }
+                } else if (!tdot_param_key_valid(pt->id)) {
                     snprintf(item, sizeof item, "point id '%s'", pt->id);
                     append(&buf, &len, ", ", item);
                 }
@@ -218,7 +236,67 @@ char *tdot_param_invalid_keys_across(const tdot_config_t *const *cfgs,
                         append(&buf, &len, ", ", item);
                     }
                 tdot_param_sets_free(sets, nsets);
+                cJSON_Delete(options);
             }
+        }
+    }
+    return buf;
+}
+
+char *tdot_param_key_conflicts(const tdot_config_t *cfg, const char *forced) {
+    return tdot_param_key_conflicts_across(&cfg, 1, forced);
+}
+
+char *tdot_param_key_conflicts_across(const tdot_config_t *const *cfgs,
+                                      size_t ncfgs, const char *forced) {
+    char *buf = NULL;
+    size_t len = 0;
+    for (size_t c = 0; c < ncfgs; c++) {
+        const tdot_config_t *cfg = cfgs[c];
+        for (size_t i = 0; i < cfg->ndevices; i++) {
+            const tdot_device_t *dev = &cfg->devices[i];
+            tdot_set_naming_t naming =
+                tdot_param_naming(dev, cfg->protocol, forced);
+            /* set name -> { key -> the point of this device that has it first } */
+            cJSON *seen = cJSON_CreateObject();
+            for (size_t j = 0; j < dev->npoints; j++) {
+                const tdot_point_t *pt = &dev->points[j];
+                cJSON *options = parameter_options(pt);
+                if (!options)
+                    continue;
+                size_t nsets = 0;
+                char **sets = sets_of(options, &naming, &nsets);
+                const char *key = param_key(pt, options);
+                char item[512];
+                /* A write-only point never samples, so the flows cannot learn
+                 * its key: an edit would never reach the point. */
+                if (nsets && strcmp(key, pt->id) != 0 &&
+                    pt->access == TDOT_ACCESS_WRITE) {
+                    snprintf(item, sizeof item,
+                             "key '%s' of write-only point '%s' on device '%s'",
+                             key, pt->id, dev->name);
+                    append(&buf, &len, ", ", item);
+                }
+                for (size_t k = 0; k < nsets; k++) {
+                    cJSON *keys = cJSON_GetObjectItemCaseSensitive(seen, sets[k]);
+                    if (!keys)
+                        keys = cJSON_AddObjectToObject(seen, sets[k]);
+                    const cJSON *first = cJSON_GetObjectItemCaseSensitive(keys, key);
+                    if (cJSON_IsString(first)) {
+                        snprintf(item, sizeof item,
+                                 "key '%s' of points '%s' and '%s' in set '%s' "
+                                 "on device '%s'",
+                                 key, first->valuestring, pt->id, sets[k],
+                                 dev->name);
+                        append(&buf, &len, ", ", item);
+                    } else {
+                        cJSON_AddStringToObject(keys, key, pt->id);
+                    }
+                }
+                tdot_param_sets_free(sets, nsets);
+                cJSON_Delete(options);
+            }
+            cJSON_Delete(seen);
         }
     }
     return buf;
@@ -441,21 +519,23 @@ static const char *opt_string(const cJSON *options, const char *key) {
 }
 
 /* JSON-schema property for one parameter: type and limits from the datatype,
- * everything else from `meta.parameter`. */
-static cJSON *property_schema(const tdot_point_t *point, const cJSON *options) {
+ * everything else from `meta.parameter`. `key` is the property's key in its
+ * set (param_key). */
+static cJSON *property_schema(const tdot_point_t *point, const char *key,
+                              const cJSON *options) {
     cJSON *schema = cJSON_CreateObject();
     bool has_range = false;
     double min = 0, max = 0;
     cJSON_AddStringToObject(schema, "type",
                             schema_type(point->datatype, &has_range, &min, &max));
 
-    /* meta.parameter.title wins, then the point's own `name`, then the id: a
+    /* meta.parameter.title wins, then the point's own `name`, then the key: a
      * point can carry a general-purpose label and still say something
      * different in the parameter UI (mirrors descriptor.rs property_schema). */
     const char *title = opt_string(options, "title");
     if (!title)
         title = point->name;
-    cJSON_AddStringToObject(schema, "title", title ? title : point->id);
+    cJSON_AddStringToObject(schema, "title", title ? title : key);
 
     /* Heap-built, because `description` and `unit` are arbitrary configured
      * strings: a fixed buffer would truncate where the Rust SDK does not, and
@@ -572,9 +652,10 @@ cJSON *tdot_c8y_dtm_definitions_across(const tdot_config_t *const *cfgs,
                         cJSON_AddStringToObject(protocols, point_sets[k],
                                                 cfg->protocol);
                     }
-                    if (!cJSON_GetObjectItemCaseSensitive(props, pt->id)) /* first definition wins */
-                        cJSON_AddItemToObject(props, pt->id,
-                                              property_schema(pt, options));
+                    const char *key = param_key(pt, options);
+                    if (!cJSON_GetObjectItemCaseSensitive(props, key)) /* first definition wins */
+                        cJSON_AddItemToObject(props, key,
+                                              property_schema(pt, key, options));
                 }
                 tdot_param_sets_free(point_sets, nsets);
                 cJSON_Delete(options);

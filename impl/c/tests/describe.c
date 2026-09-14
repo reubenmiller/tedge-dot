@@ -300,6 +300,124 @@ out:
     free(opcua);
 }
 
+/* meta.parameter.key: the key a point has inside its sets, so a point keeps an
+ * id that is unique on the device and still carries a conventional key. The
+ * definition is keyed by it (a point without a label is titled by it), a usable
+ * key frees the id from the key rule, and two points of a device sharing a key
+ * in a set, or a key on a write-only point, are refused. Mirrors
+ * descriptor.rs::a_point_can_name_its_own_key. */
+static const char *KEYED =
+    "[connector]\n"
+    "protocol = \"modbus\"\n"
+    "\n"
+    "[[device]]\n"
+    "name = \"plc1\"\n"
+    "type = \"zephyr\"\n"
+    "protocol_address = { transport = \"tcp\", host = \"127.0.0.1\", port = 502, unit_id = 1 }\n"
+    "\n"
+    "  [[device.point]]\n"
+    "  id = \"firmwareName\"\n"
+    "  datatype = \"uint16\"\n"
+    "  name = \"Firmware name\"\n"
+    "  address = { table = \"holding\", address = 1, count = 1 }\n"
+    "  meta = { parameter = { set = \"firmware\", key = \"name\" } }\n"
+    "\n"
+    "  [[device.point]]\n"
+    "  id = \"firmwareVersion\"\n"
+    "  datatype = \"uint16\"\n"
+    "  address = { table = \"holding\", address = 2, count = 1 }\n"
+    "  meta = { parameter = { set = \"firmware\", key = \"version\" } }\n"
+    "\n"
+    "  [[device.point]]\n"
+    "  id = \"Tank.Level\"\n"
+    "  datatype = \"uint16\"\n"
+    "  address = { table = \"holding\", address = 5, count = 1 }\n"
+    "  meta = { parameter = { key = \"tank_level\" } }\n";
+
+/* Appended to KEYED: a second point with the key `name` in `firmware`, a key on
+ * a write-only point, and an unusable key. */
+static const char *KEYED_CONFLICTS =
+    "\n"
+    "  [[device.point]]\n"
+    "  id = \"bootName\"\n"
+    "  datatype = \"uint16\"\n"
+    "  address = { table = \"holding\", address = 3, count = 1 }\n"
+    "  meta = { parameter = { set = \"firmware\", key = \"name\" } }\n"
+    "\n"
+    "  [[device.point]]\n"
+    "  id = \"update_cmd\"\n"
+    "  datatype = \"uint16\"\n"
+    "  access = \"write\"\n"
+    "  address = { table = \"holding\", address = 4, count = 1 }\n"
+    "  meta = { parameter = { set = \"firmware\", key = \"update\" } }\n"
+    "\n"
+    "  [[device.point]]\n"
+    "  id = \"level\"\n"
+    "  datatype = \"uint16\"\n"
+    "  address = { table = \"holding\", address = 6, count = 1 }\n"
+    "  meta = { parameter = { key = \"lev.el\" } }\n";
+
+static void check_parameter_keys(void) {
+    char err[256];
+    char *path = write_temp_config(KEYED);
+    tdot_config_t *cfg = tdot_config_load(path, err, sizeof err);
+    CHECK(cfg != NULL, "keyed config did not load: %s", err);
+    if (cfg) {
+        char *bad = tdot_param_invalid_keys(cfg, NULL);
+        CHECK(bad == NULL, "a usable key frees the id from the key rule, got: %s",
+              bad ? bad : "");
+        free(bad);
+        char *conflicts = tdot_param_key_conflicts(cfg, NULL);
+        CHECK(conflicts == NULL, "keyed fixture reported conflicts: %s",
+              conflicts ? conflicts : "");
+        free(conflicts);
+
+        cJSON *docs = tdot_c8y_dtm_definitions(cfg, NULL);
+        const cJSON *fw = cJSON_GetArrayItem(docs, 0);
+        const cJSON *name = fw ? prop(fw, "name") : NULL;
+        const cJSON *version = fw ? prop(fw, "version") : NULL;
+        CHECK(fw && strcmp(str_of(fw, "identifier"), "firmware") == 0,
+              "the first definition must be the firmware set");
+        CHECK(name && version && !prop(fw, "firmwareName"),
+              "the firmware set must be keyed by name and version, not the ids");
+        CHECK(name && strcmp(str_of(name, "title"), "Firmware name") == 0,
+              "name title = %s", name ? str_of(name, "title") : "<none>");
+        CHECK(version && strcmp(str_of(version, "title"), "version") == 0,
+              "a point without a label must be titled by its key, got %s",
+              version ? str_of(version, "title") : "<none>");
+        const cJSON *control = cJSON_GetArrayItem(docs, 1);
+        CHECK(control && prop(control, "tank_level") && !prop(control, "Tank.Level"),
+              "Tank.Level must be rendered under its key");
+        cJSON_Delete(docs);
+        tdot_config_free(cfg);
+    }
+    unlink(path);
+
+    size_t n = strlen(KEYED) + strlen(KEYED_CONFLICTS) + 1;
+    char *body = malloc(n);
+    snprintf(body, n, "%s%s", KEYED, KEYED_CONFLICTS);
+    path = write_temp_config(body);
+    free(body);
+    cfg = tdot_config_load(path, err, sizeof err);
+    CHECK(cfg != NULL, "conflicting keyed config did not load: %s", err);
+    if (cfg) {
+        char *bad = tdot_param_invalid_keys(cfg, NULL);
+        CHECK(bad && strcmp(bad, "parameter key 'lev.el' of point 'level'") == 0,
+              "an unusable key must be reported, got: %s", bad ? bad : "<none>");
+        free(bad);
+        char *conflicts = tdot_param_key_conflicts(cfg, NULL);
+        CHECK(conflicts &&
+                  strcmp(conflicts,
+                         "key 'name' of points 'firmwareName' and 'bootName' in set "
+                         "'firmware' on device 'plc1', key 'update' of write-only "
+                         "point 'update_cmd' on device 'plc1'") == 0,
+              "conflicts = %s", conflicts ? conflicts : "<none>");
+        free(conflicts);
+        tdot_config_free(cfg);
+    }
+    unlink(path);
+}
+
 int main(void) {
     char *path = write_temp_config(CONFIG);
     char err[256];
@@ -513,6 +631,7 @@ int main(void) {
     unlink(path);
     check_type_collisions();
     check_across_configs();
+    check_parameter_keys();
 
     if (failures) {
         printf("describe: %d check(s) failed\n", failures);

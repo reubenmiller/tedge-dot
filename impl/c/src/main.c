@@ -604,6 +604,17 @@ static int cmd_describe(const args_t *a) {
         free(bad);
         goto out;
     }
+    /* A fragment holds one value per key, and a write-only point never samples,
+     * so the flows could never learn a key it names. */
+    char *conflicts = tdot_param_key_conflicts_across(view, npaths, forced);
+    if (conflicts) {
+        fprintf(stderr,
+                "error: parameter keys must be unique in a set and belong to a "
+                "readable point: %s\n",
+                conflicts);
+        free(conflicts);
+        goto out;
+    }
 
     /* A DTM identifier is tenant-wide, so a set named after the protocol is
      * shared with every other device type that speaks it. Declaring the device

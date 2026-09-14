@@ -75,8 +75,11 @@ name was `<protocol>_parameters`, which collides across device types;
 [RFC 0005](0005-device-types-and-parameter-sets.md) replaced it with
 `<device type, else protocol>_<group>_parameters` and is the current rule. Datatype →
 JSON-schema type and integer bounds are automatic;
-`meta.parameter.{title, description, min, max, enum, default, order}` enrich the schema. The keys of a set are the point ids themselves, so parameter ids must be plain
-identifiers (`[A-Za-z0-9_]`; Cumulocity rejects dots in keys) — `describe` refuses others.
+`meta.parameter.{title, description, min, max, enum, default, order}` enrich the schema. The keys of a set are the point ids, unless a point names its own with
+`meta.parameter.key` (so `firmwareVersion` can be `version` in a `firmware` set); keys must be plain
+identifiers (`[A-Za-z0-9_]`; Cumulocity rejects dots in keys), unique per set on a device, and a
+write-only point cannot name one (it never samples, so the flows cannot learn it) — `describe`
+refuses all three.
 
 Three places could own the definition; the config wins:
 

@@ -21,11 +21,13 @@
 // handles it, since tedge-agent only runs workflows for its own entity) becomes ONE connector
 // `write-batch`. Two request shapes:
 //   1. Cumulocity: { "operation": { "c8y_ParameterUpdate":{}, "c8y_ParameterUpdate_<set>":{},
-//                                   "<set>": { "<point>": <value>, ... } }, "c8y-mapper": {...} }
-//   2. Direct:     { "set": "<set>", "parameters": { "<point>": <value>, ... } }
-// The keys of a set ARE the connector point ids. The batch request carries an `origin` object
-// (command type, set, requested values) that the connector ignores; ot-command-result reads it
-// back from the retained init to complete the right thin-edge command.
+//                                   "<set>": { "<key>": <value>, ... } }, "c8y-mapper": {...} }
+//   2. Direct:     { "set": "<set>", "parameters": { "<key>": <value>, ... } }
+// The keys of a set are the connector point ids, unless a point names its own key
+// (meta.parameter.key): ot-parameter-state records which point each key of a set belongs to, and
+// a key no point has claimed is taken as the point id. The batch request carries an `origin`
+// object (command type, set, requested values) that the connector ignores; ot-command-result
+// reads it back from the retained init to complete the right thin-edge command.
 //
 // Only new requests (status:"init") are forwarded; for the pass-through verbs the whole init
 // payload is forwarded so both point writes (point/value/raw) and management verbs
@@ -65,16 +67,28 @@ function parameterRequest(payload) {
   return { error: "unsupported parameter_update payload (expected operation or set+parameters)" };
 }
 
+// The point a key of `set` belongs to on `device`, as ot-parameter-state recorded it; the key
+// itself when no point has claimed it (it is then the point id).
+function pointOf(context, device, set, key) {
+  const owner = context.mapper.get(`ot-parameter-point:${device}:${set}:${key}`);
+  return typeof owner === "string" && owner ? owner : key;
+}
+
 // Reshape an parameter_update request into a write-batch request. A request the flow cannot
 // interpret is still forwarded, with no writes: the connector rejects an empty batch and
 // ot-command-result completes the command as failed with the runtime's reason plus the note
 // recorded in origin.error. (This flow cannot publish the failure itself — its output would
 // match its own input filter.)
-function parameterBatch(payload) {
+function parameterBatch(payload, context, device) {
   const req = parameterRequest(payload);
   const origin = { command: "parameter_update", set: req.set ?? null, parameters: req.values ?? null };
   if (req.error) origin.error = req.error;
-  const writes = req.error ? [] : Object.entries(req.values).map(([point, value]) => ({ point, value }));
+  const writes = req.error
+    ? []
+    : Object.entries(req.values).map(([key, value]) => ({
+        point: pointOf(context, device, req.set, key),
+        value,
+      }));
   const out = { status: "init", writes, origin };
   if (payload["c8y-mapper"] !== undefined) out["c8y-mapper"] = payload["c8y-mapper"];
   return out;
@@ -112,7 +126,7 @@ export function onMessage(message, context) {
   let request;
   if (commandType === PARAMETER_UPDATE) {
     verb = "write-batch";
-    request = parameterBatch(payload);
+    request = parameterBatch(payload, context, device);
   } else {
     verb = commandType.slice(3).split("_").join("-");
     request = payload;

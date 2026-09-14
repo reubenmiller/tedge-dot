@@ -497,8 +497,11 @@ this beyond echoing `access`, `meta` and the device `type` in samples: a flow
 retained twin fragment per *parameter set* from the samples and acknowledged writes, and
 cloud-specific tooling (`tedge-dot describe`) renders the same sets as cloud-side definitions.
 A read-only point can opt in with `meta.parameter = true`, a writable point can opt out with
-`meta.parameter = false`. Because point ids become the fragment keys, parameter ids SHOULD be
-plain identifiers (`[A-Za-z0-9_]`).
+`meta.parameter = false`. A parameter's key inside its fragment is its point id, or
+`meta.parameter.key` when the point names one — so a point can keep an id that is unique on the
+device (`firmwareVersion`) and still be `version` in its `firmware` set. Keys SHOULD be plain
+identifiers (`[A-Za-z0-9_]`), unique per set on a device, and a key SHOULD NOT be named on a
+write-only point: it never samples, so consumers cannot learn its key.
 
 **Naming a set.** A set name is a tenant-wide identifier in the cloud, so it is qualified by the
 *device type* (§3.1) — what decides which points exist — and never by the protocol alone, which
