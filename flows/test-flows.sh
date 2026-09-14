@@ -823,6 +823,12 @@ check "parameter-state: a key added to a write-only point clears its id from the
 # A readable point released by the descriptor is placed again by its next sample, under its id.
 SKEYEDX='{"device":"opc1","type":"zephyr","protocol":"opcua","point":"setpointValue","mode":"typed","datatype":"int32","value":3,"value_repr":"number","quality":"good","addr":{},"access":"read_write","meta":{"parameter":{"key":"target"}}}'
 SUNKEYED='{"device":"opc1","type":"zephyr","protocol":"opcua","point":"setpointValue","mode":"typed","datatype":"int32","value":3,"value_repr":"number","quality":"good","addr":{},"access":"read_write"}'
+# ...but a descriptor that stops declaring a key does not undo a point a newer sample has already
+# placed under its id: the value stays.
+check_absent "parameter-state: a stale declaration is not released over a newer sample" ot-parameter-state \
+  '[te/device/opc1/ot/opcua/status/link] {"status":"connected","type":"zephyr","points":["setpointValue"]}'$'\n'"[te/device/main/service/tedge-dot/ot/capabilities] $CAPS"$'\n'"[te/device/opc1/ot/opcua/sample/setpointValue] $SKEYEDX"$'\n'"[te/device/opc1/ot/opcua/sample/setpointValue] $SUNKEYED"$'\n''[te/device/main/service/tedge-dot/ot/capabilities] {"protocol":"opcua"}' \
+  '[te/device/opc1///twin/zephyr_control_parameters] {"setpointValue":3}' \
+  $'{"setpointValue":3}\n[te/device/opc1///twin/zephyr_control_parameters] '
 check "parameter-state: a released readable point is placed again by its next sample" ot-parameter-state \
   '[te/device/opc1/ot/opcua/status/link] {"status":"connected","type":"zephyr","points":["setpointValue"]}'$'\n'"[te/device/main/service/tedge-dot/ot/capabilities] $CAPS"$'\n'"[te/device/opc1/ot/opcua/sample/setpointValue] $SKEYEDX"$'\n''[te/device/main/service/tedge-dot/ot/capabilities] {"protocol":"opcua"}'$'\n'"[te/device/opc1/ot/opcua/sample/setpointValue] $SUNKEYED" \
   $'[te/device/opc1///twin/zephyr_control_parameters] \n[te/device/opc1///twin/zephyr_control_parameters] {"setpointValue":3}'

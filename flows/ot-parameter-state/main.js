@@ -31,7 +31,8 @@
 // never samples — and from the point's samples. This flow records which point each key of a set
 // belongs to, and ot-command-forward uses that to turn an edit of the fragment back into point
 // writes. Two points of a device sharing a key in a set is a configuration `describe` refuses;
-// here the first to claim the key keeps it, until that point leaves the set or is removed.
+// here the first to claim the key keeps it. Once that point leaves the set or is removed, the key is
+// free, and the other point takes it at its own next sample, write, descriptor or link status.
 //
 // Where values come from:
 //   * readable parameters: every good sample (so the twin follows the device, including
