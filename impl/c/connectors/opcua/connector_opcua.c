@@ -403,24 +403,6 @@ static int read_point(tdot_connector_t *self, tdot_device_t *dev,
             rc == UA_STATUSCODE_BADSESSIONIDINVALID ||
             rc == UA_STATUSCODE_BADSECURECHANNELCLOSED ||
             rc == UA_STATUSCODE_BADINTERNALERROR;
-        /* The list cannot be complete. A synchronous service call on a client
-         * that is not fully connected first reconnects inside the call
-         * (open62541's __Client_Service -> connectSync) and, when that fails,
-         * returns the failed attempt's status -- whatever connection error it
-         * ended with. Read as a plain bad point, that keeps the link merely
-         * degraded and repeats the blocking reconnect for every point on every
-         * tick instead of backing off. A node-level Bad status (unknown node,
-         * access denied) arrives over an activated session, so the session
-         * state tells the two apart whatever the code. */
-        if (!transport_down) {
-            UA_SecureChannelState channel_state;
-            UA_SessionState session_state;
-            UA_StatusCode connect_status;
-            UA_Client_getState(ua->client, &channel_state, &session_state,
-                               &connect_status);
-            transport_down = session_state != UA_SESSIONSTATE_ACTIVATED ||
-                             connect_status != UA_STATUSCODE_GOOD;
-        }
         return transport_down ? -1 : 0;
     }
 
