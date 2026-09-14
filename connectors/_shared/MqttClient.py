@@ -12,6 +12,7 @@ import time
 import paho.mqtt.client as mqtt
 from robot.api import logger
 from robot.api.deco import keyword, library
+from robot.utils import timestr_to_secs
 
 
 @library(scope="SUITE")
@@ -125,6 +126,37 @@ class MqttClient:
                         return payload
             time.sleep(0.1)
         raise AssertionError(f"timed out waiting for a fresh sample on topic {topic}")
+
+    @keyword
+    def get_message_mark(self):
+        """Return a mark (the current time) for `Wait For Fresh Message With Field`'s `since`."""
+        return time.time()
+
+    @keyword
+    def wait_for_fresh_message_with_field(self, topic, field, *values, timeout=10, since=None):
+        """Wait for a message arriving after `since` (a `Get Message Mark`, default: this call)
+        whose JSON `field` (dotted path) is one of `values`; return its payload.
+
+        For state published on change, such as a link status: the recorded history holds
+        earlier transitions, which must not satisfy the wait. Take the mark BEFORE the action
+        that causes the transition when that action can block past it (`docker stop` waits for
+        the process to exit, and the connector may already have reacted by then).
+        """
+        start = float(since) if since is not None else time.time()
+        deadline = time.time() + timestr_to_secs(timeout)
+        while time.time() < deadline:
+            with self._lock:
+                fresh = [p for recv_time, p in self._messages.get(topic, []) if recv_time >= start]
+            for payload in fresh:
+                try:
+                    if self.get_json_field(payload, field) in values:
+                        return payload
+                except (ValueError, KeyError, TypeError):
+                    continue
+            time.sleep(0.1)
+        raise AssertionError(
+            f"timed out waiting for a fresh message with {field} in {values} on topic {topic}"
+        )
 
     @keyword
     def wait_for_message_containing(self, topic, substring, timeout=10):

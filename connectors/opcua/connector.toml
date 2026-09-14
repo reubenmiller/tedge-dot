@@ -114,3 +114,17 @@ default_mode     = "typed"
   datatype = "uint32"
   address  = { node_id = "ns=2;s=Count" }
   meta     = { parameter = { key = "counters.count" }, measurement = false }
+
+# The same simulator again, as a device whose only point is pushed: nothing is ever polled from it.
+# That is the configuration where a lost session used to show nothing at all -- there is no read
+# to fail -- so the push recovery tests check this device too. See "Push-Only Device Recovers
+# After A Long Server Outage" in tests/opcua_e2e.robot.
+[[device]]
+name             = "opc2"
+protocol_address = { endpoint = "opc.tcp://simulator:4840/", security_policy = "None", security_mode = "none" }
+default_mode     = "typed"
+
+  [[device.point]]
+  id       = "ticks"
+  datatype = "uint32"
+  address  = { node_id = "ns=2;s=Ticks" }
