@@ -304,7 +304,8 @@ out:
  * id that is unique on the device and still carries a conventional key. The
  * definition is keyed by it (a point without a label is titled by it), a usable
  * key frees the id from the key rule, and two points of a device sharing a key
- * in a set, or a key on a write-only point, are refused. Mirrors
+ * in a set are refused -- a key on a write-only point is not, since the
+ * capability descriptor carries it. Mirrors
  * descriptor.rs::a_point_can_name_its_own_key. */
 static const char *KEYED =
     "[connector]\n"

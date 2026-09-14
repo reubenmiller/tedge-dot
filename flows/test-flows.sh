@@ -808,6 +808,12 @@ check "parameter-state: a write-only point takes its declared key and set" ot-pa
   '[te/device/plc1///twin/acme_boiler_v2_commissioning_parameters] {"valve":true}'
 check_empty "parameter-state: a descriptor alone publishes nothing" ot-parameter-state \
   "[te/device/main/service/tedge-dot/ot/capabilities] $CAPS"
+# A reload that removes the key (here: the device is gone from parameter_keys) must undo it. A
+# write-only point never samples, so nothing else would: its value leaves the declared set and its
+# next acknowledged write lands under its id, in the default set, as `describe` now renders it.
+check "parameter-state: a key the descriptor no longer declares goes back to the point id" ot-parameter-state \
+  '[te/device/plc1/ot/modbus/status/link] {"status":"connected","type":"acme-boiler-v2","points":["valve_cmd"]}'$'\n'"[te/device/main/service/tedge-dot-modbus/ot/capabilities] $CAPSWO"$'\n''[te/device/plc1/ot/modbus/cmd/write-batch/ot--1] {"status":"successful","results":[{"point":"valve_cmd","status":"successful","value":true}]}'$'\n''[te/device/main/service/tedge-dot-modbus/ot/capabilities] {"protocol":"modbus"}'$'\n''[te/device/plc1/ot/modbus/cmd/write-batch/ot--2] {"status":"successful","results":[{"point":"valve_cmd","status":"successful","value":false}]}' \
+  $'[te/device/plc1///twin/acme_boiler_v2_commissioning_parameters] \n[te/device/plc1///twin/acme_boiler_v2_control_parameters] {"valve_cmd":false}'
 
 # --- ot-command-forward: parameter_update -> write-batch ---
 C8YOP='{"status":"init","operation":{"deviceId":"123","c8y_ParameterUpdate":{},"c8y_ParameterUpdate_acme_boiler_v2_control_parameters":{},"acme_boiler_v2_control_parameters":{"temp_u16":4242,"coil_rw":true}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}'
