@@ -46,8 +46,16 @@ static void usage(void) {
 #define DEFAULT_CONFIG_DIR "/etc/tedge/plugins/ot"
 
 static volatile sig_atomic_t g_stop = 0;
+/* Set while `read` is inside a protocol call (connect, read). Those block for
+ * up to connector.operation_timeout and cannot be cancelled -- libmodbus even
+ * retries its select() through EINTR -- so a stop that only raised g_stop would
+ * wait out the timeout of every remaining point. Nothing is left to clean up
+ * that the OS does not, so exit on the spot instead. A second signal does the
+ * same, whatever is running. */
+static volatile sig_atomic_t g_in_call = 0;
 static void on_signal(int sig) {
-    (void)sig;
+    if (g_in_call || g_stop)
+        _exit(128 + sig);
     g_stop = 1;
 }
 
@@ -115,13 +123,15 @@ static int parse_args(int argc, char **argv, args_t *a) {
             a->set = argv[++i];
         else if (!strcmp(arg, "--compact"))
             a->compact = true;
-        else if (!strcmp(arg, "--interval") && next)
+        else if (!strcmp(arg, "--interval") && next) {
             a->interval_s = tdot_duration_parse(argv[++i]);
-        else if (!strcmp(arg, "--duration") && next)
+            a->poll = true; /* implies --poll, as in the Rust binary */
+        } else if (!strcmp(arg, "--duration") && next)
             a->duration_s = tdot_duration_parse(argv[++i]);
-        else if (!strcmp(arg, "--count") && next)
+        else if (!strcmp(arg, "--count") && next) {
             a->count = atoi(argv[++i]);
-        else if (!strcmp(arg, "--poll"))
+            a->poll = true; /* implies --poll, as in the Rust binary */
+        } else if (!strcmp(arg, "--poll"))
             a->poll = true;
         else if (!strcmp(arg, "--json"))
             a->json = true;
@@ -232,12 +242,16 @@ static int cmd_read(const args_t *a) {
         return 1;
     }
 
+    /* A signal mid-call _exit()s, which skips stdio's flush: keep every sample
+     * already printed even when stdout is a pipe. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
     struct sigaction sa = {.sa_handler = on_signal};
     sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
 
     int exit_code = 0;
     bool any_matched = false;
-    for (size_t i = 0; i < cfg->ndevices; i++) {
+    for (size_t i = 0; i < cfg->ndevices && !g_stop; i++) {
         tdot_device_t *dev = &cfg->devices[i];
         if (!device_matches(a, dev))
             continue;
@@ -249,13 +263,16 @@ static int cmd_read(const args_t *a) {
         if (!has_point)
             continue;
         any_matched = true;
-        if (conn->connect_device(conn, dev, err, sizeof err) != 0) {
+        g_in_call = 1;
+        int rc = conn->connect_device(conn, dev, err, sizeof err);
+        g_in_call = 0;
+        if (rc != 0) {
             fprintf(stderr, "error: device %s: %s\n", dev->name, err);
             exit_code = 1;
             continue;
         }
     }
-    if (!any_matched) {
+    if (!any_matched && !g_stop) {
         fprintf(stderr, "error: no matching readable points\n");
         return 1;
     }
@@ -266,14 +283,16 @@ static int cmd_read(const args_t *a) {
             tdot_device_t *dev = &cfg->devices[i];
             if (!device_matches(a, dev) || !dev->proto)
                 continue;
-            for (size_t j = 0; j < dev->npoints; j++) {
+            for (size_t j = 0; j < dev->npoints && !g_stop; j++) {
                 tdot_point_t *pt = &dev->points[j];
                 if (!point_matches(a, pt) ||
                     !(pt->access & TDOT_ACCESS_READ))
                     continue;
                 tdot_sample_t s;
                 tdot_sample_init(&s);
+                g_in_call = 1;
                 conn->read_point(conn, dev, pt, &s);
+                g_in_call = 0;
                 print_sample(a, cfg, dev, pt, &s);
                 if (s.quality == TDOT_Q_BAD)
                     exit_code = 1;

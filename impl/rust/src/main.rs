@@ -1011,6 +1011,11 @@ async fn read_loop(
     poll_mode: bool,
 ) -> Result<bool, String> {
     let mut saw_bad = false;
+    // One Ctrl-C listener for the whole session, watched during reads too. A fresh `ctrl_c()`
+    // per sleep missed a Ctrl-C pressed while a read was in flight (tokio's handler took it with
+    // no listener left to tell), and a silent device holds every read for its request timeout.
+    // A one-shot read never polls it, so Ctrl-C there keeps its default: end the process.
+    let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
     loop {
         jobs.retain(|j| j.remaining != Some(0));
         let Some(next_due) = jobs.iter().map(|j| j.next_due).min() else {
@@ -1018,13 +1023,25 @@ async fn read_loop(
         };
         if poll_mode {
             tokio::select! {
-                _ = tokio::signal::ctrl_c() => return Ok(saw_bad),
+                // Polled first, so the listener is registered before the first read starts.
+                biased;
+                _ = ctrl_c.as_mut() => return Ok(saw_bad),
                 _ = tokio::time::sleep_until(next_due.into()) => {}
             }
         }
         let now = Instant::now();
         for job in jobs.iter_mut().filter(|j| j.next_due <= now) {
-            match connector.read_points(&job.device, &job.refs).await {
+            let read = connector.read_points(&job.device, &job.refs);
+            let result = if poll_mode {
+                tokio::select! {
+                    biased;
+                    _ = ctrl_c.as_mut() => return Ok(saw_bad),
+                    result = read => result,
+                }
+            } else {
+                read.await
+            };
+            match result {
                 Ok(mut samples) => {
                     for sample in samples.iter_mut() {
                         sample.device = job.device.clone();
