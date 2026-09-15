@@ -7,8 +7,12 @@
 #   holding 3      -> uint16  17001   (read/write -> c8y_SetRegister round-trip)
 #   holding 4..5   -> uint32  617001
 #   holding 6..7   -> float32 404.17
-#   coil    48     -> bool    false   (read/write -> c8y_SetCoil round-trip)
+#   coil    768    -> bool    false   (read/write -> c8y_SetCoil round-trip)
 #   holding 1      -> flagged invalid -> read yields quality "bad"
+#
+# The simulator shares one address space between its tables, and coil N is bit N % 16 of
+# register N // 16: coil 768 is bit 0 of register 48, kept for bits. (Coil 48 would be bit 0 of
+# holding 3, so a parameter update carrying temp_u16 would overwrite the coil.)
 
 [connector]
 protocol      = "modbus"
@@ -60,4 +64,4 @@ default_mode     = "typed"
   id       = "coil_rw"
   datatype = "bool"
   access   = "read_write"
-  address  = { table = "coil", address = 48, count = 1 }
+  address  = { table = "coil", address = 768, count = 1 }

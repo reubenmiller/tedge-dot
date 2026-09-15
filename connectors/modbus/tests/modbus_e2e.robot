@@ -166,7 +166,7 @@ Invalid Register Reports Bad Quality
     Should Not Be Empty    ${error}
 
 Writes A Coil And Reads It Back
-    [Documentation]    A write command sets coil 48 true; the next sample reflects it.
+    [Documentation]    A write command sets coil 768 true; the next sample reflects it.
     Publish Message    ${CMD_PREFIX}/coil-1    {"status":"init","point":"coil_rw","value":true}    retain=True
     ${result}=    Wait For Message Containing    ${CMD_PREFIX}/coil-1    "status":"successful"    timeout=${SAMPLE_TIMEOUT}
     ${point}=    Get Json Field    ${result}    point
@@ -240,6 +240,22 @@ Write Batch Stops At The First Failure And Reports What Was Applied
     ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/coil_rw    timeout=${SAMPLE_TIMEOUT}
     ${value}=    Get Json Field    ${payload}    value
     Should Be Equal    ${value}    ${True}
+
+Writing The Coil And A Register Leaves Each Other Alone
+    [Documentation]    The coil and temp_u16 are independent: a write to one never changes the other.
+    ...                A Cumulocity parameter update sends back every key of its set, so it rewrites
+    ...                temp_u16 alongside the coil. When the coil was bit 0 of temp_u16's register,
+    ...                that rewrite reverted the coil on the next poll. The values are picked so the
+    ...                coil and the register's low bit disagree, and both differ from before.
+    Publish Message    ${BATCH_PREFIX}/batch-coil-reg
+    ...    {"status":"init","writes":[{"point":"coil_rw","value":false},{"point":"temp_u16","value":17003}]}    retain=True
+    Wait For Message Containing    ${BATCH_PREFIX}/batch-coil-reg    "status":"successful"    timeout=${SAMPLE_TIMEOUT}
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/temp_u16    timeout=${SAMPLE_TIMEOUT}
+    ${value}=    Get Json Field    ${payload}    value
+    Should Be Equal As Numbers    ${value}    17003
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/coil_rw    timeout=${SAMPLE_TIMEOUT}
+    ${value}=    Get Json Field    ${payload}    value
+    Should Be Equal    ${value}    ${False}
 
 Write Batch Rejects An Empty Request
     Publish Message    ${BATCH_PREFIX}/batch-3    {"status":"init","writes":[]}    retain=True

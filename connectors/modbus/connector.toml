@@ -8,8 +8,13 @@
 #   holding 3      -> uint16  17001
 #   holding 4..5   -> uint32  617001
 #   holding 6..7   -> float32 404.17
-#   coil    48     -> bool    false (initially)
+#   coil    768    -> bool    false (initially)
 #   holding 1      -> flagged "invalid" -> read raises a Modbus exception
+#
+# A coil is one bit of a register in that shared space: coil N is bit N % 16 of
+# register N // 16. Coil 768 is bit 0 of register 48, which the simulator keeps
+# for bits. (Coil 48 would be bit 0 of holding 3, so writing temp_u16 would
+# overwrite the coil, and writing the coil would change temp_u16.)
 #
 # Decode defaults are big-endian / big word-order, which matches the simulator.
 #
@@ -64,7 +69,7 @@ points_from      = ["plc-sim", "./points.d/modbus/plc-sim-extra.toml"]
   id       = "coil_rw"
   datatype = "bool"
   access   = "read_write"
-  address  = { table = "coil", address = 48, count = 1 }
+  address  = { table = "coil", address = 768, count = 1 }
 
   # A parameter kept off the measurements (`meta.measurement = false`): sampled, and on the
   # parameter twin fragment like temp_u16 (it reads the same register), but never published as a
