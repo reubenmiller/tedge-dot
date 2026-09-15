@@ -64,6 +64,24 @@ A Disabled Device Is Left Out Of The Connector
     Should Be Empty    ${answers}    nothing owns a disabled device, so its commands go unanswered
     Publish Message    ${write}    ${EMPTY}    retain=True
 
+A Disabled Point Is Left Out Of Its Device
+    [Documentation]    `enabled = false` on a point (§3.3) leaves it out of the resolved device:
+    ...                spare_u16 comes from a point library and is switched off by a bare inline
+    ...                definition, and draft_u16 is incomplete and loads only because it is switched
+    ...                off. Neither is listed on the link status, sampled or written, while the
+    ...                library's other point still is.
+    ${link}=    Wait For Message Containing    ${LINK_TOPIC}    "status":"connected"    timeout=${READY_TIMEOUT}
+    ${points}=    Get Json Field    ${link}    points
+    List Should Contain Value    ${points}    temp_u16_alias
+    List Should Not Contain Value    ${points}    spare_u16
+    List Should Not Contain Value    ${points}    draft_u16
+    Wait For Sample    ${SAMPLE_PREFIX}/temp_u16_alias    timeout=${SAMPLE_TIMEOUT}
+    No Messages On Topic    ${SAMPLE_PREFIX}/spare_u16    timeout=5
+    ${write}=    Set Variable    ${CMD_PREFIX}/spare-1
+    Publish Message    ${write}    {"status":"init","point":"spare_u16","value":1}    retain=True
+    Wait For Message Containing    ${write}    "status":"failed"    timeout=${SAMPLE_TIMEOUT}
+    Publish Message    ${write}    ${EMPTY}    retain=True
+
 Capability Descriptor Carries The Point Labels
     [Documentation]    A point's `name`/`description` (§3.1) are static, so they are published
     ...                once in the retained capability descriptor (§7) rather than echoed in
@@ -243,6 +261,8 @@ Describe Renders The Parameter Set Definition
     Dictionary Should Contain Key    ${properties}    temp_u16
     Dictionary Should Contain Key    ${properties}    coil_rw
     Dictionary Should Not Contain Key    ${properties}    level_f32
+    # Writable, but switched off with `enabled = false` (§3.3), so not a parameter.
+    Dictionary Should Not Contain Key    ${properties}    spare_u16
     Should Be Equal    ${properties}[coil_rw][type]    boolean
     Should Be Equal    ${definition}[contexts]    ${{['asset', 'event', 'operation']}}
 

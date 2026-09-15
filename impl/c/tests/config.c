@@ -1307,9 +1307,90 @@ static void check_unknown_keys(void) {
     scratch_free(&s);
 }
 
+/* `enabled = false` on a point (contract §3.3) leaves the resolved point out of
+ * its device: a bare `{ id, enabled = false }` switches off a library point, a
+ * later definition switches it back on, and a disabled point need not be
+ * complete but is still checked for shape. Mirrors
+ * library.rs::a_disabled_point_is_left_out_of_its_device and
+ * a_disabled_point_is_still_checked. */
+static void check_disabled_points(void) {
+    scratch_t s;
+    scratch_init(&s);
+    write_file(&s, "modbus/acme-meter.toml", LIBRARY);
+    write_file(&s, "modbus/site-off.toml",
+               "[library]\nprotocol = \"modbus\"\n\n[[point]]\n"
+               "id = \"pump_run\"\nenabled = false\n");
+
+    char err[256] = "";
+    tdot_config_t *cfg = load_with_libs(
+        &s, "\"acme-meter\"",
+        "\n  [[device.point]]\n  id = \"boiler_temp\"\n  enabled = false\n"
+        /* Incomplete, and loads only because it is switched off. */
+        "\n  [[device.point]]\n  id = \"draft\"\n  enabled = false\n",
+        err, sizeof err);
+    CHECK(cfg != NULL, "a config with disabled points must load: %s", err);
+    if (cfg) {
+        tdot_device_t *dev = &cfg->devices[0];
+        CHECK(dev->npoints == 1 && strcmp(dev->points[0].id, "pump_run") == 0,
+              "only pump_run is left (got %zu point(s))", dev->npoints);
+        CHECK(tdot_device_point(dev, "boiler_temp") == NULL,
+              "the library point is switched off");
+        CHECK(tdot_device_point(dev, "draft") == NULL, "the disabled draft is dropped");
+        tdot_config_free(cfg);
+    }
+
+    /* Switched off by one library, back on by the device's own definition. */
+    cfg = load_with_libs(&s, "\"acme-meter\", \"site-off\"",
+                         "\n  [[device.point]]\n  id = \"pump_run\"\n  enabled = true\n",
+                         err, sizeof err);
+    CHECK(cfg != NULL, "re-enabling a point must load: %s", err);
+    if (cfg) {
+        CHECK(cfg->devices[0].npoints == 2 && tdot_device_point(&cfg->devices[0], "pump_run"),
+              "a later definition switches the point back on (got %zu point(s))",
+              cfg->devices[0].npoints);
+        tdot_config_free(cfg);
+    }
+    cfg = load_with_libs(&s, "\"acme-meter\", \"site-off\"", "", err, sizeof err);
+    CHECK(cfg && cfg->devices[0].npoints == 1,
+          "a library can switch off a point an earlier one supplies: %s",
+          cfg ? "" : err);
+    tdot_config_free(cfg);
+
+    cfg = load_with_libs(&s, "\"acme-meter\"",
+                         "\n  [[device.point]]\n  id = \"boiler_temp\"\n  enabled = \"no\"\n",
+                         err, sizeof err);
+    CHECK(!cfg && strstr(err, "enabled must be true or false"),
+          "a non-boolean enabled must be refused, got: %s", cfg ? "<loaded>" : err);
+    tdot_config_free(cfg);
+
+    cfg = load_with_libs(&s, "\"acme-meter\"",
+                         "\n  [[device.point]]\n  id = \"draft\"\n  enabled = false\n"
+                         "  datatype = \"not_a_datatype\"\n",
+                         err, sizeof err);
+    CHECK(!cfg && strstr(err, "not_a_datatype"),
+          "a disabled point is still checked for shape, got: %s", cfg ? "<loaded>" : err);
+    tdot_config_free(cfg);
+
+    /* A device with no libraries drops its disabled points too. */
+    char body[1024];
+    snprintf(body, sizeof body,
+             "[connector]\nprotocol = \"modbus\"\n"
+             "\n[[device]]\nname = \"plc-1\"\nprotocol_address = { unit_id = 1 }\n"
+             "\n  [[device.point]]\n  id = \"only\"\n  datatype = \"uint16\"\n"
+             "  address = { table = \"holding\", address = 1, count = 1 }\n"
+             "\n  [[device.point]]\n  id = \"draft\"\n  enabled = false\n");
+    write_file(&s, "etc/modbus.toml", body);
+    cfg = tdot_config_load(scratch_path(&s, "etc/modbus.toml"), err, sizeof err);
+    CHECK(cfg && cfg->devices[0].npoints == 1 && strcmp(cfg->devices[0].points[0].id, "only") == 0,
+          "an inline-only device drops its disabled point: %s", cfg ? "" : err);
+    tdot_config_free(cfg);
+    scratch_free(&s);
+}
+
 int main(void) {
     check_unknown_keys();
     check_disabled_devices();
+    check_disabled_points();
     check_timeout_defaults();
     check_service_name_default();
     check_timeouts_are_parsed();

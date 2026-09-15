@@ -20,3 +20,11 @@ id       = "temp_u16_alias"
 datatype = "uint16"
 address  = { table = "holding", address = 3, count = 1 }
 unit     = "alias"
+
+# Switched off by connector.toml with a bare `enabled = false` (§3.3): a site dropping one point
+# of a list it does not own. Writable, so it would also be a parameter if it were loaded.
+[[point]]
+id       = "spare_u16"
+datatype = "uint16"
+access   = "read_write"
+address  = { table = "holding", address = 3, count = 1 }

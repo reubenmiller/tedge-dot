@@ -126,6 +126,7 @@ enabled       = true            # optional; false keeps the definition but leave
   name     = "<short label>"    # optional human-readable label (§3.1); the id stays an identifier
   description = "<what this signal is>"  # optional longer explanation (§3.1)
   transform = { multiplier = 1, divisor = 1, decimal_shift = 0, offset = 0 } # optional linear scale
+  enabled  = true               # optional; false keeps the definition but leaves the point out (§3.3)
 ```
 
 > **Example (Modbus).** To make the skeleton concrete, here are the same fields populated for
@@ -176,6 +177,7 @@ enabled       = true            # optional; false keeps the definition but leave
 | `transform` | object | no | Per-point linear scale `(value*multiplier*10^decimal_shift/divisor)+offset`; see §4.2. |
 | `meta` | object | no | Free-form signal metadata echoed verbatim as `meta` in every sample envelope. Never interpreted by the connector; flows and tooling read it for per-signal behaviour (e.g. `on_change`, `deadband`, `min_interval`, `debounce`), for naming the point's measurement or, with `meta.measurement = false`, keeping it out of the measurements, for declaring the signal's alarms and events (`meta.alarm`, `meta.event`, read by the `ot-alarm` / `ot-event` flows), and for exposing the point as an operator-editable *parameter* (`meta.parameter`, see §5.2). |
 | `subscribe` | boolean | no | Default `true`. `false` keeps the point on the polling schedule even when the connector supports push delivery. |
+| `enabled` | boolean | no | Default `true`. `false` keeps the definition but leaves the point out of the device (§3.3) — how a site switches off one point of a library it does not own (§3.4). |
 | `address` | object | yes | **Protocol-specific**; shape defined by the connector spec. |
 
 `name` and `description` are **not** echoed in the sample envelope: they are static per point,
@@ -232,6 +234,15 @@ that they are objects and that each connector documents and schema-validates the
   on again. A device switched off while the connector runs — by a reload or a restart — is left
   like a removed one (`remove-device`): it is no longer polled or answered for, but its retained
   link status (§8) is not cleared.
+- A point with `enabled = false` is **left out of its device**, exactly as if it were not
+  configured: the connector MUST NOT read, subscribe to, write or describe it, and it appears in
+  nothing the connector publishes — samples, the capability descriptor (§7), the link status
+  (§8). The rule applies to the **resolved** point (§3.4): `enabled` is replaced like any other
+  field, so a later definition can switch a point back on, and a bare
+  `{ id = "<point-id>", enabled = false }` switches off a point a library supplies. A disabled
+  point is exempt from the completeness rules (an `address`, a `datatype` when typed), but what
+  it does declare MUST still be valid, and `enabled` MUST be a boolean in every definition that
+  carries it (default `true`).
 - Duration strings follow the thin-edge convention (`"500ms"`, `"2s"`, `"5m"`).
 - A key the contract does not define MUST be rejected — at the top level, in `[connector]` and
   `[mqtt]`, in a `[[device]]` (a disabled one included), in a point, inline or in a point
@@ -305,7 +316,8 @@ one collected so far rather than adding a second point:
 - every other field, `address` included, is **replaced** when the overriding definition
   declares it (a partly-inherited protocol address is not a meaningful thing). `name` and
   `description` (§3.1) are ordinary scalars under this rule, which is what lets a site relabel
-  an inherited point — one label at a time — without restating its address;
+  an inherited point — one label at a time — without restating its address. `enabled` is one
+  too, so `{ id = "<point-id>", enabled = false }` switches off an inherited point (§3.3);
 - a field the override does not mention keeps its inherited value.
 
 Inline points are applied last, so a device always wins over the libraries it references.

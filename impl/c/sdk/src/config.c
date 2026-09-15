@@ -31,7 +31,7 @@ static const char *const DEVICE_KEYS[] = {
 static const char *const POINT_KEYS[] = {
     "id",      "mode",   "datatype", "endianness",  "word_order",
     "poll_interval", "address", "access", "unit", "name", "description",
-    "transform", "meta", "subscribe", NULL};
+    "transform", "meta", "subscribe", "enabled", NULL};
 static const char *const TRANSFORM_KEYS[] = {"multiplier", "divisor",
                                              "decimal_shift", "offset", NULL};
 static const char *const LIBRARY_TOP_KEYS[] = {"library", "point", NULL};
@@ -359,6 +359,8 @@ static void merge_meta(char **dst_json, toml_table_t *meta) {
     cJSON_Delete(patch);
 }
 
+static bool key_present(toml_table_t *tbl, const char *key);
+
 /* Defaults for a point that has no definition yet. */
 static void init_point(tdot_point_t *point, double device_interval,
                        tdot_mode_t device_mode) {
@@ -368,6 +370,7 @@ static void init_point(tdot_point_t *point, double device_interval,
     point->word_order = TDOT_ORDER_BIG;
     point->access = TDOT_ACCESS_READ;
     point->subscribe = true;
+    point->enabled = true;
     point->poll_interval_s = device_interval;
     tdot_transform_init(&point->transform);
 }
@@ -468,6 +471,18 @@ static int apply_point_table(toml_table_t *pt, tdot_point_t *point, char *err,
     if (d.ok)
         point->subscribe = d.u.b;
 
+    /* §3.3: a replaced scalar like any other, so a later definition can switch
+     * a point back on; the point leaves the list only once every definition
+     * has been applied (resolve_device_points). */
+    if (key_present(pt, "enabled")) {
+        d = toml_bool_in(pt, "enabled");
+        if (!d.ok) {
+            snprintf(err, errlen, "point %s: enabled must be true or false", id);
+            return -1;
+        }
+        point->enabled = d.u.b;
+    }
+
     d = toml_string_in(pt, "poll_interval");
     if (d.ok) {
         double v = tdot_duration_parse(d.u.s);
@@ -493,6 +508,11 @@ static int validate_point(const tdot_point_t *point, char *err, size_t errlen) {
         snprintf(err, errlen, "point missing required field: id");
         return -1;
     }
+    /* A disabled point is dropped once resolved (§3.3), so it need not be
+     * complete: a bare `{ id, enabled = false }` is how a site switches off a
+     * point a library supplies. */
+    if (!point->enabled)
+        return 0;
     if (point->mode == TDOT_MODE_TYPED && point->datatype == TDOT_DT_NONE) {
         snprintf(err, errlen, "point %s: typed point requires a datatype", point->id);
         return -1;
@@ -874,6 +894,17 @@ static int merge_point(tdot_device_t *dev, toml_table_t *pt,
     return apply_point_table(pt, point, err, errlen);
 }
 
+/* Free what one point owns; its address is borrowed from a document. */
+static void free_point(tdot_point_t *p) {
+    free(p->id);
+    free(p->unit);
+    free(p->name);
+    free(p->description);
+    free(p->meta_json);
+    free(p->addr_json);
+    free(p->proto);
+}
+
 /* Resolve `points_from` for one device: every library in order, then the
  * device's own inline points, which therefore win. That ordering is what lets
  * a site extend a packaged list without editing the packaged file. */
@@ -967,6 +998,20 @@ static int resolve_device_points(tdot_config_t *cfg, tdot_device_t *dev,
     for (size_t j = 0; j < dev->npoints; j++)
         if (validate_point(&dev->points[j], err, errlen) != 0)
             return -1;
+
+    /* Points switched off with `enabled = false` (§3.3) leave the list only
+     * now, once every definition has been applied, so that nothing downstream
+     * -- the runtime, the protocol module, describe, the capability
+     * descriptor -- ever sees them. Mirrors `drop_disabled_points` in the Rust
+     * loader. */
+    size_t kept = 0;
+    for (size_t j = 0; j < dev->npoints; j++) {
+        if (dev->points[j].enabled)
+            dev->points[kept++] = dev->points[j];
+        else
+            free_point(&dev->points[j]);
+    }
+    dev->npoints = kept;
 
     /* Keep the pre-existing invariant that `points` is always allocated, so a
      * device with no points at all stays indistinguishable from before. */
@@ -1272,16 +1317,8 @@ void tdot_config_free(tdot_config_t *cfg) {
 static void free_contents(tdot_config_t *cfg, bool keep_path) {
     for (size_t i = 0; i < cfg->ndevices; i++) {
         tdot_device_t *dev = &cfg->devices[i];
-        for (size_t j = 0; j < dev->npoints; j++) {
-            tdot_point_t *p = &dev->points[j];
-            free(p->id);
-            free(p->unit);
-            free(p->name);
-            free(p->description);
-            free(p->meta_json);
-            free(p->addr_json);
-            free(p->proto);
-        }
+        for (size_t j = 0; j < dev->npoints; j++)
+            free_point(&dev->points[j]);
         free(dev->points);
         for (size_t j = 0; j < dev->npoints_from; j++)
             free(dev->points_from[j]);

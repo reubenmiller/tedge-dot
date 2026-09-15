@@ -76,6 +76,18 @@ points_from      = ["plc-sim", "./points.d/modbus/plc-sim-extra.toml"]
   address  = { table = "holding", address = 3, count = 1 }
   meta     = { measurement = false }
 
+  # Points switched off (§3.3). spare_u16 comes from the path-referenced library, and this bare
+  # `enabled = false` leaves it out of plc1 without editing that file: it is never read, written
+  # or described. draft_u16 is incomplete (no datatype, no address) and loads only because it is
+  # switched off.
+  [[device.point]]
+  id      = "spare_u16"
+  enabled = false
+
+  [[device.point]]
+  id      = "draft_u16"
+  enabled = false
+
 # Switched off (§3.3): a disabled device is not loaded at all — never connected, polled or
 # advertised — and nothing else about it is read, so the point library it names need not be
 # installed. This one does not exist: remove `enabled = false` and the config no longer loads.

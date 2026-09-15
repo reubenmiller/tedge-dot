@@ -80,6 +80,38 @@ fn a_disabled_device_needs_only_its_name() {
         .expect_err("enabled must be a boolean");
 }
 
+/// A point switched off with `enabled = false` (§3.3) is dropped by the loaders before the
+/// completeness rules apply, so a bare `{ id, enabled = false }` is legal even on a device that
+/// inherits nothing. What it does declare is still checked for shape, an enabled point there must
+/// still be complete, and `enabled` must be a boolean.
+#[test]
+fn a_disabled_point_need_not_be_complete() {
+    accepts(device(serde_json::json!({
+        "point": [
+            { "id": "t", "address": { "a": 1 }, "datatype": "uint16" },
+            { "id": "draft", "enabled": false },
+        ],
+    })))
+    .expect("a disabled point is not loaded, so nothing but its id is required");
+
+    let err = accepts(device(serde_json::json!({
+        "point": [{ "id": "draft", "enabled": true }],
+    })))
+    .expect_err("an enabled point with nothing to inherit must be complete");
+    assert!(err.contains("address"), "{err}");
+
+    accepts(device(serde_json::json!({
+        "point": [{ "id": "draft", "enabled": false, "datatype": "not_a_datatype" }],
+    })))
+    .expect_err("what a disabled point declares is still checked for shape");
+
+    accepts(device(serde_json::json!({
+        "points_from": ["acme-meter"],
+        "point": [{ "id": "boiler_temp", "enabled": "no" }],
+    })))
+    .expect_err("enabled must be a boolean");
+}
+
 #[test]
 fn points_from_must_be_an_array_of_non_empty_strings() {
     accepts(device(serde_json::json!({ "points_from": "acme-meter" })))
