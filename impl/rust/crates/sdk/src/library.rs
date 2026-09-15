@@ -97,6 +97,7 @@ const POINT_KEYS: &[&str] = &[
     "transform",
     "meta",
     "subscribe",
+    "enabled",
 ];
 const TRANSFORM_KEYS: &[&str] = &["multiplier", "divisor", "decimal_shift", "offset"];
 const LIBRARY_TOP_KEYS: &[&str] = &["library", "point"];
@@ -188,6 +189,54 @@ fn check_point_keys(point: &Value) -> Result<(), String> {
     if let Some(transform) = point.get("transform") {
         check_keys(transform, TRANSFORM_KEYS, &format!("the transform of point '{id}'"))?;
     }
+    Ok(())
+}
+
+/// The shape of one point definition's `enabled` (§3.3). Checked on each definition as written —
+/// in a library or inline — so a wrong type is reported where it is, even when a later definition
+/// decides the value the point resolves to.
+fn check_point_enabled(point: &Value) -> Result<(), String> {
+    match point.get("enabled") {
+        None | Some(Value::Boolean(_)) => Ok(()),
+        Some(_) => {
+            let id = point.get("id").and_then(Value::as_str).unwrap_or("<unnamed>");
+            Err(format!("point '{id}': enabled must be true or false"))
+        }
+    }
+}
+
+/// Drop the resolved points switched off with `enabled = false` (§3.3) from a device's point
+/// list, so nothing downstream — the runtime, the protocol module, `describe`, the capability
+/// descriptor — ever sees them. It runs after every definition has been merged, because a later
+/// definition may switch a point back on.
+///
+/// A disabled point is exempt from the completeness rules — a bare `{ id, enabled = false }` is
+/// how a site switches off a point a library supplies — but what it does declare must still have
+/// the right shape, as the C loader checks each definition when it applies it. The typed parse is
+/// that check, with a placeholder standing in for an address the point need not have.
+fn drop_disabled_points(device: &mut Value, device_name: &str) -> Result<(), String> {
+    let Some(points) = device.get_mut("point").and_then(Value::as_array_mut) else {
+        return Ok(());
+    };
+    let mut kept = Vec::with_capacity(points.len());
+    for point in std::mem::take(points) {
+        if point.get("enabled") != Some(&Value::Boolean(false)) {
+            kept.push(point);
+            continue;
+        }
+        let id = point.get("id").and_then(Value::as_str).unwrap_or("<unnamed>").to_string();
+        let mut probe = point;
+        if let Some(table) = probe.as_table_mut() {
+            table
+                .entry("address".to_string())
+                .or_insert_with(|| Value::Table(Table::new()));
+        }
+        probe
+            .try_into::<crate::config::PointConfig>()
+            .map_err(|e| format!("device '{device_name}': point '{id}': {e}"))?;
+        tracing::info!(device = %device_name, point = %id, "point is disabled (enabled = false); not loaded");
+    }
+    *points = kept;
     Ok(())
 }
 
@@ -302,8 +351,12 @@ fn expand(doc: &mut Value, base_dir: &Path) -> Result<(), String> {
             .and_then(Value::as_str)
             .unwrap_or("<unnamed>")
             .to_string();
+        for point in device.get("point").and_then(Value::as_array).into_iter().flatten() {
+            check_point_enabled(point).map_err(|e| format!("device '{name}': {e}"))?;
+        }
         let refs = device_refs(device, &name)?;
         if refs.is_empty() {
+            drop_disabled_points(device, &name)?;
             continue;
         }
 
@@ -350,13 +403,6 @@ fn expand(doc: &mut Value, base_dir: &Path) -> Result<(), String> {
             merge_point(&mut points, point);
         }
 
-        tracing::info!(
-            device = %name,
-            libraries = ?refs,
-            points = points.len(),
-            inline = inline_count,
-            "resolved device points from point libraries"
-        );
         let table = device
             .as_table_mut()
             .ok_or_else(|| format!("device '{name}' is not a table"))?;
@@ -369,6 +415,16 @@ fn expand(doc: &mut Value, base_dir: &Path) -> Result<(), String> {
                 .or_insert(Value::String(device_type));
         }
         table.insert("point".to_string(), Value::Array(points));
+        drop_disabled_points(device, &name)?;
+
+        let resolved = device.get("point").and_then(Value::as_array).map_or(0, Vec::len);
+        tracing::info!(
+            device = %name,
+            libraries = ?refs,
+            points = resolved,
+            inline = inline_count,
+            "resolved device points from point libraries"
+        );
     }
     Ok(())
 }
@@ -641,7 +697,9 @@ fn read_library(path: &Path, protocol: &str) -> Result<Library, String> {
     // order to apply and the second definition would silently win.
     let mut seen: Vec<&str> = Vec::new();
     for point in points {
-        check_point_keys(point).map_err(|e| format!("point library '{where_}': {e}"))?;
+        check_point_keys(point)
+            .and_then(|()| check_point_enabled(point))
+            .map_err(|e| format!("point library '{where_}': {e}"))?;
         let id = point
             .get("id")
             .and_then(Value::as_str)
@@ -1172,6 +1230,103 @@ points_from = ["not-installed"]
         )
         .unwrap_err();
         assert!(err.contains("defined more than once"), "{err}");
+    }
+
+    /// `enabled = false` on a point (§3.3) leaves the resolved point out of its device: a bare
+    /// patch switches off a library point, a later definition switches it back on, and a disabled
+    /// point need not be complete. Mirrors `check_disabled_points` in impl/c/tests/config.c.
+    #[test]
+    fn a_disabled_point_is_left_out_of_its_device() {
+        let dir = Dir::new("disabled-point");
+        dir.write("modbus/acme-meter.toml", LIBRARY);
+        dir.write(
+            "modbus/site-off.toml",
+            "[library]\nprotocol = \"modbus\"\n\n[[point]]\nid = \"pump_run\"\nenabled = false\n",
+        );
+        let ids = |cfg: &ConnectorConfig| -> Vec<String> {
+            cfg.devices[0].points.iter().map(|p| p.id.clone()).collect()
+        };
+
+        // Incomplete, `draft` loads only because it is switched off.
+        let cfg = resolve_in(
+            dir.path(),
+            "\"acme-meter\"",
+            "[[device.point]]\nid = \"boiler_temp\"\nenabled = false\n\n\
+             [[device.point]]\nid = \"draft\"\nenabled = false\n",
+        )
+        .unwrap();
+        assert_eq!(ids(&cfg), ["pump_run"]);
+
+        // Switched off by one library, and back on by the device's own definition.
+        let cfg = resolve_in(dir.path(), "\"acme-meter\", \"site-off\"", "").unwrap();
+        assert_eq!(ids(&cfg), ["boiler_temp"]);
+        let cfg = resolve_in(
+            dir.path(),
+            "\"acme-meter\", \"site-off\"",
+            "[[device.point]]\nid = \"pump_run\"\nenabled = true\n",
+        )
+        .unwrap();
+        assert_eq!(ids(&cfg), ["boiler_temp", "pump_run"]);
+
+        // A device with no libraries drops its disabled points too.
+        let text = r#"
+[connector]
+protocol = "modbus"
+
+[[device]]
+name             = "plc-1"
+protocol_address = { unit_id = 1 }
+
+  [[device.point]]
+  id       = "only"
+  datatype = "uint16"
+  address  = { table = "holding", address = 1, count = 1 }
+
+  [[device.point]]
+  id      = "draft"
+  enabled = false
+"#;
+        let cfg = resolve(text, dir.path()).unwrap();
+        assert_eq!(ids(&cfg), ["only"]);
+    }
+
+    /// A disabled point is exempt from the completeness rules only: `enabled` must be a boolean
+    /// wherever it is written, and every other field it declares is checked as usual — the same
+    /// file must be legal whether the point is switched on or off.
+    #[test]
+    fn a_disabled_point_is_still_checked() {
+        let dir = Dir::new("disabled-point-shape");
+        dir.write("modbus/acme-meter.toml", LIBRARY);
+        let err = resolve_in(
+            dir.path(),
+            "\"acme-meter\"",
+            "[[device.point]]\nid = \"boiler_temp\"\nenabled = \"no\"\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("point 'boiler_temp': enabled must be true or false"), "{err}");
+
+        dir.write(
+            "modbus/bad.toml",
+            "[library]\nprotocol = \"modbus\"\n\n[[point]]\nid = \"t\"\nenabled = 0\n",
+        );
+        let err = resolve_in(dir.path(), "\"bad\"", "").unwrap_err();
+        assert!(err.contains("point 't': enabled must be true or false"), "{err}");
+
+        let err = resolve_in(
+            dir.path(),
+            "\"acme-meter\"",
+            "[[device.point]]\nid = \"draft\"\nenabled = false\ndatatype = \"not_a_datatype\"\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("not_a_datatype"), "{err}");
+
+        let err = resolve_in(
+            dir.path(),
+            "\"acme-meter\"",
+            "[[device.point]]\nid = \"draft\"\nenabled = false\nunits = \"K\"\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown key 'units' in point 'draft'"), "{err}");
     }
 
     /// A key the contract does not define is refused (§3.3), naming the table and — when one is

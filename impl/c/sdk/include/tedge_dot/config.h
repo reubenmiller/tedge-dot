@@ -48,6 +48,10 @@ typedef struct tdot_point {
     bool has_transform;
     char *meta_json; /* free-form [device.point.meta], serialized to JSON */
     bool subscribe;  /* default true: deliver by push when the module supports it */
+    /* Default true. Only meaningful while the loader merges a point's
+     * definitions (contract §3.4): a point that resolves to false is dropped
+     * before the config is returned (§3.3), so every loaded point has it set. */
+    bool enabled;
     /* Resolved: point ?? device ?? connector. Drives the polling schedule AND,
      * for a subscribe-capable module, the per-point sampling-interval hint (an
      * OPC UA monitored item's samplingInterval). The Rust runtime resolves

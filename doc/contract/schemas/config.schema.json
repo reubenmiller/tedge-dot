@@ -187,7 +187,20 @@
             "properties": {
               "point": {
                 "items": {
-                  "$ref": "#/$defs/complete_point"
+                  "description": "A disabled point (enabled = false) is left out of the device (§3.3), so it need not be complete.",
+                  "if": {
+                    "required": [
+                      "enabled"
+                    ],
+                    "properties": {
+                      "enabled": {
+                        "const": false
+                      }
+                    }
+                  },
+                  "else": {
+                    "$ref": "#/$defs/complete_point"
+                  }
                 }
               }
             }
@@ -300,6 +313,11 @@
           "type": "boolean",
           "default": true,
           "description": "Set false to keep this point on the polling schedule even when the connector supports push delivery (subscriptions)."
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "false leaves the point out of the device (§3.3): it is not read, subscribed, written or described. Applied to the resolved point (§3.4), so an inline { id, enabled = false } switches off a point a library supplies, and a later definition can switch it back on. A disabled point need not be complete, but what it declares is still checked for shape."
         }
       },
       "description": "A point definition. When the device inherits points from a library (§3.4) this may be a patch of one: only `id` is required, and any field it omits keeps the inherited value. A device that inherits nothing must define every point completely, which $defs/complete_point states."
