@@ -27,7 +27,9 @@ COPY connectors/profibus/sim/slave_sim.py /slave_sim.py
 
 EXPOSE 9200
 
+# --host 0.0.0.0: the listener must be reachable through the container's
+# published port (the script itself defaults to loopback).
 CMD ["python3", "/slave_sim.py", \
-     "--port", "tcp-listen://9200", \
+     "--port", "tcp-listen://9200", "--host", "0.0.0.0", \
      "--address", "7", "--baudrate", "19200", \
      "--input-bytes", "8", "--output-bytes", "4"]

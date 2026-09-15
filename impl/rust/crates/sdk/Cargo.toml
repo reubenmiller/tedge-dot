@@ -16,7 +16,9 @@ thiserror = "1"
 tracing = "0.1"
 time = { version = "0.3", features = ["macros", "formatting", "parsing"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal"] }
-rumqttc = "0.24"
+# TLS off: the connector only talks to the local thin-edge.io broker, and the default
+# `use-rustls` feature pulls in rustls 0.22 / rustls-webpki 0.102 (open security advisories).
+rumqttc = { version = "0.24", default-features = false }
 
 [dev-dependencies]
 proptest = "1"

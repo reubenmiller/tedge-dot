@@ -52,8 +52,11 @@ function numSetting(metaValue, cfgValue, dflt) {
 }
 
 // Recursively merge src into target (nested objects merged, other values overwritten).
+// Group/series names come from point ids and meta, so a key like "__proto__" must never be
+// followed into (or assigned onto) an object's prototype.
 function deepMerge(target, src) {
   for (const key of Object.keys(src)) {
+    if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
     const a = target[key];
     const b = src[key];
     if (

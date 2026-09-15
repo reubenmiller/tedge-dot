@@ -35,7 +35,7 @@ toml = "0.8"
 jsonschema = "0.46"
 # Only the vendored `mqttbytes` v4 codec is used (for the built-in test broker);
 # the SDK already depends on rumqttc, so this adds nothing new.
-rumqttc = "0.24"
+rumqttc = { version = "0.24", default-features = false }
 bytes = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -45,5 +45,5 @@ tokio-modbus = { version = "0.16", default-features = false, features = ["tcp", 
 async-opcua = { version = "0.18", default-features = false, features = ["server"], optional = true }
 
 [dev-dependencies]
-rumqttc = "0.24"
+rumqttc = { version = "0.24", default-features = false }
 tokio-modbus = { version = "0.16", default-features = false, features = ["tcp"] }
