@@ -45,21 +45,32 @@ replaces:
 # The connectors dynamically link these; open62541 is statically linked, so it
 # is not a runtime dependency. Package names are Debian/Ubuntu; the rpm/apk
 # overrides use each ecosystem's names (best effort — adjust per distro).
+#
+# tedge-parameter-plugin owns the c8y_ParameterUpdate operation template that the
+# ot-command-forward flow serves for the OT child devices, so writing points from
+# the Cumulocity Parameters tab works out of the box
+# (doc/rfc/0003-parameter-writes.md). It is published to the same thin-edge
+# community repository as this package, under the same name for every format.
+# An override REPLACES the base list, so it is repeated in each. Keep in step
+# with .goreleaser.yaml.
 depends:
   - libmodbus5
   - libmosquitto1
   - libcjson1
+  - tedge-parameter-plugin
 overrides:
   rpm:
     depends:
       - libmodbus
       - mosquitto
       - libcjson
+      - tedge-parameter-plugin
   apk:
     depends:
       - libmodbus
       - mosquitto-libs
       - cjson
+      - tedge-parameter-plugin
 
 scripts:
   postinstall: packaging/scripts/postinstall.sh

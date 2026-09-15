@@ -126,12 +126,14 @@ jobs:
           # The macOS runner has no dpkg-deb.
           brew install dpkg
           deb=$(ls dist/tedge-dot-rs_*_linux_amd64.deb)
-          dpkg-deb -I "$deb" | grep -E 'Package:|Provides:|Conflicts:|Replaces:'
+          dpkg-deb -I "$deb" | grep -E 'Package:|Depends:|Provides:|Conflicts:|Replaces:'
           # The package renaming is load-bearing: tedge-dot-rs and tedge-dot-c must stay
           # mutually exclusive, which is what Provides/Conflicts on the virtual package buys.
           dpkg-deb -f "$deb" Package | grep -qx 'tedge-dot-rs'
           dpkg-deb -f "$deb" Provides | grep -q 'tedge-dot'
           dpkg-deb -f "$deb" Conflicts | grep -q 'tedge-dot-c'
+          # Cloud parameter writes need the c8y_ParameterUpdate template the plugin owns.
+          dpkg-deb -f "$deb" Depends | grep -q 'tedge-parameter-plugin'
           contents=$(dpkg-deb -c "$deb")
           echo "$contents" | grep -q '/usr/bin/tedge-dot$'
           for flow in ot-measurement ot-registration ot-command-forward \
@@ -253,11 +255,20 @@ jobs:
           dpkg-deb -f "$deb" Package | grep -qx 'tedge-dot-c'
           dpkg-deb -f "$deb" Provides | grep -q 'tedge-dot'
           dpkg-deb -f "$deb" Conflicts | grep -q 'tedge-dot-rs'
+          # Cloud parameter writes need the c8y_ParameterUpdate template the plugin owns.
+          dpkg-deb -f "$deb" Depends | grep -q 'tedge-parameter-plugin'
           # A real thin-edge host already has the tedge user; create it so the
           # package's tedge-owned config files and service user resolve cleanly.
           sudo groupadd --system tedge 2>/dev/null || true
           sudo useradd --system --gid tedge --no-create-home --shell /usr/sbin/nologin tedge 2>/dev/null || true
-          sudo apt-get install -y "./$deb"
+          # tedge-parameter-plugin (and its tedge-inventory chain) comes from the thin-edge
+          # community repository, as on a real device. --no-install-recommends keeps the
+          # inventory's Recommends on the full tedge stack off the runner.
+          curl -1sLf 'https://dl.cloudsmith.io/public/thinedge/community/setup.deb.sh' | sudo -E bash
+          sudo apt-get install -y --no-install-recommends "./$deb"
+          echo "== dependency installed =="
+          dpkg -s tedge-parameter-plugin | grep -q '^Status: install ok installed'
+          test -f /etc/tedge/operations/c8y/c8y_ParameterUpdate.template
           echo "== packaged binary runs =="
           command -v tedge-dot
           tedge-dot run /nonexistent 2>&1 | head -1 || true

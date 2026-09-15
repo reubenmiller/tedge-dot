@@ -98,6 +98,13 @@ nfpms:
       - tedge-dot-c
     replaces:
       - tedge-dot
+    # tedge-parameter-plugin owns the c8y_ParameterUpdate operation template that the
+    # ot-command-forward flow serves for the OT child devices, so writing points from the
+    # Cumulocity Parameters tab works out of the box (doc/rfc/0003-parameter-writes.md).
+    # It is published to the same thin-edge community repository as this package.
+    # Keep in step with impl/c/packaging/nfpm.yaml.
+    dependencies:
+      - tedge-parameter-plugin
     maintainer: thin-edge.io <info@thin-edge.io>
     description: "thin-edge.io OT protocol connectors (Modbus, OPC UA, CAN bus, CANopen) - Rust implementation"
     homepage: "https://github.com/thin-edge/tedge-dot"

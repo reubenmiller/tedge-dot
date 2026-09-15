@@ -68,9 +68,13 @@ Rust modules: [connector-modbus](impl/rust/crates/connector-modbus/),
 
 ## Install
 
-Grab a `.deb`/`.rpm`/`.apk` (or a plain binary archive) from the
-[releases page](https://github.com/thin-edge/tedge-dot/releases). The package
-installs:
+Install `tedge-dot-rs` (or `tedge-dot-c`) from the thin-edge.io
+[community repository](https://thin-edge.github.io/thin-edge.io/install/#community-plugins),
+or grab a `.deb`/`.rpm`/`.apk` (or a plain binary archive) from the
+[releases page](https://github.com/thin-edge/tedge-dot/releases). The package depends on
+[tedge-parameter-plugin](https://github.com/thin-edge/tedge-parameter-plugin) from that same
+repository (see [Writing to devices](#writing-to-devices)), so set the repository up even when
+installing a downloaded file. The package installs:
 
 - `tedge-dot` — the connector binary (also a standalone `read`/`write`/`describe` CLI);
 - one default config per protocol in `/etc/tedge/plugins/ot/` (no devices
