@@ -10,6 +10,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# No job writes to the repository; artifact uploads use the runtime token, not GITHUB_TOKEN.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Rust build & unit/property tests

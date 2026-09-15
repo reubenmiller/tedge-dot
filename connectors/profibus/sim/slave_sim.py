@@ -79,10 +79,10 @@ class TcpSerial:
     the first hung until the container restarted).
     """
 
-    def __init__(self, port: int):
+    def __init__(self, port: int, host: str):
         self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.srv.bind(("0.0.0.0", port))
+        self.srv.bind((host, port))
         self.srv.listen(1)
         self.conn: socket.socket | None = None
 
@@ -394,7 +394,7 @@ class DPSlave:
 
 # ── main loop ─────────────────────────────────────────────────────────────────
 
-def run(port_path: str, address: int, baudrate: int, input_bytes: int, output_bytes: int):
+def run(port_path: str, host: str, address: int, baudrate: int, input_bytes: int, output_bytes: int):
     log.info(
         "starting PROFIBUS slave addr=%d port=%s baud=%d inputs=%d outputs=%d",
         address, port_path, baudrate, input_bytes, output_bytes,
@@ -403,8 +403,8 @@ def run(port_path: str, address: int, baudrate: int, input_bytes: int, output_by
     slave = DPSlave(address, ident_number=0, input_bytes=input_bytes, output_bytes=output_bytes)
 
     if port_path.startswith("tcp-listen://"):
-        port = TcpSerial(int(port_path.removeprefix("tcp-listen://")))
-        log.info("listening on %s — slave ready", port_path)
+        port = TcpSerial(int(port_path.removeprefix("tcp-listen://")), host)
+        log.info("listening on %s (host %s) — slave ready", port_path, host)
     else:
         port = serial.Serial(
             port=port_path,
@@ -436,9 +436,13 @@ def run(port_path: str, address: int, baudrate: int, input_bytes: int, output_by
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Minimal PROFIBUS DP-V0 slave simulator")
     parser.add_argument("--port", default="/dev/ttyPROFIBUS1")
+    parser.add_argument(
+        "--host", default="127.0.0.1",
+        help="interface to listen on with tcp-listen:// (the container image passes 0.0.0.0)",
+    )
     parser.add_argument("--address", type=int, default=7)
     parser.add_argument("--baudrate", type=int, default=19200)
     parser.add_argument("--input-bytes", type=int, default=8)
     parser.add_argument("--output-bytes", type=int, default=4)
     args = parser.parse_args()
-    run(args.port, args.address, args.baudrate, args.input_bytes, args.output_bytes)
+    run(args.port, args.host, args.address, args.baudrate, args.input_bytes, args.output_bytes)
