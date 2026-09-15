@@ -56,7 +56,7 @@ publish after the connected state (and its subscription loop) is set up.
 
 **Context**
 
-Found in https://github.com/reubenmiller/tedge-dot: a device whose points were all delivered by
+Found in https://github.com/thin-edge/tedge-dot: a device whose points were all delivered by
 subscription stayed silent for good after any server restart. The connector now checks push
 liveness itself (`check_subscription`: no publish response within the keep-alive window) and
 replaces the session. `impl/rust/crates/connector-opcua/tests/integration.rs`

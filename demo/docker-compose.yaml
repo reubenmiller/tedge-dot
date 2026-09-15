@@ -44,7 +44,7 @@ services:
   # --- Modbus TCP simulator (pymodbus) ---------------------------------------
   # Exposes a real Modbus TCP server on host port 5020.
   modbus-sim:
-    image: ${SIM_IMAGE_REPO:-ghcr.io/reubenmiller/tedge-dot}/modbus-sim:${SIM_IMAGE_TAG:-latest}
+    image: ${SIM_IMAGE_REPO:-ghcr.io/thin-edge/tedge-dot}/modbus-sim:${SIM_IMAGE_TAG:-latest}
     pull_policy: missing
     build:
       context: ..
@@ -65,7 +65,7 @@ services:
   # bind is not reachable through a published Docker port, so host networking is
   # the robust choice here.) The connector dials opc.tcp://127.0.0.1:4840/.
   opcua-sim:
-    image: ${SIM_IMAGE_REPO:-ghcr.io/reubenmiller/tedge-dot}/opcua-sim:${SIM_IMAGE_TAG:-latest}
+    image: ${SIM_IMAGE_REPO:-ghcr.io/thin-edge/tedge-dot}/opcua-sim:${SIM_IMAGE_TAG:-latest}
     pull_policy: missing
     build:
       context: ..
@@ -82,7 +82,7 @@ services:
   # connector.  Creates vcan0 if it does not already exist, then broadcasts
   # ENGINE_STATUS frames at 10 Hz.
   canbus-sim:
-    image: ${SIM_IMAGE_REPO:-ghcr.io/reubenmiller/tedge-dot}/canbus-sim:${SIM_IMAGE_TAG:-latest}
+    image: ${SIM_IMAGE_REPO:-ghcr.io/thin-edge/tedge-dot}/canbus-sim:${SIM_IMAGE_TAG:-latest}
     pull_policy: missing
     build:
       context: ..
@@ -102,7 +102,7 @@ services:
   # while this node serves CANopen SDO requests for node ID 1.  Different COB-IDs
   # so the two coexist on the same virtual bus, exactly as on real hardware.
   canopen-sim:
-    image: ${SIM_IMAGE_REPO:-ghcr.io/reubenmiller/tedge-dot}/canopen-sim:${SIM_IMAGE_TAG:-latest}
+    image: ${SIM_IMAGE_REPO:-ghcr.io/thin-edge/tedge-dot}/canopen-sim:${SIM_IMAGE_TAG:-latest}
     pull_policy: missing
     build:
       context: ..
@@ -120,7 +120,7 @@ services:
   # Dockerfile). The host-side connector speaks serial-over-TCP to it directly:
   # port = "tcp://127.0.0.1:9200".
   profibus-sim:
-    image: ${SIM_IMAGE_REPO:-ghcr.io/reubenmiller/tedge-dot}/profibus-sim:${SIM_IMAGE_TAG:-latest}
+    image: ${SIM_IMAGE_REPO:-ghcr.io/thin-edge/tedge-dot}/profibus-sim:${SIM_IMAGE_TAG:-latest}
     pull_policy: missing
     build:
       context: ..

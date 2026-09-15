@@ -57,9 +57,9 @@
 #   sudo ip link set up vcan0
 #
 #   sudo podman run -d --name canbus-sim  --network host --privileged \
-#     --restart unless-stopped ghcr.io/reubenmiller/tedge-dot/canbus-sim:latest
+#     --restart unless-stopped ghcr.io/thin-edge/tedge-dot/canbus-sim:latest
 #   sudo podman run -d --name canopen-sim --network host --privileged \
-#     --restart unless-stopped ghcr.io/reubenmiller/tedge-dot/canopen-sim:latest
+#     --restart unless-stopped ghcr.io/thin-edge/tedge-dot/canopen-sim:latest
 #
 # Needs a kernel with CONFIG_CAN / CONFIG_CAN_RAW / CONFIG_CAN_VCAN. With vcan0
 # already up, both images are idempotent about creating it.
@@ -70,7 +70,7 @@ services:
   # --- Modbus TCP simulator (pymodbus) ---------------------------------------
   # Serves Modbus TCP on device port 5020 (container port 502).
   modbus-sim:
-    image: ${SIM_IMAGE_REPO:-ghcr.io/reubenmiller/tedge-dot}/modbus-sim:${SIM_IMAGE_TAG:-latest}
+    image: ${SIM_IMAGE_REPO:-ghcr.io/thin-edge/tedge-dot}/modbus-sim:${SIM_IMAGE_TAG:-latest}
     ports:
       - "5020:502"
     restart: unless-stopped
@@ -82,7 +82,7 @@ services:
   # and the C connector still connect when dialling opc.tcp://127.0.0.1:4840/
   # against a server advertising 0.0.0.0.
   opcua-sim:
-    image: ${SIM_IMAGE_REPO:-ghcr.io/reubenmiller/tedge-dot}/opcua-sim:${SIM_IMAGE_TAG:-latest}
+    image: ${SIM_IMAGE_REPO:-ghcr.io/thin-edge/tedge-dot}/opcua-sim:${SIM_IMAGE_TAG:-latest}
     environment:
       OPCUA_ENDPOINT_HOST: "0.0.0.0"
       # Temperature/Count change every second, so subscribed points keep delivering
@@ -96,7 +96,7 @@ services:
   # PTYs cannot cross the container boundary, so the slave's serial line is
   # exposed over TCP; the connector dials tcp://127.0.0.1:9200.
   profibus-sim:
-    image: ${SIM_IMAGE_REPO:-ghcr.io/reubenmiller/tedge-dot}/profibus-sim:${SIM_IMAGE_TAG:-latest}
+    image: ${SIM_IMAGE_REPO:-ghcr.io/thin-edge/tedge-dot}/profibus-sim:${SIM_IMAGE_TAG:-latest}
     ports:
       - "9200:9200"
     restart: unless-stopped

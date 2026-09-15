@@ -36,5 +36,5 @@ timing, so a server-side fix (re-check `sample_skipped_data_value` on subsequent
 compare against the pre-rewrite timestamp when draining) seems warranted.
 
 Context: found while testing a client (monitored-item subscription) against the in-process
-test server in https://github.com/reubenmiller/tedge-dot
+test server in https://github.com/thin-edge/tedge-dot
 (`impl/rust/crates/connector-opcua/tests/integration.rs` documents the analysis).
