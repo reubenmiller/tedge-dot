@@ -192,17 +192,102 @@ fn check_point_keys(point: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// The shape of one point definition's `enabled` (§3.3). Checked on each definition as written —
-/// in a library or inline — so a wrong type is reported where it is, even when a later definition
-/// decides the value the point resolves to.
-fn check_point_enabled(point: &Value) -> Result<(), String> {
-    match point.get("enabled") {
-        None | Some(Value::Boolean(_)) => Ok(()),
-        Some(_) => {
-            let id = point.get("id").and_then(Value::as_str).unwrap_or("<unnamed>");
-            Err(format!("point '{id}': enabled must be true or false"))
-        }
+// The values a contract-level field may take (§3.3), as `config.schema.json` enumerates them.
+const MODES: &[&str] = &["raw", "typed"];
+const DATATYPES: &[&str] = &[
+    "bool", "int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64", "float32",
+    "float64", "string", "bytes",
+];
+const ORDERS: &[&str] = &["big", "little"];
+const ACCESSES: &[&str] = &["read", "write", "read_write"];
+const DURATION: &str = "a duration such as \"500ms\", \"2s\" or \"5m\"";
+
+/// The ` (got '...')` suffix naming a refused string value; nothing for other types.
+fn got(value: &Value) -> String {
+    value
+        .as_str()
+        .map(|s| format!(" (got '{s}')"))
+        .unwrap_or_default()
+}
+
+/// `key` of `table`, when present, must be one of `allowed`, spelt exactly.
+fn check_one_of(table: &Value, key: &str, allowed: &[&str]) -> Result<(), String> {
+    let Some(value) = table.get(key) else {
+        return Ok(());
+    };
+    if value.as_str().is_some_and(|s| allowed.contains(&s)) {
+        return Ok(());
     }
+    let listed: Vec<String> = allowed.iter().map(|a| format!("\"{a}\"")).collect();
+    Err(format!("{key} must be one of {}{}", listed.join(", "), got(value)))
+}
+
+/// `key` of `table`, when present, must be a duration string [`parse_duration`] accepts.
+fn check_duration(table: &Value, key: &str) -> Result<(), String> {
+    match table.get(key) {
+        Some(value) if value.as_str().and_then(crate::config::parse_duration).is_none() => {
+            Err(format!("{key} must be {DURATION}{}", got(value)))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `key` of `table`, when present, must satisfy `ok`, described as `expected`.
+fn check_type(
+    table: &Value,
+    key: &str,
+    ok: impl Fn(&Value) -> bool,
+    expected: &str,
+) -> Result<(), String> {
+    match table.get(key) {
+        Some(value) if !ok(value) => Err(format!("{key} must be {expected}")),
+        _ => Ok(()),
+    }
+}
+
+/// The values of one point definition's contract fields (§3.3). Checked on each definition as
+/// written — in a library or inline — so a wrong value is reported where it is, even when a
+/// later definition replaces it, and whether or not the point is disabled.
+///
+/// The typed parse alone is not enough: `access`, `endianness`, `word_order` and
+/// `poll_interval` are strings interpreted only later, where an unknown access reads as
+/// `"read"` and an unparseable interval silently becomes the device's. The C loader
+/// (impl/c/sdk/src/config.c `check_point_fields`) checks the same fields, in the same order, with
+/// the same messages — it must reject exactly the same files as this one.
+fn check_point_fields(point: &Value) -> Result<(), String> {
+    let id = point.get("id").and_then(Value::as_str).unwrap_or("<unnamed>");
+    check_point_values(point).map_err(|e| format!("point '{id}': {e}"))
+}
+
+fn check_point_values(point: &Value) -> Result<(), String> {
+    check_one_of(point, "mode", MODES)?;
+    check_one_of(point, "datatype", DATATYPES)?;
+    check_one_of(point, "endianness", ORDERS)?;
+    check_one_of(point, "word_order", ORDERS)?;
+    check_duration(point, "poll_interval")?;
+    check_type(point, "address", Value::is_table, "a table")?;
+    check_one_of(point, "access", ACCESSES)?;
+    for key in ["unit", "name", "description"] {
+        check_type(point, key, Value::is_str, "a string")?;
+    }
+    check_type(point, "transform", Value::is_table, "a table")?;
+    if let Some(transform) = point.get("transform") {
+        for key in ["multiplier", "divisor", "offset"] {
+            check_type(transform, key, |v| v.is_integer() || v.is_float(), "a number")
+                .map_err(|e| format!("transform.{e}"))?;
+        }
+        let fits = |v: &Value| v.as_integer().is_some_and(|i| i32::try_from(i).is_ok());
+        check_type(
+            transform,
+            "decimal_shift",
+            fits,
+            "an integer between -2147483648 and 2147483647",
+        )
+        .map_err(|e| format!("transform.{e}"))?;
+    }
+    check_type(point, "meta", Value::is_table, "a table")?;
+    check_type(point, "subscribe", Value::is_bool, "true or false")?;
+    check_type(point, "enabled", Value::is_bool, "true or false")
 }
 
 /// Drop the resolved points switched off with `enabled = false` (§3.3) from a device's point
@@ -265,6 +350,10 @@ pub fn config_base_dir(config_path: &Path) -> &Path {
 pub fn resolve(text: &str, base_dir: &Path) -> Result<ConnectorConfig, String> {
     let mut doc: Value = toml::from_str(text).map_err(|e| format!("failed to parse config: {e}"))?;
     check_document(&doc)?;
+    // Before the devices, as the C loader reads it; the typed parse would only catch a non-string.
+    if let Some(connector) = doc.get("connector") {
+        check_duration(connector, "poll_interval").map_err(|e| format!("[connector] {e}"))?;
+    }
     expand(&mut doc, base_dir)?;
     doc.try_into()
         .map_err(|e: toml::de::Error| format!("failed to parse config: {e}"))
@@ -319,6 +408,9 @@ fn expand(doc: &mut Value, base_dir: &Path) -> Result<(), String> {
             }
             Some(_) => return Err(format!("device '{name}': enabled must be true or false")),
         }
+        check_one_of(device, "default_mode", MODES)
+            .and_then(|()| check_duration(device, "poll_interval"))
+            .map_err(|e| format!("device '{name}': {e}"))?;
         // Checked here rather than left to the typed parse, because an empty string would
         // otherwise be accepted as a type and silently behave like an absent one — and the C
         // loader must reject exactly the same files as this one.
@@ -352,7 +444,7 @@ fn expand(doc: &mut Value, base_dir: &Path) -> Result<(), String> {
             .unwrap_or("<unnamed>")
             .to_string();
         for point in device.get("point").and_then(Value::as_array).into_iter().flatten() {
-            check_point_enabled(point).map_err(|e| format!("device '{name}': {e}"))?;
+            check_point_fields(point).map_err(|e| format!("device '{name}': {e}"))?;
         }
         let refs = device_refs(device, &name)?;
         if refs.is_empty() {
@@ -698,7 +790,7 @@ fn read_library(path: &Path, protocol: &str) -> Result<Library, String> {
     let mut seen: Vec<&str> = Vec::new();
     for point in points {
         check_point_keys(point)
-            .and_then(|()| check_point_enabled(point))
+            .and_then(|()| check_point_fields(point))
             .map_err(|e| format!("point library '{where_}': {e}"))?;
         let id = point
             .get("id")
@@ -1405,6 +1497,171 @@ protocol_address = { unit_id = 1 }
         );
         let err = resolve_in(dir.path(), "\"acme\"", "").unwrap_err();
         assert!(err.contains("unknown key 'units' in point 't' (did you mean 'unit'?)"), "{err}");
+    }
+
+    /// A refused point field value and the message naming it (after `point 't': `). Mirrored,
+    /// messages included, by `POINT_FIELD_CASES` in impl/c/tests/config.c.
+    const POINT_FIELD_CASES: &[(&str, &str)] = &[
+        ("mode = \"cooked\"", "mode must be one of \"raw\", \"typed\" (got 'cooked')"),
+        ("mode = 1", "mode must be one of \"raw\", \"typed\""),
+        (
+            "datatype = \"float\"",
+            "datatype must be one of \"bool\", \"int8\", \"uint8\", \"int16\", \"uint16\", \
+             \"int32\", \"uint32\", \"int64\", \"uint64\", \"float32\", \"float64\", \"string\", \
+             \"bytes\" (got 'float')",
+        ),
+        ("endianness = \"middle\"", "endianness must be one of \"big\", \"little\" (got 'middle')"),
+        ("word_order = \"LITTLE\"", "word_order must be one of \"big\", \"little\" (got 'LITTLE')"),
+        ("word_order = 1", "word_order must be one of \"big\", \"little\""),
+        (
+            "poll_interval = \"abc\"",
+            "poll_interval must be a duration such as \"500ms\", \"2s\" or \"5m\" (got 'abc')",
+        ),
+        (
+            "poll_interval = \"1.5ms\"",
+            "poll_interval must be a duration such as \"500ms\", \"2s\" or \"5m\" (got '1.5ms')",
+        ),
+        ("poll_interval = 5", "poll_interval must be a duration such as \"500ms\", \"2s\" or \"5m\""),
+        ("address = \"holding:1\"", "address must be a table"),
+        (
+            "access = \"bogus\"",
+            "access must be one of \"read\", \"write\", \"read_write\" (got 'bogus')",
+        ),
+        (
+            "access = \"readwrite\"",
+            "access must be one of \"read\", \"write\", \"read_write\" (got 'readwrite')",
+        ),
+        ("unit = 7", "unit must be a string"),
+        ("name = true", "name must be a string"),
+        ("description = [\"pump\"]", "description must be a string"),
+        ("transform = 2", "transform must be a table"),
+        ("transform = { multiplier = \"x\" }", "transform.multiplier must be a number"),
+        (
+            "transform = { decimal_shift = 1.5 }",
+            "transform.decimal_shift must be an integer between -2147483648 and 2147483647",
+        ),
+        (
+            "transform = { decimal_shift = 3000000000 }",
+            "transform.decimal_shift must be an integer between -2147483648 and 2147483647",
+        ),
+        ("meta = \"x\"", "meta must be a table"),
+        ("subscribe = \"yes\"", "subscribe must be true or false"),
+        ("enabled = 0", "enabled must be true or false"),
+    ];
+
+    /// A point field's value is checked at load wherever the definition is written — an inline
+    /// point, a patch of a library point, a switched-off point, the library itself — so a typo is
+    /// refused instead of read as a default (an unknown `access` as `"read"`, an unparseable
+    /// `poll_interval` as the device's). Mirrors `check_invalid_point_field_values` in
+    /// impl/c/tests/config.c.
+    #[test]
+    fn invalid_point_field_values_are_refused() {
+        let dir = Dir::new("field-values");
+        dir.write(
+            "modbus/base.toml",
+            "[library]\nprotocol = \"modbus\"\n\n[[point]]\nid = \"t\"\ndatatype = \"uint16\"\naddress = { address = 1 }\n",
+        );
+        for (field, message) in POINT_FIELD_CASES {
+            let definition = format!("[[device.point]]\nid = \"t\"\n{field}\n");
+            let expected = format!("device 'plc-1': point 't': {message}");
+            let refused = |refs: &str, inline: &str| resolve_in(dir.path(), refs, inline).unwrap_err();
+            assert_eq!(refused("", &definition), expected, "inline: {field}");
+            assert_eq!(refused("\"base\"", &definition), expected, "patch: {field}");
+            if !field.starts_with("enabled") {
+                let disabled = format!("{definition}enabled = false\n");
+                assert_eq!(refused("", &disabled), expected, "disabled: {field}");
+            }
+
+            dir.write(
+                "modbus/bad.toml",
+                &format!("[library]\nprotocol = \"modbus\"\n\n[[point]]\nid = \"t\"\n{field}\n"),
+            );
+            let err = refused("\"bad\"", "");
+            assert!(
+                err.starts_with("point library '") && err.ends_with(&format!(": point 't': {message}")),
+                "library: {field}: {err}"
+            );
+        }
+    }
+
+    /// The device- and connector-level fields the two loaders interpret. Mirrors
+    /// `check_invalid_device_field_values` in impl/c/tests/config.c.
+    #[test]
+    fn invalid_device_and_connector_field_values_are_refused() {
+        let dir = Dir::new("device-field-values");
+        let config = |connector: &str, device: &str| {
+            format!(
+                "[connector]\nprotocol = \"modbus\"\n{connector}\n\
+                 [[device]]\nname = \"plc-1\"\nprotocol_address = {{ unit_id = 1 }}\n{device}\n"
+            )
+        };
+        let modes = "must be one of \"raw\", \"typed\"";
+        let duration = "must be a duration such as \"500ms\", \"2s\" or \"5m\"";
+        for (connector, device, message) in [
+            ("", "default_mode = \"cooked\"", format!("device 'plc-1': default_mode {modes} (got 'cooked')")),
+            ("", "default_mode = 1", format!("device 'plc-1': default_mode {modes}")),
+            ("", "poll_interval = \"abc\"", format!("device 'plc-1': poll_interval {duration} (got 'abc')")),
+            ("", "poll_interval = 5", format!("device 'plc-1': poll_interval {duration}")),
+            (
+                "poll_interval = \"2 fortnights\"",
+                "",
+                format!("[connector] poll_interval {duration} (got '2 fortnights')"),
+            ),
+            ("poll_interval = 5", "", format!("[connector] poll_interval {duration}")),
+        ] {
+            let err = resolve(&config(connector, device), dir.path()).unwrap_err();
+            assert_eq!(err, message);
+        }
+    }
+
+    /// Every value the contract allows still loads — a duration with whitespace or a fraction
+    /// included — and means what it says. Mirrors `check_valid_field_values` in
+    /// impl/c/tests/config.c.
+    #[test]
+    fn valid_field_values_load() {
+        let dir = Dir::new("field-values-ok");
+        let text = r#"
+[connector]
+protocol      = "modbus"
+poll_interval = "1.5s"
+
+[[device]]
+name             = "plc-1"
+protocol_address = { unit_id = 1 }
+default_mode     = "raw"
+poll_interval    = " 250ms "
+
+  [[device.point]]
+  id            = "t"
+  mode          = "typed"
+  datatype      = "float32"
+  endianness    = "little"
+  word_order    = "big"
+  poll_interval = "1.5 m"
+  access        = "write"
+  unit          = ""
+  transform     = { multiplier = 2, divisor = 0.5, decimal_shift = -1, offset = 1 }
+  meta          = {}
+  subscribe     = false
+  address       = { address = 1 }
+"#;
+        let cfg = resolve(text, dir.path()).unwrap();
+        let duration = |s: Option<&str>| s.and_then(crate::config::parse_duration);
+        let device = &cfg.devices[0];
+        assert_eq!(duration(Some(&cfg.connector.poll_interval)), Some(std::time::Duration::from_millis(1500)));
+        assert_eq!(duration(device.poll_interval.as_deref()), Some(std::time::Duration::from_millis(250)));
+        assert_eq!(duration(device.points[0].poll_interval.as_deref()), Some(std::time::Duration::from_secs(90)));
+        assert_eq!(device.points[0].access.as_deref(), Some("write"));
+    }
+
+    /// The datatype names the loader accepts are the names the typed parse accepts.
+    #[test]
+    fn the_datatype_list_is_the_datatype_enum() {
+        for name in DATATYPES {
+            Value::String(name.to_string())
+                .try_into::<crate::model::DataType>()
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
     }
 
     #[test]

@@ -2,8 +2,10 @@
 #include <stdbool.h>
 
 #include <ctype.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -206,26 +208,55 @@ static char *dup_or(const char *s, const char *dflt) {
     return strdup(s ? s : dflt);
 }
 
+/* A thin-edge duration string ("500ms", "2s", "1.5m", "2h") in seconds: a
+ * decimal number (digits, optionally '.' and more digits) followed by an
+ * optional unit, where no unit means seconds and "ms" takes whole milliseconds
+ * only. isspace() whitespace may surround the number and the unit. Anything
+ * else is -1: signs, exponents, inf/nan, and 2^64 seconds or more (what the
+ * Rust SDK's Duration cannot hold). The Rust `parse_duration` accepts exactly
+ * the same strings, because both loaders refuse a poll_interval this rejects
+ * and must refuse the same files. */
 double tdot_duration_parse(const char *s) {
-    if (!s || !*s)
+    if (!s)
         return -1.0;
-    char *end = NULL;
-    double v = strtod(s, &end);
-    if (end == s || v < 0)
+    while (isspace((unsigned char)*s))
+        s++;
+    const char *number = s;
+    while (isdigit((unsigned char)*s))
+        s++;
+    if (s == number)
         return -1.0;
-    while (*end == ' ')
-        end++;
-    if (*end == '\0')
-        return v; /* bare seconds */
-    if (strcmp(end, "ms") == 0)
-        return v / 1000.0;
-    if (strcmp(end, "s") == 0)
-        return v;
-    if (strcmp(end, "m") == 0)
-        return v * 60.0;
-    if (strcmp(end, "h") == 0)
-        return v * 3600.0;
-    return -1.0;
+    bool fraction = *s == '.';
+    if (fraction) {
+        const char *digits = ++s;
+        while (isdigit((unsigned char)*s))
+            s++;
+        if (s == digits)
+            return -1.0;
+    }
+    while (isspace((unsigned char)*s))
+        s++;
+    size_t unit = strlen(s);
+    while (unit && isspace((unsigned char)s[unit - 1]))
+        unit--;
+    double scale;
+    if (unit == 2 && strncmp(s, "ms", 2) == 0) {
+        if (fraction)
+            return -1.0;
+        errno = 0;
+        unsigned long long ms = strtoull(number, NULL, 10);
+        return errno == ERANGE ? -1.0 : (double)ms / 1000.0;
+    } else if (unit == 0 || (unit == 1 && *s == 's')) {
+        scale = 1.0;
+    } else if (unit == 1 && *s == 'm') {
+        scale = 60.0;
+    } else if (unit == 1 && *s == 'h') {
+        scale = 3600.0;
+    } else {
+        return -1.0;
+    }
+    double secs = strtod(number, NULL) * scale;
+    return secs < 18446744073709551616.0 ? secs : -1.0;
 }
 
 /* Convert an arbitrary toml value/table/array to a cJSON node (for the
@@ -375,34 +406,163 @@ static void init_point(tdot_point_t *point, double device_interval,
     tdot_transform_init(&point->transform);
 }
 
+/* ---- field values (contract §3.3) ----------------------------------------
+ * The values a contract-level field may take, as config.schema.json enumerates
+ * them. The Rust loader (impl/rust/crates/sdk/src/library.rs
+ * `check_point_fields`) checks the same fields, in the same order, with the
+ * same messages: the two must reject exactly the same files. */
+static const char *const MODES[] = {"raw", "typed", NULL};
+static const char *const DATATYPES[] = {
+    "bool",   "int8",   "uint8",   "int16",   "uint16", "int32", "uint32",
+    "int64",  "uint64", "float32", "float64", "string", "bytes", NULL};
+static const char *const ORDERS[] = {"big", "little", NULL};
+static const char *const ACCESSES[] = {"read", "write", "read_write", NULL};
+#define DURATION_EXPECTED "a duration such as \"500ms\", \"2s\" or \"5m\""
+
+/* `key` of `tbl`, when present, must be one of `allowed` (NULL-terminated),
+ * spelt exactly. Returns 0, or -1 with `err` filled. */
+static int check_one_of(toml_table_t *tbl, const char *key,
+                        const char *const *allowed, char *err, size_t errlen) {
+    if (!key_present(tbl, key))
+        return 0;
+    toml_datum_t d = toml_string_in(tbl, key);
+    for (const char *const *a = allowed; d.ok && *a; a++)
+        if (strcmp(*a, d.u.s) == 0) {
+            free(d.u.s);
+            return 0;
+        }
+    size_t used = 0;
+    append(err, errlen, &used, "%s must be one of ", key);
+    for (const char *const *a = allowed; *a; a++)
+        append(err, errlen, &used, "%s\"%s\"", a == allowed ? "" : ", ", *a);
+    if (d.ok) {
+        append(err, errlen, &used, " (got '%s')", d.u.s);
+        free(d.u.s);
+    }
+    return -1;
+}
+
+/* `key` of `tbl`, when present, must be a duration tdot_duration_parse accepts. */
+static int check_duration(toml_table_t *tbl, const char *key, char *err,
+                          size_t errlen) {
+    if (!key_present(tbl, key))
+        return 0;
+    toml_datum_t d = toml_string_in(tbl, key);
+    if (!d.ok) {
+        snprintf(err, errlen, "%s must be " DURATION_EXPECTED, key);
+        return -1;
+    }
+    bool ok = tdot_duration_parse(d.u.s) >= 0;
+    if (!ok)
+        snprintf(err, errlen, "%s must be " DURATION_EXPECTED " (got '%s')", key, d.u.s);
+    free(d.u.s);
+    return ok ? 0 : -1;
+}
+
+typedef enum { SHAPE_STRING, SHAPE_BOOL, SHAPE_TABLE, SHAPE_NUMBER, SHAPE_INT32 } shape_t;
+
+/* `key` of `tbl`, when present, must have `shape`; `prefix` qualifies the key
+ * in the message ("transform."). */
+static int check_shape(toml_table_t *tbl, const char *key, shape_t shape,
+                       const char *prefix, char *err, size_t errlen) {
+    if (!key_present(tbl, key))
+        return 0;
+    toml_datum_t d;
+    bool ok = false;
+    const char *expected = "";
+    switch (shape) {
+    case SHAPE_STRING:
+        d = toml_string_in(tbl, key);
+        ok = d.ok;
+        if (d.ok)
+            free(d.u.s);
+        expected = "a string";
+        break;
+    case SHAPE_BOOL:
+        ok = toml_bool_in(tbl, key).ok;
+        expected = "true or false";
+        break;
+    case SHAPE_TABLE:
+        ok = toml_table_in(tbl, key) != NULL;
+        expected = "a table";
+        break;
+    case SHAPE_NUMBER:
+        ok = toml_int_in(tbl, key).ok || toml_double_in(tbl, key).ok;
+        expected = "a number";
+        break;
+    case SHAPE_INT32:
+        d = toml_int_in(tbl, key);
+        ok = d.ok && d.u.i >= INT32_MIN && d.u.i <= INT32_MAX;
+        expected = "an integer between -2147483648 and 2147483647";
+        break;
+    }
+    if (ok)
+        return 0;
+    snprintf(err, errlen, "%s%s must be %s", prefix, key, expected);
+    return -1;
+}
+
+static int check_point_values(toml_table_t *pt, char *err, size_t errlen) {
+    if (check_one_of(pt, "mode", MODES, err, errlen) ||
+        check_one_of(pt, "datatype", DATATYPES, err, errlen) ||
+        check_one_of(pt, "endianness", ORDERS, err, errlen) ||
+        check_one_of(pt, "word_order", ORDERS, err, errlen) ||
+        check_duration(pt, "poll_interval", err, errlen) ||
+        check_shape(pt, "address", SHAPE_TABLE, "", err, errlen) ||
+        check_one_of(pt, "access", ACCESSES, err, errlen) ||
+        check_shape(pt, "unit", SHAPE_STRING, "", err, errlen) ||
+        check_shape(pt, "name", SHAPE_STRING, "", err, errlen) ||
+        check_shape(pt, "description", SHAPE_STRING, "", err, errlen) ||
+        check_shape(pt, "transform", SHAPE_TABLE, "", err, errlen))
+        return -1;
+    toml_table_t *tr = toml_table_in(pt, "transform");
+    if (tr && (check_shape(tr, "multiplier", SHAPE_NUMBER, "transform.", err, errlen) ||
+               check_shape(tr, "divisor", SHAPE_NUMBER, "transform.", err, errlen) ||
+               check_shape(tr, "offset", SHAPE_NUMBER, "transform.", err, errlen) ||
+               check_shape(tr, "decimal_shift", SHAPE_INT32, "transform.", err, errlen)))
+        return -1;
+    if (check_shape(pt, "meta", SHAPE_TABLE, "", err, errlen) ||
+        check_shape(pt, "subscribe", SHAPE_BOOL, "", err, errlen) ||
+        check_shape(pt, "enabled", SHAPE_BOOL, "", err, errlen))
+        return -1;
+    return 0;
+}
+
+/* The values of one point definition's contract fields. Checked on each
+ * definition as written -- inline, or in a point library -- so a wrong value
+ * is reported where it is, even when a later definition replaces it, and
+ * whether or not the point is disabled. Every definition passes through here
+ * before apply_point_table sees it. */
+static int check_point_fields(toml_table_t *pt, char *err, size_t errlen) {
+    char why[512];
+    if (check_point_values(pt, why, sizeof why) == 0)
+        return 0;
+    toml_datum_t id = toml_string_in(pt, "id");
+    snprintf(err, errlen, "point '%s': %s", id.ok ? id.u.s : "<unnamed>", why);
+    if (id.ok)
+        free(id.u.s);
+    return -1;
+}
+
 /* Apply one point definition onto `point`, leaving fields it does not declare
  * as they were. `meta` and `transform` merge key by key; everything else
  * (`address` included) replaces — a half-inherited protocol address is not a
- * meaningful thing, so an override that changes the address states all of it. */
-static int apply_point_table(toml_table_t *pt, tdot_point_t *point, char *err,
-                             size_t errlen) {
+ * meaningful thing, so an override that changes the address states all of it.
+ * `pt` has been through check_point_fields, so every value it declares is
+ * valid. */
+static void apply_point_table(toml_table_t *pt, tdot_point_t *point) {
     toml_datum_t d = toml_string_in(pt, "id");
     if (d.ok) {
         free(point->id);
         point->id = d.u.s;
     }
-    const char *id = point->id ? point->id : "<unnamed>";
 
     /* parse_mode leaves the mode untouched when the key is absent. */
-    if (parse_mode(pt, "mode", &point->mode) < 0) {
-        snprintf(err, errlen, "point %s: invalid mode (expected raw|typed)", id);
-        return -1;
-    }
+    parse_mode(pt, "mode", &point->mode);
 
     d = toml_string_in(pt, "datatype");
     if (d.ok) {
-        tdot_datatype_t dt = tdot_datatype_parse(d.u.s);
-        if (dt == TDOT_DT_NONE) {
-            snprintf(err, errlen, "point %s: unknown datatype '%s'", id, d.u.s);
-            free(d.u.s);
-            return -1;
-        }
-        point->datatype = dt;
+        point->datatype = tdot_datatype_parse(d.u.s);
         free(d.u.s);
     }
 
@@ -411,17 +571,12 @@ static int apply_point_table(toml_table_t *pt, tdot_point_t *point, char *err,
 
     d = toml_string_in(pt, "access");
     if (d.ok) {
-        if (strcmp(d.u.s, "read") == 0)
-            point->access = TDOT_ACCESS_READ;
-        else if (strcmp(d.u.s, "write") == 0)
+        if (strcmp(d.u.s, "write") == 0)
             point->access = TDOT_ACCESS_WRITE;
         else if (strcmp(d.u.s, "read_write") == 0)
             point->access = TDOT_ACCESS_READ | TDOT_ACCESS_WRITE;
-        else {
-            snprintf(err, errlen, "point %s: invalid access '%s'", id, d.u.s);
-            free(d.u.s);
-            return -1;
-        }
+        else
+            point->access = TDOT_ACCESS_READ;
         free(d.u.s);
     }
 
@@ -474,31 +629,19 @@ static int apply_point_table(toml_table_t *pt, tdot_point_t *point, char *err,
     /* §3.3: a replaced scalar like any other, so a later definition can switch
      * a point back on; the point leaves the list only once every definition
      * has been applied (resolve_device_points). */
-    if (key_present(pt, "enabled")) {
-        d = toml_bool_in(pt, "enabled");
-        if (!d.ok) {
-            snprintf(err, errlen, "point %s: enabled must be true or false", id);
-            return -1;
-        }
+    d = toml_bool_in(pt, "enabled");
+    if (d.ok)
         point->enabled = d.u.b;
-    }
 
     d = toml_string_in(pt, "poll_interval");
     if (d.ok) {
-        double v = tdot_duration_parse(d.u.s);
-        if (v < 0) {
-            snprintf(err, errlen, "point %s: invalid poll_interval '%s'", id, d.u.s);
-            free(d.u.s);
-            return -1;
-        }
-        point->poll_interval_s = v;
+        point->poll_interval_s = tdot_duration_parse(d.u.s);
         free(d.u.s);
     }
 
     toml_table_t *address = toml_table_in(pt, "address");
     if (address)
         point->address = address;
-    return 0;
 }
 
 /* Checks that only make sense once every definition of a point has been
@@ -750,7 +893,8 @@ static toml_array_t *library_points(toml_table_t *root, const char *path,
     for (int i = 0; i < n && !dup && !missing_id && !bad_key; i++) {
         toml_table_t *pt = toml_table_at(points, i);
         char why[512];
-        if (pt && check_point_keys(pt, why, sizeof why) != 0) {
+        if (pt && (check_point_keys(pt, why, sizeof why) != 0 ||
+                   check_point_fields(pt, why, sizeof why) != 0)) {
             snprintf(err, errlen, "point library '%s': %s", path, why);
             bad_key = true;
             break;
@@ -879,8 +1023,10 @@ static int merge_point(tdot_device_t *dev, toml_table_t *pt,
         existing = tdot_device_point(dev, id.u.s);
         free(id.u.s);
     }
-    if (existing)
-        return apply_point_table(pt, existing, err, errlen);
+    if (existing) {
+        apply_point_table(pt, existing);
+        return 0;
+    }
 
     tdot_point_t *grown =
         realloc(dev->points, (dev->npoints + 1) * sizeof *dev->points);
@@ -891,7 +1037,8 @@ static int merge_point(tdot_device_t *dev, toml_table_t *pt,
     dev->points = grown;
     tdot_point_t *point = &dev->points[dev->npoints++];
     init_point(point, dev->poll_interval_s, device_mode);
-    return apply_point_table(pt, point, err, errlen);
+    apply_point_table(pt, point);
+    return 0;
 }
 
 /* Free what one point owns; its address is borrowed from a document. */
@@ -912,6 +1059,18 @@ static int resolve_device_points(tdot_config_t *cfg, tdot_device_t *dev,
                                  toml_table_t *dt, toml_table_t *connector,
                                  tdot_mode_t device_mode, const char *base_dir,
                                  char *err, size_t errlen) {
+    /* The device's own definitions are checked before anything is resolved,
+     * as the Rust loader checks them; a library's are checked as it loads. */
+    toml_array_t *own = toml_array_in(dt, "point");
+    for (int j = 0; own && j < toml_array_nelem(own); j++) {
+        toml_table_t *pt = toml_table_at(own, j);
+        char why[768];
+        if (pt && check_point_fields(pt, why, sizeof why) != 0) {
+            snprintf(err, errlen, "device '%s': %s", dev->name, why);
+            return -1;
+        }
+    }
+
     toml_array_t *refs = toml_array_in(dt, "points_from");
     if (!refs) {
         /* A non-array points_from is a mistake worth naming rather than
@@ -1074,15 +1233,13 @@ tdot_config_t *tdot_config_load(const char *path, char *err, size_t errlen) {
     cfg->log_level = d.ok ? d.u.s : strdup("info");
 
     cfg->poll_interval_s = 2.0;
+    if (check_duration(conn, "poll_interval", why, sizeof why) != 0) {
+        snprintf(err, errlen, "%s: [connector] %s", path, why);
+        goto fail;
+    }
     d = toml_string_in(conn, "poll_interval");
     if (d.ok) {
         cfg->poll_interval_s = tdot_duration_parse(d.u.s);
-        if (cfg->poll_interval_s < 0) {
-            snprintf(err, errlen, "%s: invalid connector.poll_interval '%s'",
-                     path, d.u.s);
-            free(d.u.s);
-            goto fail;
-        }
         free(d.u.s);
     }
 
@@ -1211,6 +1368,11 @@ tdot_config_t *tdot_config_load(const char *path, char *err, size_t errlen) {
         }
         tdot_device_t *dev = &cfg->devices[cfg->ndevices++];
         dev->name = d.u.s;
+        if (check_one_of(dt, "default_mode", MODES, why, sizeof why) != 0 ||
+            check_duration(dt, "poll_interval", why, sizeof why) != 0) {
+            snprintf(err, errlen, "%s: device '%s': %s", path, dev->name, why);
+            goto fail;
+        }
         /* The device type (§3.1). Parsed before the libraries are resolved, so a
          * device's own declaration wins over the one its library names. A
          * present-but-unusable value is an error rather than an absent type:
@@ -1233,23 +1395,15 @@ tdot_config_t *tdot_config_load(const char *path, char *err, size_t errlen) {
                      path, dev->name);
             goto fail;
         }
+        /* Both checked above, with the device's other values. */
         tdot_mode_t device_mode = TDOT_MODE_TYPED;
-        if (parse_mode(dt, "default_mode", &device_mode) < 0) {
-            snprintf(err, errlen, "%s: device %s: invalid default_mode", path,
-                     dev->name);
-            goto fail;
-        }
+        parse_mode(dt, "default_mode", &device_mode);
 
         dev->poll_interval_s = cfg->poll_interval_s;
         d = toml_string_in(dt, "poll_interval");
         if (d.ok) {
             dev->poll_interval_s = tdot_duration_parse(d.u.s);
             free(d.u.s);
-            if (dev->poll_interval_s < 0) {
-                snprintf(err, errlen, "%s: device %s: invalid poll_interval",
-                         path, dev->name);
-                goto fail;
-            }
         }
 
         /* Point libraries first (contract §3.4), then the device's own inline

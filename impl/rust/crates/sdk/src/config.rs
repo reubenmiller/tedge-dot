@@ -180,25 +180,37 @@ fn default_mqtt_port() -> u16 {
     1883
 }
 
-/// Parse a thin-edge duration string (`"500ms"`, `"2s"`, `"5m"`). Falls back to seconds for a
-/// bare number. Negative, NaN and overflowing values yield `None` — config values arrive from
-/// hand-edited files and remote `set-config` commands, so this must never panic.
+/// Parse a thin-edge duration string (`"500ms"`, `"2s"`, `"1.5m"`, `"2h"`): a decimal number
+/// (digits, optionally `.` and more digits) followed by an optional unit, where no unit means
+/// seconds and `ms` takes whole milliseconds only. Whitespace — as C's `isspace()` defines it —
+/// may surround the number and the unit. Anything else yields `None`: signs, exponents,
+/// `inf`/`NaN`, and values too large for a [`Duration`].
+///
+/// The C SDK's `tdot_duration_parse` accepts exactly the same strings, because both loaders
+/// refuse a `poll_interval` this rejects and must refuse the same files. Config values arrive
+/// from hand-edited files and remote `set-config` commands, so this must never panic.
 pub fn parse_duration(s: &str) -> Option<Duration> {
-    let s = s.trim();
-    if let Some(rest) = s.strip_suffix("ms") {
-        return rest.trim().parse::<u64>().ok().map(Duration::from_millis);
-    }
-    let (rest, scale) = if let Some(rest) = s.strip_suffix('s') {
-        (rest, 1.0)
-    } else if let Some(rest) = s.strip_suffix('m') {
-        (rest, 60.0)
-    } else if let Some(rest) = s.strip_suffix('h') {
-        (rest, 3600.0)
-    } else {
-        (s, 1.0)
+    let s = crate::library::trim_c(s);
+    let (number, unit) = match s.find(|c: char| !(c.is_ascii_digit() || c == '.')) {
+        Some(at) => (&s[..at], crate::library::trim_c(&s[at..])),
+        None => (s, ""),
     };
-    let secs = rest.trim().parse::<f64>().ok()? * scale;
-    Duration::try_from_secs_f64(secs).ok()
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    let well_formed = match number.split_once('.') {
+        Some((whole, fraction)) => digits(whole) && digits(fraction),
+        None => digits(number),
+    };
+    if !well_formed {
+        return None;
+    }
+    let scale = match unit {
+        "ms" => return number.parse::<u64>().ok().map(Duration::from_millis),
+        "" | "s" => 1.0,
+        "m" => 60.0,
+        "h" => 3600.0,
+        _ => return None,
+    };
+    Duration::try_from_secs_f64(number.parse::<f64>().ok()? * scale).ok()
 }
 
 impl ConnectorConfig {
@@ -269,6 +281,22 @@ stall_timeout = "0"
         assert_eq!(parse_duration("5m"), Some(Duration::from_secs(300)));
         assert_eq!(parse_duration("2h"), Some(Duration::from_secs(7200)));
         assert_eq!(parse_duration("3"), Some(Duration::from_secs(3)));
+        assert_eq!(parse_duration("1.5m"), Some(Duration::from_secs(90)));
+        assert_eq!(parse_duration(" 2 s\t"), Some(Duration::from_secs(2)));
+        assert_eq!(parse_duration("0"), Some(Duration::ZERO));
+    }
+
+    /// The grammar both SDKs share. Mirrors `check_duration_grammar` in impl/c/tests/config.c:
+    /// every string here must get the same verdict from `tdot_duration_parse`.
+    #[test]
+    fn duration_grammar_matches_the_c_sdk() {
+        for bad in [
+            "1.5ms", "1e3s", "+2s", ".5s", "5.s", "0x10", "2 fortnights", "2s x", "s", "ms",
+            "2 3s", "\u{a0}2s", "100000000000000000000s", "18446744073709551616ms",
+        ] {
+            assert_eq!(parse_duration(bad), None, "{bad:?}");
+        }
+        assert_eq!(parse_duration("18446744073709551615ms"), Some(Duration::from_millis(u64::MAX)));
     }
 
     /// Found by the `config_toml` fuzz target: negative/NaN/overflowing durations used to

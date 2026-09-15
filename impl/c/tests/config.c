@@ -1387,7 +1387,192 @@ static void check_disabled_points(void) {
     scratch_free(&s);
 }
 
+/* True when `s` ends with `suffix`. */
+static bool ends_with(const char *s, const char *suffix) {
+    size_t n = strlen(s), m = strlen(suffix);
+    return n >= m && strcmp(s + n - m, suffix) == 0;
+}
+
+/* The duration grammar both SDKs share: the same verdict for every string.
+ * Mirrors config.rs::durations, invalid_durations_are_none_not_panics and
+ * duration_grammar_matches_the_c_sdk. */
+static void check_duration_grammar(void) {
+    static const struct {
+        const char *text;
+        double secs;
+    } good[] = {{"500ms", 0.5}, {"2s", 2},   {"5m", 300},  {"2h", 7200},
+                {"3", 3},       {"1.5m", 90}, {" 2 s\t", 2}, {"0", 0}};
+    for (size_t i = 0; i < sizeof good / sizeof *good; i++)
+        CHECK(tdot_duration_parse(good[i].text) == good[i].secs,
+              "duration '%s' should be %.3fs, got %.3f", good[i].text, good[i].secs,
+              tdot_duration_parse(good[i].text));
+    CHECK(tdot_duration_parse("18446744073709551615ms") > 0,
+          "the largest millisecond count is a duration");
+
+    static const char *const bad[] = {
+        "-66", "-5s", "NaN", "inf", "1e300h", "", "abc", "1.5ms", "1e3s", "+2s",
+        ".5s", "5.s", "0x10", "2 fortnights", "2s x", "s", "ms", "2 3s",
+        "\xc2\xa0" "2s", "100000000000000000000s", "18446744073709551616ms"};
+    for (size_t i = 0; i < sizeof bad / sizeof *bad; i++)
+        CHECK(tdot_duration_parse(bad[i]) < 0, "duration '%s' must be refused, got %.3f",
+              bad[i], tdot_duration_parse(bad[i]));
+}
+
+#define DURATION_MSG "must be a duration such as \"500ms\", \"2s\" or \"5m\""
+
+/* A refused point field value and the message naming it (after `point 't': `).
+ * Mirrors POINT_FIELD_CASES in impl/rust/crates/sdk/src/library.rs, messages
+ * included. */
+static const struct {
+    const char *field, *message;
+} POINT_FIELD_CASES[] = {
+    {"mode = \"cooked\"", "mode must be one of \"raw\", \"typed\" (got 'cooked')"},
+    {"mode = 1", "mode must be one of \"raw\", \"typed\""},
+    {"datatype = \"float\"",
+     "datatype must be one of \"bool\", \"int8\", \"uint8\", \"int16\", \"uint16\", "
+     "\"int32\", \"uint32\", \"int64\", \"uint64\", \"float32\", \"float64\", \"string\", "
+     "\"bytes\" (got 'float')"},
+    {"endianness = \"middle\"", "endianness must be one of \"big\", \"little\" (got 'middle')"},
+    {"word_order = \"LITTLE\"", "word_order must be one of \"big\", \"little\" (got 'LITTLE')"},
+    {"word_order = 1", "word_order must be one of \"big\", \"little\""},
+    {"poll_interval = \"abc\"", "poll_interval " DURATION_MSG " (got 'abc')"},
+    {"poll_interval = \"1.5ms\"", "poll_interval " DURATION_MSG " (got '1.5ms')"},
+    {"poll_interval = 5", "poll_interval " DURATION_MSG},
+    {"address = \"holding:1\"", "address must be a table"},
+    {"access = \"bogus\"",
+     "access must be one of \"read\", \"write\", \"read_write\" (got 'bogus')"},
+    {"access = \"readwrite\"",
+     "access must be one of \"read\", \"write\", \"read_write\" (got 'readwrite')"},
+    {"unit = 7", "unit must be a string"},
+    {"name = true", "name must be a string"},
+    {"description = [\"pump\"]", "description must be a string"},
+    {"transform = 2", "transform must be a table"},
+    {"transform = { multiplier = \"x\" }", "transform.multiplier must be a number"},
+    {"transform = { decimal_shift = 1.5 }",
+     "transform.decimal_shift must be an integer between -2147483648 and 2147483647"},
+    {"transform = { decimal_shift = 3000000000 }",
+     "transform.decimal_shift must be an integer between -2147483648 and 2147483647"},
+    {"meta = \"x\"", "meta must be a table"},
+    {"subscribe = \"yes\"", "subscribe must be true or false"},
+    {"enabled = 0", "enabled must be true or false"},
+};
+
+/* A point field's value is checked at load wherever the definition is written
+ * -- an inline point, a patch of a library point, a switched-off point, the
+ * library itself -- so a typo is refused instead of read as a default (an
+ * unknown access as "read", an unparseable poll_interval as the device's).
+ * Mirrors library.rs::invalid_point_field_values_are_refused. */
+static void check_invalid_point_field_values(void) {
+    scratch_t s;
+    scratch_init(&s);
+    write_file(&s, "modbus/base.toml",
+               "[library]\nprotocol = \"modbus\"\n\n[[point]]\nid = \"t\"\n"
+               "datatype = \"uint16\"\naddress = { address = 1 }\n");
+    static const struct {
+        const char *what, *refs, *tail;
+    } placements[] = {{"inline", "", ""},
+                      {"patch", "\"base\"", ""},
+                      {"disabled", "", "enabled = false\n"}};
+    for (size_t i = 0; i < sizeof POINT_FIELD_CASES / sizeof *POINT_FIELD_CASES; i++) {
+        const char *field = POINT_FIELD_CASES[i].field;
+        const char *message = POINT_FIELD_CASES[i].message;
+        char expected[512], definition[512], err[1024];
+        snprintf(expected, sizeof expected, "device 'plc1': point 't': %s", message);
+        for (size_t p = 0; p < sizeof placements / sizeof *placements; p++) {
+            if (*placements[p].tail && strncmp(field, "enabled", 7) == 0)
+                continue;
+            snprintf(definition, sizeof definition, "[[device.point]]\nid = \"t\"\n%s\n%s",
+                     field, placements[p].tail);
+            tdot_config_t *cfg =
+                load_with_libs(&s, placements[p].refs, definition, err, sizeof err);
+            CHECK(!cfg && strcmp(err, expected) == 0, "%s: %s: expected \"%s\", got: %s",
+                  placements[p].what, field, expected, cfg ? "<loaded>" : err);
+            tdot_config_free(cfg);
+        }
+
+        snprintf(definition, sizeof definition,
+                 "[library]\nprotocol = \"modbus\"\n\n[[point]]\nid = \"t\"\n%s\n", field);
+        write_file(&s, "modbus/bad.toml", definition);
+        char tail[512];
+        snprintf(tail, sizeof tail, ": point 't': %s", message);
+        tdot_config_t *cfg = load_with_libs(&s, "\"bad\"", "", err, sizeof err);
+        CHECK(!cfg && strncmp(err, "point library '", 15) == 0 && ends_with(err, tail),
+              "library: %s: got: %s", field, cfg ? "<loaded>" : err);
+        tdot_config_free(cfg);
+    }
+    scratch_free(&s);
+}
+
+/* The device- and connector-level fields the two loaders interpret. Mirrors
+ * library.rs::invalid_device_and_connector_field_values_are_refused. */
+static void check_invalid_device_field_values(void) {
+    scratch_t s;
+    scratch_init(&s);
+    static const struct {
+        const char *connector, *device, *message;
+    } cases[] = {
+        {"", "default_mode = \"cooked\"\n",
+         "device 'plc-1': default_mode must be one of \"raw\", \"typed\" (got 'cooked')"},
+        {"", "default_mode = 1\n", "device 'plc-1': default_mode must be one of \"raw\", \"typed\""},
+        {"", "poll_interval = \"abc\"\n", "device 'plc-1': poll_interval " DURATION_MSG " (got 'abc')"},
+        {"", "poll_interval = 5\n", "device 'plc-1': poll_interval " DURATION_MSG},
+        {"poll_interval = \"2 fortnights\"\n", "",
+         "[connector] poll_interval " DURATION_MSG " (got '2 fortnights')"},
+        {"poll_interval = 5\n", "", "[connector] poll_interval " DURATION_MSG},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
+        char body[1024];
+        snprintf(body, sizeof body,
+                 "[connector]\nprotocol = \"modbus\"\n%s\n"
+                 "[[device]]\nname = \"plc-1\"\nprotocol_address = { unit_id = 1 }\n%s",
+                 cases[i].connector, cases[i].device);
+        write_file(&s, "etc/modbus.toml", body);
+        char err[1024] = "";
+        tdot_config_t *cfg =
+            tdot_config_load(scratch_path(&s, "etc/modbus.toml"), err, sizeof err);
+        CHECK(!cfg && ends_with(err, cases[i].message), "expected \"...%s\", got: %s",
+              cases[i].message, cfg ? "<loaded>" : err);
+        tdot_config_free(cfg);
+    }
+    scratch_free(&s);
+}
+
+/* Every value the contract allows still loads -- a duration with whitespace or
+ * a fraction included -- and means what it says. Mirrors
+ * library.rs::valid_field_values_load. */
+static void check_valid_field_values(void) {
+    scratch_t s;
+    scratch_init(&s);
+    write_file(&s, "etc/modbus.toml",
+               "[connector]\nprotocol = \"modbus\"\npoll_interval = \"1.5s\"\n\n"
+               "[[device]]\nname = \"plc-1\"\nprotocol_address = { unit_id = 1 }\n"
+               "default_mode = \"raw\"\npoll_interval = \" 250ms \"\n\n"
+               "  [[device.point]]\n  id = \"t\"\n  mode = \"typed\"\n"
+               "  datatype = \"float32\"\n  endianness = \"little\"\n  word_order = \"big\"\n"
+               "  poll_interval = \"1.5 m\"\n  access = \"write\"\n  unit = \"\"\n"
+               "  transform = { multiplier = 2, divisor = 0.5, decimal_shift = -1, offset = 1 }\n"
+               "  meta = {}\n  subscribe = false\n  address = { address = 1 }\n");
+    char err[512] = "";
+    tdot_config_t *cfg = tdot_config_load(scratch_path(&s, "etc/modbus.toml"), err, sizeof err);
+    CHECK(cfg != NULL, "every allowed value must load: %s", err);
+    if (cfg) {
+        tdot_device_t *dev = &cfg->devices[0];
+        tdot_point_t *p = &dev->points[0];
+        CHECK(cfg->poll_interval_s == 1.5, "connector interval 1.5s, got %.3f", cfg->poll_interval_s);
+        CHECK(dev->poll_interval_s == 0.25, "device interval 250ms, got %.3f", dev->poll_interval_s);
+        CHECK(p->poll_interval_s == 90.0, "point interval 1.5m, got %.3f", p->poll_interval_s);
+        CHECK(p->access == TDOT_ACCESS_WRITE, "access write, got %d", (int)p->access);
+        CHECK(p->endianness == TDOT_ORDER_LITTLE, "endianness little");
+        tdot_config_free(cfg);
+    }
+    scratch_free(&s);
+}
+
 int main(void) {
+    check_duration_grammar();
+    check_invalid_point_field_values();
+    check_invalid_device_field_values();
+    check_valid_field_values();
     check_unknown_keys();
     check_disabled_devices();
     check_disabled_points();
