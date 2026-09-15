@@ -115,6 +115,17 @@ default_mode     = "typed"
   address  = { node_id = "ns=2;s=Count" }
   meta     = { parameter = { key = "counters.count" }, measurement = false }
 
+  # Switched off (§3.3): the changing Ticks node, which would push a sample every second if this
+  # point were subscribed, and a key which would be listed in parameter_keys. Neither may happen
+  # — see "A Disabled Point Is Never Subscribed" in tests/opcua_e2e.robot. After cycle_count, so a
+  # regression here cannot reorder the sets the describe test reads.
+  [[device.point]]
+  id       = "ticks_off"
+  enabled  = false
+  datatype = "uint32"
+  address  = { node_id = "ns=2;s=Ticks" }
+  meta     = { parameter = { key = "counters.ticks" } }
+
 # The same simulator again, as a device whose only point is pushed: nothing is ever polled from it.
 # That is the configuration where a lost session used to show nothing at all -- there is no read
 # to fail -- so the push recovery tests check this device too. See "Push-Only Device Recovers

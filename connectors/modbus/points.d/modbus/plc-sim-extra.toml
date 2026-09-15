@@ -25,6 +25,7 @@ unit     = "alias"
 # of a list it does not own. Writable, so it would also be a parameter if it were loaded.
 [[point]]
 id       = "spare_u16"
+name     = "Spare register"
 datatype = "uint16"
 access   = "read_write"
 address  = { table = "holding", address = 3, count = 1 }
