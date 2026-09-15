@@ -243,7 +243,19 @@ that they are objects and that each connector documents and schema-validates the
   point is exempt from the completeness rules (an `address`, a `datatype` when typed), but what
   it does declare MUST still be valid, and `enabled` MUST be a boolean in every definition that
   carries it (default `true`).
-- Duration strings follow the thin-edge convention (`"500ms"`, `"2s"`, `"5m"`).
+- Duration strings follow the thin-edge convention (`"500ms"`, `"2s"`, `"5m"`): a decimal
+  number and an optional unit — `ms` (whole milliseconds), `s`, `m` or `h`; no unit means
+  seconds — optionally surrounded by whitespace. Signs, exponents and `inf`/`nan` are not
+  durations.
+- A field's value MUST be valid wherever the definition is written — inline, as a patch of a
+  library point, in a point library, on a disabled point — and an invalid one MUST be rejected
+  at load, naming the point (or device, or `[connector]`) and the field: an enumerated field
+  (`mode`, `datatype`, `endianness`, `word_order`, `access`, `default_mode`) spelt exactly as
+  listed, a `poll_interval` that is a duration, `unit`/`name`/`description` strings, `address`,
+  `transform` and `meta` tables, `transform` numbers (`decimal_shift` a 32-bit integer), and
+  `subscribe`/`enabled` booleans. A value read leniently instead — an unknown `access` as
+  `"read"`, an unparseable `poll_interval` as the device's — would load and quietly do the
+  wrong thing.
 - A key the contract does not define MUST be rejected — at the top level, in `[connector]` and
   `[mqtt]`, in a `[[device]]` (a disabled one included), in a point, inline or in a point
   library (§3.4), in its `transform`, and in a library's `[library]` — naming the key and the
