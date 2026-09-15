@@ -173,9 +173,9 @@ sudo ip link add dev vcan0 type vcan
 sudo ip link set up vcan0
 
 sudo podman run -d --name canbus-sim  --network host --privileged \
-  --restart unless-stopped ghcr.io/reubenmiller/tedge-dot/canbus-sim:latest
+  --restart unless-stopped ghcr.io/thin-edge/tedge-dot/canbus-sim:latest
 sudo podman run -d --name canopen-sim --network host --privileged \
-  --restart unless-stopped ghcr.io/reubenmiller/tedge-dot/canopen-sim:latest
+  --restart unless-stopped ghcr.io/thin-edge/tedge-dot/canopen-sim:latest
 ```
 
 The simulator images are published for `linux/amd64` and `linux/arm64` only, so
