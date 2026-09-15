@@ -12,16 +12,27 @@ the other. Install **one or the other** — they declare each other as conflicti
 
 ### Install
 
-Download the package for your architecture from the assets below, then:
+Both packages are published to the thin-edge.io **community** repository, which
+also carries their `tedge-parameter-plugin` dependency (it maps the Cumulocity
+*Parameters* tab onto point writes). With that repository set up
+([instructions](https://thin-edge.github.io/thin-edge.io/install/#community-plugins)):
 
 ```sh
 # Debian / Ubuntu
-sudo apt-get install -y ./tedge-dot-rs_*_linux_amd64.deb    # or ./tedge-dot-c_*_amd64.deb
+sudo apt-get install -y tedge-dot-rs                         # or tedge-dot-c
 sudo systemctl status tedge-dot
 
 # RPM distros
-sudo dnf install ./tedge-dot-rs_*_linux_amd64.rpm           # or ./tedge-dot-c_*_amd64.rpm
+sudo dnf install tedge-dot-rs                                # or tedge-dot-c
+```
 
+Or download the package for your architecture from the assets below. The
+package manager still resolves `tedge-parameter-plugin` from the community
+repository, so set that up first:
+
+```sh
+sudo apt-get install -y ./tedge-dot-rs_*_linux_amd64.deb    # or ./tedge-dot-c_*_amd64.deb
+sudo dnf install ./tedge-dot-rs_*_linux_amd64.rpm           # or ./tedge-dot-c_*_amd64.rpm
 ```
 
 > **Alpine:** the attached `.apk` files carry a version string apk-tools rejects

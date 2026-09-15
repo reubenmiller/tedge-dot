@@ -208,6 +208,13 @@ just build                       # writes packages to dist/
 
 ### 2. Install the package on the device
 
+The package depends on
+[tedge-parameter-plugin](https://github.com/thin-edge/tedge-parameter-plugin), which is
+what makes the writable demo points editable from the device's *Parameters* tab in
+Cumulocity. It lives in the thin-edge.io
+[community repository](https://thin-edge.github.io/thin-edge.io/install/#community-plugins),
+so set that up first; the package manager then pulls the plugin in:
+
 ```sh
 sudo apt install ./tedge-dot-rs_*_linux_amd64.deb     # deb
 # sudo dnf install ./tedge-dot-rs_*_linux_amd64.rpm   # rpm
@@ -215,6 +222,9 @@ sudo apt install ./tedge-dot-rs_*_linux_amd64.deb     # deb
 ```
 
 Installing the package:
+
+- pulls in `tedge-parameter-plugin` (and its `tedge-inventory` and `jq` dependencies),
+  which owns the Cumulocity `c8y_ParameterUpdate` operation the parameter flows serve;
 
 - drops one *empty* default config per protocol into `/etc/tedge/plugins/ot/`
   (`modbus.toml`, `opcua.toml`, `canbus.toml`, `canopen.toml`) — no devices

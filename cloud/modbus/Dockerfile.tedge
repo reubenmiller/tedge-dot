@@ -83,7 +83,8 @@ FROM connector-${IMPL}
 # jq + curl are runtime dependencies of the Cloud Fieldbus import shim (c8y-fieldbus-import).
 # tedge-parameter-plugin (thin-edge community repo) owns the c8y_ParameterUpdate operation
 # template; the OT child devices advertise its `parameter_update` command and the flows serve it
-# (see doc/rfc/0003-parameter-writes.md).
+# (see doc/rfc/0003-parameter-writes.md). Both packages depend on it, so the rust stage's .deb
+# install already pulled it in; the c stage installs no package, hence naming it here.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends jq curl tedge-parameter-plugin \
     && rm -rf /var/lib/apt/lists/*
