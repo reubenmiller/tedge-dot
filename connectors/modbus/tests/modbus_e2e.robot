@@ -79,8 +79,15 @@ A Disabled Point Is Left Out Of Its Device
     No Messages On Topic    ${SAMPLE_PREFIX}/spare_u16    timeout=5
     ${write}=    Set Variable    ${CMD_PREFIX}/spare-1
     Publish Message    ${write}    {"status":"init","point":"spare_u16","value":1}    retain=True
-    Wait For Message Containing    ${write}    "status":"failed"    timeout=${SAMPLE_TIMEOUT}
+    ${result}=    Wait For Message Containing    ${write}    "status":"failed"    timeout=${SAMPLE_TIMEOUT}
+    ${reason}=    Get Json Field    ${result}    reason
+    Should Contain    ${reason}    unknown point
     Publish Message    ${write}    ${EMPTY}    retain=True
+    # Labelled in its library, so it would be in point_labels if it were loaded (§7).
+    ${payload}=    Wait For Retained    ${CAPS_TOPIC}    timeout=${READY_TIMEOUT}
+    ${labels}=    Get Json Field    ${payload}    point_labels
+    ${labelled}=    Evaluate    [l["point"] for l in $labels]
+    List Should Not Contain Value    ${labelled}    spare_u16
 
 Capability Descriptor Carries The Point Labels
     [Documentation]    A point's `name`/`description` (§3.1) are static, so they are published
@@ -308,6 +315,8 @@ Parameter Twin Follows The Device
     Dictionary Should Contain Key    ${twin}    temp_u16
     Dictionary Should Contain Key    ${twin}    coil_rw
     Dictionary Should Not Contain Key    ${twin}    level_f32
+    # Writable and in the same set, but switched off (`enabled = false`, §3.3).
+    Dictionary Should Not Contain Key    ${twin}    spare_u16
 
 A Parameter Opted Out Of Measurements Reaches Only Its Twin
     [Documentation]    (flows) `meta.measurement = false` keeps a parameter off the measurement
@@ -426,6 +435,58 @@ A Parameter Removed On Reload Leaves The Twin
     Dictionary Should Not Contain Key    ${values}    twin_only_u16
     Dictionary Should Contain Key    ${values}    temp_u16
 
+A Point Switched Off On Reload Leaves Its Device
+    [Documentation]    `enabled = false` added to a running point (§3.3) is applied on a reload, in
+    ...                place: coil_rw leaves the link status's points, is no longer sampled, a write
+    ...                to it fails as an unknown point, and `describe` stops rendering it — while the
+    ...                service health never goes down. The next tests check the twin, then switch
+    ...                it back on.
+    DeviceLibrary.Execute Command
+    ...    cmd=sed -i '/^ *id *= *"coil_rw"/a enabled = false' /etc/connector.toml
+    Clear Messages
+    DeviceLibrary.Execute Command    cmd=kill -HUP 1
+    Wait Until Keyword Succeeds    ${SAMPLE_TIMEOUT}s    1s    Link Status Should List    coil_rw    ${False}
+    # A poll already in flight when the reload landed may still publish once.
+    Sleep    2s
+    No New Messages On Topic    ${SAMPLE_PREFIX}/coil_rw    timeout=5
+    Publish Message    ${CMD_PREFIX}/coil-off-1    {"status":"init","point":"coil_rw","value":true}    retain=True
+    ${result}=    Wait For Message Containing    ${CMD_PREFIX}/coil-off-1    "status":"failed"    timeout=${SAMPLE_TIMEOUT}
+    ${reason}=    Get Json Field    ${result}    reason
+    Should Contain    ${reason}    unknown point
+    Publish Message    ${CMD_PREFIX}/coil-off-1    ${EMPTY}    retain=True
+    ${output}=    DeviceLibrary.Execute Command
+    ...    cmd=tedge-dot describe -c /etc/connector.toml --compact    strip=${True}
+    ${definition}=    Evaluate    json.loads([l for l in $output.splitlines() if l.startswith("{")][0])    modules=json
+    Dictionary Should Contain Key    ${definition}[jsonSchema][properties]    temp_u16
+    Dictionary Should Not Contain Key    ${definition}[jsonSchema][properties]    coil_rw
+    ${health}=    Get Messages    ${HEALTH_TOPIC}
+    FOR    ${payload}    IN    @{health}
+        Should Not Contain    ${payload}    "down"    the connector restarted instead of reloading
+    END
+
+A Parameter Switched Off On Reload Leaves The Twin
+    [Documentation]    (flows) coil_rw, switched off by the previous test, must leave the parameter twin
+    ...                fragment exactly as a removed point does: the reload republishes the link
+    ...                status without it, and the flow drops what the link no longer lists.
+    [Tags]    flows
+    Wait Until Keyword Succeeds    ${FLOWS_TIMEOUT}s    1s    Parameter Twin Should Have    coil_rw    ${False}
+
+A Point Switched Back On On Reload Returns To Its Device
+    [Documentation]    Replacing `enabled = false` with `enabled = true` switches coil_rw back on at the
+    ...                next reload: it is listed on the link status and sampled again.
+    DeviceLibrary.Execute Command
+    ...    cmd=sed -i 's/^enabled = false$/enabled = true/' /etc/connector.toml
+    Clear Messages
+    DeviceLibrary.Execute Command    cmd=kill -HUP 1
+    Wait Until Keyword Succeeds    ${SAMPLE_TIMEOUT}s    1s    Link Status Should List    coil_rw    ${True}
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/coil_rw    timeout=${SAMPLE_TIMEOUT}
+    Sample Should Be Good    ${payload}
+
+A Parameter Switched Back On On Reload Returns To The Twin
+    [Documentation]    (flows) Once switched back on, coil_rw is on the parameter twin fragment again.
+    [Tags]    flows
+    Wait Until Keyword Succeeds    ${FLOWS_TIMEOUT}s    1s    Parameter Twin Should Have    coil_rw    ${True}
+
 A Connector That Cannot Restart After A Reload Is Retried
     [Documentation]    A reload that needs the connector restarted (a new [mqtt] port), into a
     ...                configuration it cannot run with (nothing listens there), takes the connector
@@ -453,8 +514,8 @@ Defines A Device From A Point Library Alone
     ...                type at runtime without shipping their point lists. The persisted config
     ...                must keep the reference rather than the points it expands to.
     ...
-    ...                Last in the suite: it rewrites /etc/connector.toml and reconnects every
-    ...                device.
+    ...                At the end of the suite, with the test after it: it rewrites
+    ...                /etc/connector.toml and reconnects every device.
     Publish Message    ${MGMT_PREFIX}/define-device/lib-1
     ...    {"status":"init","device":{"name":"plc2","protocol_address":{"transport":"tcp","host":"simulator","port":502,"unit_id":1},"points_from":["plc-sim"]}}
     ...    retain=True
@@ -490,8 +551,58 @@ Defines A Device From A Point Library Alone
     # inline by plc1, so it legitimately appears).
     Should Not Contain    ${settings}    count_u32
 
+A Device Defined With A Disabled Point Keeps It Off
+    [Documentation]    define-device (§6.3) accepts a point switched off with `enabled = false`
+    ...                (§3.3): plc3 inherits the plc-sim library but switches off its level_f32,
+    ...                which stays out of the device as defined — and after a reload of the file the
+    ...                command rewrote. A rewrite that dropped the flag would change the config, and
+    ...                the reload would then start sampling level_f32.
+    ${plc3}=    Set Variable    te/device/plc3/ot/${PROTOCOL}
+    Publish Message    ${MGMT_PREFIX}/define-device/lib-2
+    ...    {"status":"init","device":{"name":"plc3","protocol_address":{"transport":"tcp","host":"simulator","port":502,"unit_id":1},"points_from":["plc-sim"],"point":[{"id":"level_f32","enabled":false}]}}
+    ...    retain=True
+    Wait For Message Containing    ${MGMT_PREFIX}/define-device/lib-2
+    ...    "status":"successful"    timeout=${SAMPLE_TIMEOUT}
+    Wait For Sample    ${plc3}/sample/count_u32    timeout=${SAMPLE_TIMEOUT}
+    ${link}=    Wait For Message Containing    ${plc3}/status/link    "points"    timeout=${SAMPLE_TIMEOUT}
+    ${points}=    Get Json Field    ${link}    points
+    List Should Contain Value    ${points}    count_u32
+    List Should Not Contain Value    ${points}    level_f32
+    ${samples}=    Get Messages    ${plc3}/sample/level_f32
+    Should Be Empty    ${samples}    a disabled point must never be sampled
+    DeviceLibrary.Execute Command    cmd=kill -HUP 1
+    Sleep    3s
+    Wait For Sample    ${plc3}/sample/count_u32    timeout=${SAMPLE_TIMEOUT}
+    No New Messages On Topic    ${plc3}/sample/level_f32    timeout=5
+
 
 *** Keywords ***
+Link Status Should List
+    [Documentation]    The latest link status of the device lists `point` when `listed`, and does not
+    ...                otherwise; temp_u16 is always listed, so an empty list cannot pass.
+    [Arguments]    ${point}    ${listed}
+    ${payload}=    Get Message    ${LINK_TOPIC}
+    ${points}=    Get Json Field    ${payload}    points
+    List Should Contain Value    ${points}    temp_u16
+    IF    ${listed}
+        List Should Contain Value    ${points}    ${point}
+    ELSE
+        List Should Not Contain Value    ${points}    ${point}
+    END
+
+Parameter Twin Should Have
+    [Documentation]    The latest parameter twin fragment carries `key` when `present`, and does not
+    ...                otherwise; temp_u16 is always there, so an empty fragment cannot pass.
+    [Arguments]    ${key}    ${present}
+    ${payload}=    Get Message    ${PARAM_TWIN}
+    ${twin}=    Evaluate    json.loads($payload)    modules=json
+    Dictionary Should Contain Key    ${twin}    temp_u16
+    IF    ${present}
+        Dictionary Should Contain Key    ${twin}    ${key}
+    ELSE
+        Dictionary Should Not Contain Key    ${twin}    ${key}
+    END
+
 Write Describe Configs
     [Documentation]    Fill `dir` with two connector configs: this stack's own (plus the point
     ...                libraries it references by relative path) and a second one declaring another

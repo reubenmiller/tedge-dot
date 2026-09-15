@@ -246,6 +246,24 @@ Push-Only Device Recovers After A Long Server Outage
     ...    timeout=${SAMPLE_TIMEOUT}    since=${mark}
     [Teardown]    Run Keyword And Ignore Error    Start Stack Service    simulator
 
+A Disabled Point Is Never Subscribed
+    [Documentation]    `enabled = false` (§3.3) leaves ticks_off out of opc1 on the push path too:
+    ...                it addresses the Ticks node, which changes every second, so a monitored item
+    ...                for it would push a sample every second — while ticks, on the same node, does.
+    ...                It is not listed on the link status, and its parameter key is not advertised.
+    ${link}=    Wait For Message Containing    ${LINK_TOPIC}    "status":"connected"    timeout=${READY_TIMEOUT}
+    ${points}=    Get Json Field    ${link}    points
+    List Should Contain Value    ${points}    ticks
+    List Should Not Contain Value    ${points}    ticks_off
+    Wait For Sample    ${SAMPLE_PREFIX}/ticks    timeout=${SAMPLE_TIMEOUT}
+    Wait For Sample    ${SAMPLE_PREFIX}/ticks    timeout=${SAMPLE_TIMEOUT}
+    ${samples}=    Get Messages    ${SAMPLE_PREFIX}/ticks_off
+    Should Be Empty    ${samples}    a disabled point must never be sampled
+    ${payload}=    Wait For Retained    ${CAPS_TOPIC}    timeout=${READY_TIMEOUT}
+    ${keys}=    Get Json Field    ${payload}    parameter_keys
+    ${keyed}=    Evaluate    [k["point"] for k in $keys]
+    List Should Not Contain Value    ${keyed}    ticks_off
+
 Pushed Sample Echoes Point Meta
     [Documentation]    The point's free-form meta table (connector config) is echoed verbatim
     ...                in the sample envelope, so flows can apply per-signal behaviour. This
